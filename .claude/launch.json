@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "crpg-engine-dev",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", "remix_-crpg-engine-blueprint"],
+      "port": 5000,
+      "autoPort": true
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "name": "CRPG Engine Feature Demo",
+  "description": "A browser-first CRPG engine toolkit with a neutral feature demo package.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

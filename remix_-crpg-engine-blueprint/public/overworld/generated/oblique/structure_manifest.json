@@ -1,0 +1,392 @@
+{
+  "schema": "crpg_oblique_structure_manifest_v1",
+  "source": "/overworld/generated/oblique/source/structure_atlas_raw.png",
+  "projection": "square_front_top_faces_no_perspective",
+  "edgeBlendPixels": 5,
+  "tiles": [
+    {
+      "id": "rough_fieldstone_wall",
+      "displayName": "Rough Fieldstone Wall",
+      "spriteId": "oblique_structure_rough_fieldstone_wall",
+      "url": "/overworld/generated/oblique/structure/rough_fieldstone_wall.png",
+      "sourceCell": {
+        "row": 0,
+        "col": 0
+      },
+      "sourceBounds": {
+        "left": 11,
+        "top": 11,
+        "width": 300,
+        "height": 300
+      },
+      "output": {
+        "width": 300,
+        "height": 300
+      },
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "dressed_ashlar_wall",
+      "displayName": "Dressed Ashlar Wall",
+      "spriteId": "oblique_structure_dressed_ashlar_wall",
+      "url": "/overworld/generated/oblique/structure/dressed_ashlar_wall.png",
+      "sourceCell": {
+        "row": 0,
+        "col": 1
+      },
+      "sourceBounds": {
+        "left": 321,
+        "top": 11,
+        "width": 300,
+        "height": 300
+      },
+      "output": {
+        "width": 300,
+        "height": 300
+      },
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "red_brick_wall",
+      "displayName": "Red Brick Wall",
+      "spriteId": "oblique_structure_red_brick_wall",
+      "url": "/overworld/generated/oblique/structure/red_brick_wall.png",
+      "sourceCell": {
+        "row": 0,
+        "col": 2
+      },
+      "sourceBounds": {
+        "left": 632,
+        "top": 11,
+        "width": 300,
+        "height": 300
+      },
+      "output": {
+        "width": 300,
+        "height": 300
+      },
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "timber_plaster_wall",
+      "displayName": "Timber And Plaster Wall",
+      "spriteId": "oblique_structure_timber_plaster_wall",
+      "url": "/overworld/generated/oblique/structure/timber_plaster_wall.png",
+      "sourceCell": {
+        "row": 0,
+        "col": 3
+      },
+      "sourceBounds": {
+        "left": 943,
+        "top": 11,
+        "width": 300,
+        "height": 300
+      },
+      "output": {
+        "width": 300,
+        "height": 300
+      },
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "dark_manor_stone_wall",
+      "displayName": "Dark Manor Stone Wall",
+      "spriteId": "oblique_structure_dark_manor_stone_wall",
+      "url": "/overworld/generated/oblique/structure/dark_manor_stone_wall.png",
+      "sourceCell": {
+        "row": 1,
+        "col": 0
+      },
+      "sourceBounds": {
+        "left": 11,
+        "top": 321,
+        "width": 300,
+        "height": 300
+      },
+      "output": {
+        "width": 300,
+        "height": 300
+      },
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "mossy_ruin_wall",
+      "displayName": "Mossy Ruin Wall",
+      "spriteId": "oblique_structure_mossy_ruin_wall",
+      "url": "/overworld/generated/oblique/structure/mossy_ruin_wall.png",
+      "sourceCell": {
+        "row": 1,
+        "col": 1
+      },
+      "sourceBounds": {
+        "left": 321,
+        "top": 321,
+        "width": 300,
+        "height": 300
+      },
+      "output": {
+        "width": 300,
+        "height": 300
+      },
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "reed_wattle_wall",
+      "displayName": "Reed And Wattle Wall",
+      "spriteId": "oblique_structure_reed_wattle_wall",
+      "url": "/overworld/generated/oblique/structure/reed_wattle_wall.png",
+      "sourceCell": {
+        "row": 1,
+        "col": 2
+      },
+      "sourceBounds": {
+        "left": 632,
+        "top": 321,
+        "width": 300,
+        "height": 300
+      },
+      "output": {
+        "width": 300,
+        "height": 300
+      },
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "church_limestone_wall",
+      "displayName": "Church Limestone Wall",
+      "spriteId": "oblique_structure_church_limestone_wall",
+      "url": "/overworld/generated/oblique/structure/church_limestone_wall.png",
+      "sourceCell": {
+        "row": 1,
+        "col": 3
+      },
+      "sourceBounds": {
+        "left": 943,
+        "top": 321,
+        "width": 300,
+        "height": 300
+      },
+      "output": {
+        "width": 300,
+        "height": 300
+      },
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "charred_wall",
+      "displayName": "Charred Wall",
+      "spriteId": "oblique_structure_charred_wall",
+      "url": "/overworld/generated/oblique/structure/charred_wall.png",
+      "sourceCell": {
+        "row": 2,
+        "col": 0
+      },
+      "sourceBounds": {
+        "left": 11,
+        "top": 632,
+        "width": 300,
+        "height": 301
+      },
+      "output": {
+        "width": 300,
+        "height": 301
+      },
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "cellar_block_wall",
+      "displayName": "Cellar Block Wall",
+      "spriteId": "oblique_structure_cellar_block_wall",
+      "url": "/overworld/generated/oblique/structure/cellar_block_wall.png",
+      "sourceCell": {
+        "row": 2,
+        "col": 1
+      },
+      "sourceBounds": {
+        "left": 321,
+        "top": 632,
+        "width": 300,
+        "height": 301
+      },
+      "output": {
+        "width": 300,
+        "height": 301
+      },
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "glass_veined_wall",
+      "displayName": "Glass Veined Wall",
+      "spriteId": "oblique_structure_glass_veined_wall",
+      "url": "/overworld/generated/oblique/structure/glass_veined_wall.png",
+      "sourceCell": {
+        "row": 2,
+        "col": 2
+      },
+      "sourceBounds": {
+        "left": 632,
+        "top": 632,
+        "width": 300,
+        "height": 301
+      },
+      "output": {
+        "width": 300,
+        "height": 301
+      },
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "wooden_plank_wall",
+      "displayName": "Wooden Plank Wall",
+      "spriteId": "oblique_structure_wooden_plank_wall",
+      "url": "/overworld/generated/oblique/structure/wooden_plank_wall.png",
+      "sourceCell": {
+        "row": 2,
+        "col": 3
+      },
+      "sourceBounds": {
+        "left": 943,
+        "top": 632,
+        "width": 300,
+        "height": 301
+      },
+      "output": {
+        "width": 300,
+        "height": 301
+      },
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "simple_wooden_door",
+      "displayName": "Simple Wooden Door",
+      "spriteId": "oblique_structure_simple_wooden_door",
+      "url": "/overworld/generated/oblique/structure/simple_wooden_door.png",
+      "sourceCell": {
+        "row": 3,
+        "col": 0
+      },
+      "sourceBounds": {
+        "left": 11,
+        "top": 943,
+        "width": 300,
+        "height": 300
+      },
+      "output": {
+        "width": 300,
+        "height": 300
+      },
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "iron_banded_door",
+      "displayName": "Iron Banded Door",
+      "spriteId": "oblique_structure_iron_banded_door",
+      "url": "/overworld/generated/oblique/structure/iron_banded_door.png",
+      "sourceCell": {
+        "row": 3,
+        "col": 1
+      },
+      "sourceBounds": {
+        "left": 321,
+        "top": 943,
+        "width": 300,
+        "height": 300
+      },
+      "output": {
+        "width": 300,
+        "height": 300
+      },
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "arched_church_door",
+      "displayName": "Arched Church Door",
+      "spriteId": "oblique_structure_arched_church_door",
+      "url": "/overworld/generated/oblique/structure/arched_church_door.png",
+      "sourceCell": {
+        "row": 3,
+        "col": 2
+      },
+      "sourceBounds": {
+        "left": 632,
+        "top": 943,
+        "width": 300,
+        "height": 300
+      },
+      "output": {
+        "width": 300,
+        "height": 300
+      },
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "dark_manor_gate",
+      "displayName": "Dark Manor Gate",
+      "spriteId": "oblique_structure_dark_manor_gate",
+      "url": "/overworld/generated/oblique/structure/dark_manor_gate.png",
+      "sourceCell": {
+        "row": 3,
+        "col": 3
+      },
+      "sourceBounds": {
+        "left": 943,
+        "top": 943,
+        "width": 300,
+        "height": 300
+      },
+      "output": {
+        "width": 300,
+        "height": 300
+      },
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    }
+  ]
+}

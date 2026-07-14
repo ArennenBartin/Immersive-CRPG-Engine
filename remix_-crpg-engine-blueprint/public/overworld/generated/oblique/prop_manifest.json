@@ -1,0 +1,456 @@
+{
+  "schema": "crpg_oblique_prop_manifest_v1",
+  "source": "/overworld/generated/oblique/source/prop_atlas_raw.png",
+  "projection": "square_grid_front_top_object_cutouts",
+  "alphaCleanup": "border-connected magenta/white background removed",
+  "tiles": [
+    {
+      "id": "wooden_supply_crate",
+      "displayName": "Wooden Supply Crate",
+      "spriteId": "oblique_prop_wooden_supply_crate",
+      "url": "/overworld/generated/oblique/prop/wooden_supply_crate.png",
+      "sourceCell": {
+        "row": 0,
+        "col": 0
+      },
+      "sourceBounds": {
+        "left": 0,
+        "top": 0,
+        "width": 314,
+        "height": 314
+      },
+      "output": {
+        "width": 314,
+        "height": 314
+      },
+      "visibleBounds": {
+        "left": 54,
+        "top": 48,
+        "width": 205,
+        "height": 221
+      },
+      "removedBackgroundPixels": 52921,
+      "removedFringePixels": 2251
+    },
+    {
+      "id": "iron_banded_chest",
+      "displayName": "Iron Banded Chest",
+      "spriteId": "oblique_prop_iron_banded_chest",
+      "url": "/overworld/generated/oblique/prop/iron_banded_chest.png",
+      "sourceCell": {
+        "row": 0,
+        "col": 1
+      },
+      "sourceBounds": {
+        "left": 314,
+        "top": 0,
+        "width": 313,
+        "height": 314
+      },
+      "output": {
+        "width": 313,
+        "height": 314
+      },
+      "visibleBounds": {
+        "left": 43,
+        "top": 60,
+        "width": 225,
+        "height": 205
+      },
+      "removedBackgroundPixels": 53776,
+      "removedFringePixels": 1684
+    },
+    {
+      "id": "wooden_barrel",
+      "displayName": "Wooden Barrel",
+      "spriteId": "oblique_prop_wooden_barrel",
+      "url": "/overworld/generated/oblique/prop/wooden_barrel.png",
+      "sourceCell": {
+        "row": 0,
+        "col": 2
+      },
+      "sourceBounds": {
+        "left": 627,
+        "top": 0,
+        "width": 314,
+        "height": 314
+      },
+      "output": {
+        "width": 314,
+        "height": 314
+      },
+      "visibleBounds": {
+        "left": 59,
+        "top": 40,
+        "width": 176,
+        "height": 233
+      },
+      "removedBackgroundPixels": 61071,
+      "removedFringePixels": 1776
+    },
+    {
+      "id": "open_supply_crate",
+      "displayName": "Open Supply Crate",
+      "spriteId": "oblique_prop_open_supply_crate",
+      "url": "/overworld/generated/oblique/prop/open_supply_crate.png",
+      "sourceCell": {
+        "row": 0,
+        "col": 3
+      },
+      "sourceBounds": {
+        "left": 941,
+        "top": 0,
+        "width": 313,
+        "height": 314
+      },
+      "output": {
+        "width": 313,
+        "height": 314
+      },
+      "visibleBounds": {
+        "left": 36,
+        "top": 68,
+        "width": 234,
+        "height": 199
+      },
+      "removedBackgroundPixels": 56450,
+      "removedFringePixels": 1417
+    },
+    {
+      "id": "alchemy_workstation",
+      "displayName": "Alchemy Workstation",
+      "spriteId": "oblique_prop_alchemy_workstation",
+      "url": "/overworld/generated/oblique/prop/alchemy_workstation.png",
+      "sourceCell": {
+        "row": 1,
+        "col": 0
+      },
+      "sourceBounds": {
+        "left": 0,
+        "top": 314,
+        "width": 314,
+        "height": 313
+      },
+      "output": {
+        "width": 314,
+        "height": 313
+      },
+      "visibleBounds": {
+        "left": 24,
+        "top": 22,
+        "width": 263,
+        "height": 254
+      },
+      "removedBackgroundPixels": 45971,
+      "removedFringePixels": 2040
+    },
+    {
+      "id": "info_terminal",
+      "displayName": "Info Terminal",
+      "spriteId": "oblique_prop_info_terminal",
+      "url": "/overworld/generated/oblique/prop/info_terminal.png",
+      "sourceCell": {
+        "row": 1,
+        "col": 1
+      },
+      "sourceBounds": {
+        "left": 314,
+        "top": 314,
+        "width": 313,
+        "height": 313
+      },
+      "output": {
+        "width": 313,
+        "height": 313
+      },
+      "visibleBounds": {
+        "left": 47,
+        "top": 41,
+        "width": 216,
+        "height": 234
+      },
+      "removedBackgroundPixels": 52288,
+      "removedFringePixels": 1329
+    },
+    {
+      "id": "training_beacon",
+      "displayName": "Training Beacon",
+      "spriteId": "oblique_prop_training_beacon",
+      "url": "/overworld/generated/oblique/prop/training_beacon.png",
+      "sourceCell": {
+        "row": 1,
+        "col": 2
+      },
+      "sourceBounds": {
+        "left": 627,
+        "top": 314,
+        "width": 314,
+        "height": 313
+      },
+      "output": {
+        "width": 314,
+        "height": 313
+      },
+      "visibleBounds": {
+        "left": 64,
+        "top": 35,
+        "width": 153,
+        "height": 241
+      },
+      "removedBackgroundPixels": 74254,
+      "removedFringePixels": 1547
+    },
+    {
+      "id": "wooden_signpost",
+      "displayName": "Wooden Signpost",
+      "spriteId": "oblique_prop_wooden_signpost",
+      "url": "/overworld/generated/oblique/prop/wooden_signpost.png",
+      "sourceCell": {
+        "row": 1,
+        "col": 3
+      },
+      "sourceBounds": {
+        "left": 941,
+        "top": 314,
+        "width": 313,
+        "height": 313
+      },
+      "output": {
+        "width": 313,
+        "height": 313
+      },
+      "visibleBounds": {
+        "left": 77,
+        "top": 35,
+        "width": 151,
+        "height": 241
+      },
+      "removedBackgroundPixels": 81192,
+      "removedFringePixels": 975
+    },
+    {
+      "id": "stone_shrine_plinth",
+      "displayName": "Stone Shrine Plinth",
+      "spriteId": "oblique_prop_stone_shrine_plinth",
+      "url": "/overworld/generated/oblique/prop/stone_shrine_plinth.png",
+      "sourceCell": {
+        "row": 2,
+        "col": 0
+      },
+      "sourceBounds": {
+        "left": 0,
+        "top": 627,
+        "width": 314,
+        "height": 314
+      },
+      "output": {
+        "width": 314,
+        "height": 314
+      },
+      "visibleBounds": {
+        "left": 58,
+        "top": 30,
+        "width": 189,
+        "height": 245
+      },
+      "removedBackgroundPixels": 63445,
+      "removedFringePixels": 2376
+    },
+    {
+      "id": "market_stall_table",
+      "displayName": "Market Stall Table",
+      "spriteId": "oblique_prop_market_stall_table",
+      "url": "/overworld/generated/oblique/prop/market_stall_table.png",
+      "sourceCell": {
+        "row": 2,
+        "col": 1
+      },
+      "sourceBounds": {
+        "left": 314,
+        "top": 627,
+        "width": 313,
+        "height": 314
+      },
+      "output": {
+        "width": 313,
+        "height": 314
+      },
+      "visibleBounds": {
+        "left": 26,
+        "top": 27,
+        "width": 259,
+        "height": 245
+      },
+      "removedBackgroundPixels": 43764,
+      "removedFringePixels": 5601
+    },
+    {
+      "id": "handcart",
+      "displayName": "Handcart",
+      "spriteId": "oblique_prop_handcart",
+      "url": "/overworld/generated/oblique/prop/handcart.png",
+      "sourceCell": {
+        "row": 2,
+        "col": 2
+      },
+      "sourceBounds": {
+        "left": 627,
+        "top": 627,
+        "width": 314,
+        "height": 314
+      },
+      "output": {
+        "width": 314,
+        "height": 314
+      },
+      "visibleBounds": {
+        "left": 36,
+        "top": 55,
+        "width": 202,
+        "height": 227
+      },
+      "removedBackgroundPixels": 66659,
+      "removedFringePixels": 2169
+    },
+    {
+      "id": "rope_pulley_stack",
+      "displayName": "Rope And Pulley Stack",
+      "spriteId": "oblique_prop_rope_pulley_stack",
+      "url": "/overworld/generated/oblique/prop/rope_pulley_stack.png",
+      "sourceCell": {
+        "row": 2,
+        "col": 3
+      },
+      "sourceBounds": {
+        "left": 941,
+        "top": 627,
+        "width": 313,
+        "height": 314
+      },
+      "output": {
+        "width": 313,
+        "height": 314
+      },
+      "visibleBounds": {
+        "left": 25,
+        "top": 42,
+        "width": 239,
+        "height": 225
+      },
+      "removedBackgroundPixels": 64446,
+      "removedFringePixels": 2527
+    },
+    {
+      "id": "tree_stump_cluster",
+      "displayName": "Tree Stump Cluster",
+      "spriteId": "oblique_prop_tree_stump_cluster",
+      "url": "/overworld/generated/oblique/prop/tree_stump_cluster.png",
+      "sourceCell": {
+        "row": 3,
+        "col": 0
+      },
+      "sourceBounds": {
+        "left": 0,
+        "top": 941,
+        "width": 314,
+        "height": 313
+      },
+      "output": {
+        "width": 314,
+        "height": 313
+      },
+      "visibleBounds": {
+        "left": 27,
+        "top": 63,
+        "width": 248,
+        "height": 195
+      },
+      "removedBackgroundPixels": 64794,
+      "removedFringePixels": 2506
+    },
+    {
+      "id": "dead_tree_trunk",
+      "displayName": "Dead Tree Trunk",
+      "spriteId": "oblique_prop_dead_tree_trunk",
+      "url": "/overworld/generated/oblique/prop/dead_tree_trunk.png",
+      "sourceCell": {
+        "row": 3,
+        "col": 1
+      },
+      "sourceBounds": {
+        "left": 314,
+        "top": 941,
+        "width": 313,
+        "height": 313
+      },
+      "output": {
+        "width": 313,
+        "height": 313
+      },
+      "visibleBounds": {
+        "left": 45,
+        "top": 14,
+        "width": 190,
+        "height": 252
+      },
+      "removedBackgroundPixels": 78968,
+      "removedFringePixels": 2435
+    },
+    {
+      "id": "glass_crystal_column",
+      "displayName": "Glass Crystal Column",
+      "spriteId": "oblique_prop_glass_crystal_column",
+      "url": "/overworld/generated/oblique/prop/glass_crystal_column.png",
+      "sourceCell": {
+        "row": 3,
+        "col": 2
+      },
+      "sourceBounds": {
+        "left": 627,
+        "top": 941,
+        "width": 314,
+        "height": 313
+      },
+      "output": {
+        "width": 314,
+        "height": 313
+      },
+      "visibleBounds": {
+        "left": 42,
+        "top": 18,
+        "width": 191,
+        "height": 251
+      },
+      "removedBackgroundPixels": 64764,
+      "removedFringePixels": 1678
+    },
+    {
+      "id": "dark_light_obelisk",
+      "displayName": "Dark-Light Obelisk",
+      "spriteId": "oblique_prop_dark_light_obelisk",
+      "url": "/overworld/generated/oblique/prop/dark_light_obelisk.png",
+      "sourceCell": {
+        "row": 3,
+        "col": 3
+      },
+      "sourceBounds": {
+        "left": 941,
+        "top": 941,
+        "width": 313,
+        "height": 313
+      },
+      "output": {
+        "width": 313,
+        "height": 313
+      },
+      "visibleBounds": {
+        "left": 73,
+        "top": 14,
+        "width": 144,
+        "height": 254
+      },
+      "removedBackgroundPixels": 76916,
+      "removedFringePixels": 890
+    }
+  ]
+}

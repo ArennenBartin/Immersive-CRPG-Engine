@@ -1,0 +1,45 @@
+name: Deploy game to GitHub Pages
+
+on:
+  push:
+    branches: [claude/environment-setup-znyu8m]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pages-deploy
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: remix_-crpg-engine-blueprint
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: remix_-crpg-engine-blueprint/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Static client build only (the Node API server is not needed for Pages).
+      # VITE_BASE must match the repo name so assets resolve at the project sub-path.
+      - name: Build
+        run: npx vite build
+        env:
+          VITE_BASE: /Crpg-Engine-7/
+
+      - name: Publish to gh-pages branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: remix_-crpg-engine-blueprint/dist
+          publish_branch: gh-pages

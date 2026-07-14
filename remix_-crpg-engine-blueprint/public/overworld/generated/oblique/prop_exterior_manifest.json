@@ -1,0 +1,456 @@
+{
+  "schema": "crpg_oblique_prop_manifest_v1",
+  "source": "/overworld/generated/oblique/source/prop_exterior_atlas_raw.png",
+  "projection": "square_grid_front_top_object_cutouts",
+  "alphaCleanup": "border-connected magenta/white background removed",
+  "tiles": [
+    {
+      "id": "wind_bent_young_tree",
+      "displayName": "Wind-Bent Young Tree",
+      "spriteId": "oblique_prop_wind_bent_young_tree",
+      "url": "/overworld/generated/oblique/prop_exterior/wind_bent_young_tree.png",
+      "sourceCell": {
+        "row": 0,
+        "col": 0
+      },
+      "sourceBounds": {
+        "left": 0,
+        "top": 0,
+        "width": 314,
+        "height": 314
+      },
+      "output": {
+        "width": 314,
+        "height": 314
+      },
+      "visibleBounds": {
+        "left": 43,
+        "top": 43,
+        "width": 250,
+        "height": 255
+      },
+      "removedBackgroundPixels": 74785,
+      "removedFringePixels": 4180
+    },
+    {
+      "id": "fallen_log",
+      "displayName": "Fallen Log",
+      "spriteId": "oblique_prop_fallen_log",
+      "url": "/overworld/generated/oblique/prop_exterior/fallen_log.png",
+      "sourceCell": {
+        "row": 0,
+        "col": 1
+      },
+      "sourceBounds": {
+        "left": 314,
+        "top": 0,
+        "width": 313,
+        "height": 314
+      },
+      "output": {
+        "width": 313,
+        "height": 314
+      },
+      "visibleBounds": {
+        "left": 23,
+        "top": 111,
+        "width": 264,
+        "height": 183
+      },
+      "removedBackgroundPixels": 69661,
+      "removedFringePixels": 1819
+    },
+    {
+      "id": "mossy_boulder_cluster",
+      "displayName": "Mossy Boulder Cluster",
+      "spriteId": "oblique_prop_mossy_boulder_cluster",
+      "url": "/overworld/generated/oblique/prop_exterior/mossy_boulder_cluster.png",
+      "sourceCell": {
+        "row": 0,
+        "col": 2
+      },
+      "sourceBounds": {
+        "left": 627,
+        "top": 0,
+        "width": 314,
+        "height": 314
+      },
+      "output": {
+        "width": 314,
+        "height": 314
+      },
+      "visibleBounds": {
+        "left": 13,
+        "top": 100,
+        "width": 265,
+        "height": 200
+      },
+      "removedBackgroundPixels": 61481,
+      "removedFringePixels": 1389
+    },
+    {
+      "id": "thorn_bramble_clump",
+      "displayName": "Thorn Bramble Clump",
+      "spriteId": "oblique_prop_thorn_bramble_clump",
+      "url": "/overworld/generated/oblique/prop_exterior/thorn_bramble_clump.png",
+      "sourceCell": {
+        "row": 0,
+        "col": 3
+      },
+      "sourceBounds": {
+        "left": 941,
+        "top": 0,
+        "width": 313,
+        "height": 314
+      },
+      "output": {
+        "width": 313,
+        "height": 314
+      },
+      "visibleBounds": {
+        "left": 9,
+        "top": 70,
+        "width": 260,
+        "height": 232
+      },
+      "removedBackgroundPixels": 57639,
+      "removedFringePixels": 6772
+    },
+    {
+      "id": "tall_reed_clump",
+      "displayName": "Tall Reed Clump",
+      "spriteId": "oblique_prop_tall_reed_clump",
+      "url": "/overworld/generated/oblique/prop_exterior/tall_reed_clump.png",
+      "sourceCell": {
+        "row": 1,
+        "col": 0
+      },
+      "sourceBounds": {
+        "left": 0,
+        "top": 314,
+        "width": 314,
+        "height": 313
+      },
+      "output": {
+        "width": 314,
+        "height": 313
+      },
+      "visibleBounds": {
+        "left": 55,
+        "top": 21,
+        "width": 212,
+        "height": 261
+      },
+      "removedBackgroundPixels": 67821,
+      "removedFringePixels": 4648
+    },
+    {
+      "id": "stacked_firewood_pile",
+      "displayName": "Stacked Firewood Pile",
+      "spriteId": "oblique_prop_stacked_firewood_pile",
+      "url": "/overworld/generated/oblique/prop_exterior/stacked_firewood_pile.png",
+      "sourceCell": {
+        "row": 1,
+        "col": 1
+      },
+      "sourceBounds": {
+        "left": 314,
+        "top": 314,
+        "width": 313,
+        "height": 313
+      },
+      "output": {
+        "width": 313,
+        "height": 313
+      },
+      "visibleBounds": {
+        "left": 20,
+        "top": 92,
+        "width": 261,
+        "height": 181
+      },
+      "removedBackgroundPixels": 65793,
+      "removedFringePixels": 962
+    },
+    {
+      "id": "hay_bale_stack",
+      "displayName": "Hay Bale Stack",
+      "spriteId": "oblique_prop_hay_bale_stack",
+      "url": "/overworld/generated/oblique/prop_exterior/hay_bale_stack.png",
+      "sourceCell": {
+        "row": 1,
+        "col": 2
+      },
+      "sourceBounds": {
+        "left": 627,
+        "top": 314,
+        "width": 314,
+        "height": 313
+      },
+      "output": {
+        "width": 314,
+        "height": 313
+      },
+      "visibleBounds": {
+        "left": 20,
+        "top": 54,
+        "width": 253,
+        "height": 225
+      },
+      "removedBackgroundPixels": 56861,
+      "removedFringePixels": 1558
+    },
+    {
+      "id": "rain_barrel",
+      "displayName": "Rain Barrel",
+      "spriteId": "oblique_prop_rain_barrel",
+      "url": "/overworld/generated/oblique/prop_exterior/rain_barrel.png",
+      "sourceCell": {
+        "row": 1,
+        "col": 3
+      },
+      "sourceBounds": {
+        "left": 941,
+        "top": 314,
+        "width": 313,
+        "height": 313
+      },
+      "output": {
+        "width": 313,
+        "height": 313
+      },
+      "visibleBounds": {
+        "left": 35,
+        "top": 41,
+        "width": 183,
+        "height": 240
+      },
+      "removedBackgroundPixels": 59954,
+      "removedFringePixels": 641
+    },
+    {
+      "id": "broken_field_fence",
+      "displayName": "Broken Field Fence",
+      "spriteId": "oblique_prop_broken_field_fence",
+      "url": "/overworld/generated/oblique/prop_exterior/broken_field_fence.png",
+      "sourceCell": {
+        "row": 2,
+        "col": 0
+      },
+      "sourceBounds": {
+        "left": 0,
+        "top": 627,
+        "width": 314,
+        "height": 314
+      },
+      "output": {
+        "width": 314,
+        "height": 314
+      },
+      "visibleBounds": {
+        "left": 38,
+        "top": 31,
+        "width": 252,
+        "height": 208
+      },
+      "removedBackgroundPixels": 67648,
+      "removedFringePixels": 5334
+    },
+    {
+      "id": "loose_timber_plank_pile",
+      "displayName": "Loose Timber Plank Pile",
+      "spriteId": "oblique_prop_loose_timber_plank_pile",
+      "url": "/overworld/generated/oblique/prop_exterior/loose_timber_plank_pile.png",
+      "sourceCell": {
+        "row": 2,
+        "col": 1
+      },
+      "sourceBounds": {
+        "left": 314,
+        "top": 627,
+        "width": 313,
+        "height": 314
+      },
+      "output": {
+        "width": 313,
+        "height": 314
+      },
+      "visibleBounds": {
+        "left": 20,
+        "top": 68,
+        "width": 267,
+        "height": 161
+      },
+      "removedBackgroundPixels": 70001,
+      "removedFringePixels": 1429
+    },
+    {
+      "id": "roof_tile_debris_pile",
+      "displayName": "Roof Tile Debris Pile",
+      "spriteId": "oblique_prop_roof_tile_debris_pile",
+      "url": "/overworld/generated/oblique/prop_exterior/roof_tile_debris_pile.png",
+      "sourceCell": {
+        "row": 2,
+        "col": 2
+      },
+      "sourceBounds": {
+        "left": 627,
+        "top": 627,
+        "width": 314,
+        "height": 314
+      },
+      "output": {
+        "width": 314,
+        "height": 314
+      },
+      "visibleBounds": {
+        "left": 18,
+        "top": 61,
+        "width": 255,
+        "height": 171
+      },
+      "removedBackgroundPixels": 70272,
+      "removedFringePixels": 1758
+    },
+    {
+      "id": "chimney_pot_and_bricks",
+      "displayName": "Chimney Pot And Bricks",
+      "spriteId": "oblique_prop_chimney_pot_and_bricks",
+      "url": "/overworld/generated/oblique/prop_exterior/chimney_pot_and_bricks.png",
+      "sourceCell": {
+        "row": 2,
+        "col": 3
+      },
+      "sourceBounds": {
+        "left": 941,
+        "top": 627,
+        "width": 313,
+        "height": 314
+      },
+      "output": {
+        "width": 313,
+        "height": 314
+      },
+      "visibleBounds": {
+        "left": 8,
+        "top": 44,
+        "width": 258,
+        "height": 262
+      },
+      "removedBackgroundPixels": 66654,
+      "removedFringePixels": 2013
+    },
+    {
+      "id": "boarded_window_frame",
+      "displayName": "Boarded Window Frame",
+      "spriteId": "oblique_prop_boarded_window_frame",
+      "url": "/overworld/generated/oblique/prop_exterior/boarded_window_frame.png",
+      "sourceCell": {
+        "row": 3,
+        "col": 0
+      },
+      "sourceBounds": {
+        "left": 0,
+        "top": 941,
+        "width": 314,
+        "height": 313
+      },
+      "output": {
+        "width": 314,
+        "height": 313
+      },
+      "visibleBounds": {
+        "left": 61,
+        "top": 8,
+        "width": 211,
+        "height": 215
+      },
+      "removedBackgroundPixels": 58298,
+      "removedFringePixels": 2301
+    },
+    {
+      "id": "broken_door_boards",
+      "displayName": "Broken Door Boards",
+      "spriteId": "oblique_prop_broken_door_boards",
+      "url": "/overworld/generated/oblique/prop_exterior/broken_door_boards.png",
+      "sourceCell": {
+        "row": 3,
+        "col": 1
+      },
+      "sourceBounds": {
+        "left": 314,
+        "top": 941,
+        "width": 313,
+        "height": 313
+      },
+      "output": {
+        "width": 313,
+        "height": 313
+      },
+      "visibleBounds": {
+        "left": 20,
+        "top": 21,
+        "width": 267,
+        "height": 200
+      },
+      "removedBackgroundPixels": 62532,
+      "removedFringePixels": 1783
+    },
+    {
+      "id": "grave_cairn_marker",
+      "displayName": "Grave Cairn Marker",
+      "spriteId": "oblique_prop_grave_cairn_marker",
+      "url": "/overworld/generated/oblique/prop_exterior/grave_cairn_marker.png",
+      "sourceCell": {
+        "row": 3,
+        "col": 2
+      },
+      "sourceBounds": {
+        "left": 627,
+        "top": 941,
+        "width": 314,
+        "height": 313
+      },
+      "output": {
+        "width": 314,
+        "height": 313
+      },
+      "visibleBounds": {
+        "left": 16,
+        "top": 8,
+        "width": 242,
+        "height": 215
+      },
+      "removedBackgroundPixels": 67567,
+      "removedFringePixels": 1861
+    },
+    {
+      "id": "roadside_shrine_signpost",
+      "displayName": "Roadside Shrine Signpost",
+      "spriteId": "oblique_prop_roadside_shrine_signpost",
+      "url": "/overworld/generated/oblique/prop_exterior/roadside_shrine_signpost.png",
+      "sourceCell": {
+        "row": 3,
+        "col": 3
+      },
+      "sourceBounds": {
+        "left": 941,
+        "top": 941,
+        "width": 313,
+        "height": 313
+      },
+      "output": {
+        "width": 313,
+        "height": 313
+      },
+      "visibleBounds": {
+        "left": 42,
+        "top": 8,
+        "width": 154,
+        "height": 241
+      },
+      "removedBackgroundPixels": 73979,
+      "removedFringePixels": 2275
+    }
+  ]
+}

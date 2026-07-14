@@ -1,0 +1,2485 @@
+{
+  "version": 2,
+  "tileSize": 16,
+  "palette": [
+    {
+      "id": "void",
+      "hex": "#000000",
+      "role": "reserved void/fog only"
+    },
+    {
+      "id": "ink",
+      "hex": "#080A10",
+      "role": "near-black outline, not void"
+    },
+    {
+      "id": "night",
+      "hex": "#101827",
+      "role": "deep blue shadow"
+    },
+    {
+      "id": "slate",
+      "hex": "#243044",
+      "role": "cool dark stone"
+    },
+    {
+      "id": "stone_dark",
+      "hex": "#46515F",
+      "role": "dark masonry"
+    },
+    {
+      "id": "stone",
+      "hex": "#7C8796",
+      "role": "mid masonry"
+    },
+    {
+      "id": "stone_light",
+      "hex": "#CBD4DF",
+      "role": "bright masonry/bone glint"
+    },
+    {
+      "id": "grass_dark",
+      "hex": "#1E4A2D",
+      "role": "deep grass"
+    },
+    {
+      "id": "grass",
+      "hex": "#3D7A3F",
+      "role": "main grass"
+    },
+    {
+      "id": "grass_light",
+      "hex": "#77A85C",
+      "role": "grass highlight"
+    },
+    {
+      "id": "reed",
+      "hex": "#6E7F3C",
+      "role": "fen reed"
+    },
+    {
+      "id": "moss",
+      "hex": "#4B6B4A",
+      "role": "moss/old growth"
+    },
+    {
+      "id": "dirt_dark",
+      "hex": "#4A3324",
+      "role": "mud/earth dark"
+    },
+    {
+      "id": "dirt",
+      "hex": "#7A5635",
+      "role": "earth/wood"
+    },
+    {
+      "id": "road",
+      "hex": "#9B7B52",
+      "role": "packed road"
+    },
+    {
+      "id": "sand",
+      "hex": "#C9A86A",
+      "role": "sand/dry grass"
+    },
+    {
+      "id": "water_dark",
+      "hex": "#17465C",
+      "role": "deep water"
+    },
+    {
+      "id": "water",
+      "hex": "#287B91",
+      "role": "standing water"
+    },
+    {
+      "id": "water_light",
+      "hex": "#67C6D8",
+      "role": "water glint"
+    },
+    {
+      "id": "wood_dark",
+      "hex": "#5B321F",
+      "role": "wood outline"
+    },
+    {
+      "id": "wood",
+      "hex": "#8D5A2B",
+      "role": "wood"
+    },
+    {
+      "id": "skin",
+      "hex": "#C98B63",
+      "role": "faces/hands"
+    },
+    {
+      "id": "bone",
+      "hex": "#E5D6B8",
+      "role": "bone/parchment"
+    },
+    {
+      "id": "red",
+      "hex": "#A13B3B",
+      "role": "blood/cloth warning"
+    },
+    {
+      "id": "orange",
+      "hex": "#D46A2A",
+      "role": "fire body"
+    },
+    {
+      "id": "gold",
+      "hex": "#E3B640",
+      "role": "lamps/locks"
+    },
+    {
+      "id": "purple_dark",
+      "hex": "#3A244E",
+      "role": "fracture dark"
+    },
+    {
+      "id": "purple",
+      "hex": "#7B4FD1",
+      "role": "Grid/fracture violet"
+    },
+    {
+      "id": "cyan",
+      "hex": "#33D6E8",
+      "role": "dark-light cyan"
+    },
+    {
+      "id": "glass",
+      "hex": "#B9F2FF",
+      "role": "Glass bright edge"
+    },
+    {
+      "id": "white",
+      "hex": "#F4F1E8",
+      "role": "eyes/tiny highlights"
+    },
+    {
+      "id": "green_glow",
+      "hex": "#A6F24A",
+      "role": "sickly amplified glow"
+    }
+  ],
+  "tiles": [
+    {
+      "id": "grass",
+      "displayName": "Grass",
+      "group": "base_ground",
+      "style": "grass",
+      "base": "grass",
+      "accent": "grass_light",
+      "spriteId": "ovr_tile_grass",
+      "walkable": true
+    },
+    {
+      "id": "dirt_path",
+      "displayName": "Dirt Path",
+      "group": "base_ground",
+      "style": "road",
+      "base": "dirt",
+      "accent": "sand",
+      "spriteId": "ovr_tile_dirt_path",
+      "walkable": true
+    },
+    {
+      "id": "packed_road",
+      "displayName": "Packed Road",
+      "group": "base_ground",
+      "style": "road",
+      "base": "road",
+      "accent": "dirt_dark",
+      "spriteId": "ovr_tile_packed_road",
+      "walkable": true
+    },
+    {
+      "id": "mud",
+      "displayName": "Mud",
+      "group": "base_ground",
+      "style": "mud",
+      "base": "dirt_dark",
+      "accent": "water_dark",
+      "spriteId": "ovr_tile_mud",
+      "walkable": true,
+      "flags": [
+        "slows"
+      ]
+    },
+    {
+      "id": "sand",
+      "displayName": "Sand",
+      "group": "base_ground",
+      "style": "sand",
+      "base": "sand",
+      "accent": "road",
+      "spriteId": "ovr_tile_sand",
+      "walkable": true
+    },
+    {
+      "id": "bare_stone",
+      "displayName": "Bare Stone",
+      "group": "base_ground",
+      "style": "stone",
+      "base": "stone",
+      "accent": "stone_light",
+      "spriteId": "ovr_tile_bare_stone",
+      "walkable": true
+    },
+    {
+      "id": "moss",
+      "displayName": "Moss",
+      "group": "base_ground",
+      "style": "grass",
+      "base": "moss",
+      "accent": "grass_light",
+      "spriteId": "ovr_tile_moss",
+      "walkable": true
+    },
+    {
+      "id": "grave_road",
+      "displayName": "Grave-Road",
+      "group": "watchfold",
+      "style": "road",
+      "base": "stone_dark",
+      "accent": "bone",
+      "spriteId": "ovr_tile_grave_road",
+      "walkable": true,
+      "flags": [
+        "flagged"
+      ]
+    },
+    {
+      "id": "cairn_stone",
+      "displayName": "Cairn-Stone",
+      "group": "watchfold",
+      "style": "rock",
+      "base": "stone_dark",
+      "accent": "stone_light",
+      "spriteId": "ovr_tile_cairn_stone",
+      "walkable": true
+    },
+    {
+      "id": "turned_earth",
+      "displayName": "Turned Earth",
+      "group": "watchfold",
+      "style": "earth",
+      "base": "dirt_dark",
+      "accent": "dirt",
+      "spriteId": "ovr_tile_turned_earth",
+      "walkable": true
+    },
+    {
+      "id": "threshold_line",
+      "displayName": "Threshold Line",
+      "group": "watchfold",
+      "style": "stone",
+      "base": "slate",
+      "accent": "bone",
+      "spriteId": "ovr_tile_threshold_line",
+      "walkable": true,
+      "flags": [
+        "flagged"
+      ]
+    },
+    {
+      "id": "fen_reed",
+      "displayName": "Fen-Reed",
+      "group": "watchfold",
+      "style": "reed",
+      "base": "moss",
+      "accent": "reed",
+      "spriteId": "ovr_tile_fen_reed",
+      "walkable": true,
+      "flags": [
+        "flammable"
+      ],
+      "chemSeed": {
+        "material": "reed",
+        "flammable": true
+      }
+    },
+    {
+      "id": "standing_water",
+      "displayName": "Standing Water",
+      "group": "watchfold",
+      "style": "water",
+      "base": "water",
+      "accent": "water_light",
+      "spriteId": "ovr_tile_standing_water",
+      "walkable": true,
+      "surfaceTag": "water",
+      "chemSeed": {
+        "saturation": 90
+      }
+    },
+    {
+      "id": "fen_mud",
+      "displayName": "Fen-Mud",
+      "group": "watchfold",
+      "style": "bog",
+      "base": "dirt_dark",
+      "accent": "water_dark",
+      "spriteId": "ovr_tile_fen_mud",
+      "walkable": true,
+      "flags": [
+        "slows"
+      ]
+    },
+    {
+      "id": "tilled_field",
+      "displayName": "Tilled Field",
+      "group": "combe",
+      "style": "field",
+      "base": "dirt",
+      "accent": "sand",
+      "spriteId": "ovr_tile_tilled_field",
+      "walkable": true
+    },
+    {
+      "id": "cobbles",
+      "displayName": "Cobbles",
+      "group": "combe",
+      "style": "stone",
+      "base": "stone",
+      "accent": "stone_light",
+      "spriteId": "ovr_tile_cobbles",
+      "walkable": true
+    },
+    {
+      "id": "churchyard_grass",
+      "displayName": "Churchyard Grass",
+      "group": "combe",
+      "style": "grass",
+      "base": "moss",
+      "accent": "bone",
+      "spriteId": "ovr_tile_churchyard_grass",
+      "walkable": true
+    },
+    {
+      "id": "hollow_floor",
+      "displayName": "Hollow Floor",
+      "group": "combe",
+      "style": "earth",
+      "base": "dirt_dark",
+      "accent": "stone_dark",
+      "spriteId": "ovr_tile_hollow_floor",
+      "walkable": true
+    },
+    {
+      "id": "flagstone",
+      "displayName": "Flagstone",
+      "group": "marrowhouse",
+      "style": "stone",
+      "base": "stone_dark",
+      "accent": "stone",
+      "spriteId": "ovr_tile_flagstone",
+      "walkable": true
+    },
+    {
+      "id": "dark_garden",
+      "displayName": "Dark Garden",
+      "group": "marrowhouse",
+      "style": "garden",
+      "base": "grass_dark",
+      "accent": "purple_dark",
+      "spriteId": "ovr_tile_dark_garden",
+      "walkable": true
+    },
+    {
+      "id": "gravel",
+      "displayName": "Gravel",
+      "group": "marrowhouse",
+      "style": "rock",
+      "base": "stone_dark",
+      "accent": "stone_light",
+      "spriteId": "ovr_tile_gravel",
+      "walkable": true
+    },
+    {
+      "id": "estate_lawn",
+      "displayName": "Estate Lawn",
+      "group": "marrowhouse",
+      "style": "grass",
+      "base": "grass_dark",
+      "accent": "grass_light",
+      "spriteId": "ovr_tile_estate_lawn",
+      "walkable": true
+    },
+    {
+      "id": "forest_floor",
+      "displayName": "Forest Floor",
+      "group": "wilds",
+      "style": "earth",
+      "base": "dirt_dark",
+      "accent": "moss",
+      "spriteId": "ovr_tile_forest_floor",
+      "walkable": true
+    },
+    {
+      "id": "dense_brush",
+      "displayName": "Dense Brush",
+      "group": "wilds",
+      "style": "brush",
+      "base": "grass_dark",
+      "accent": "grass_light",
+      "spriteId": "ovr_tile_dense_brush",
+      "walkable": true,
+      "flags": [
+        "flammable"
+      ],
+      "blocksLos": true,
+      "chemSeed": {
+        "material": "brush",
+        "flammable": true
+      }
+    },
+    {
+      "id": "rock",
+      "displayName": "Rock",
+      "group": "wilds",
+      "style": "rock",
+      "base": "stone_dark",
+      "accent": "stone_light",
+      "spriteId": "ovr_tile_rock",
+      "walkable": true
+    },
+    {
+      "id": "scree",
+      "displayName": "Scree",
+      "group": "wilds",
+      "style": "rock",
+      "base": "slate",
+      "accent": "stone",
+      "spriteId": "ovr_tile_scree",
+      "walkable": true
+    },
+    {
+      "id": "cliff_edge",
+      "displayName": "Cliff Edge",
+      "group": "wilds",
+      "style": "cliff",
+      "base": "stone_dark",
+      "accent": "stone_light",
+      "spriteId": "ovr_tile_cliff_edge",
+      "walkable": false,
+      "blocksMove": true,
+      "flags": [
+        "height"
+      ]
+    },
+    {
+      "id": "river",
+      "displayName": "River",
+      "group": "wilds",
+      "style": "water",
+      "base": "water_dark",
+      "accent": "water_light",
+      "spriteId": "ovr_tile_river",
+      "walkable": false,
+      "blocksMove": true,
+      "surfaceTag": "water",
+      "chemSeed": {
+        "saturation": 100
+      }
+    },
+    {
+      "id": "ford",
+      "displayName": "Ford",
+      "group": "wilds",
+      "style": "water",
+      "base": "water",
+      "accent": "sand",
+      "spriteId": "ovr_tile_ford",
+      "walkable": true,
+      "surfaceTag": "water",
+      "chemSeed": {
+        "saturation": 55
+      }
+    },
+    {
+      "id": "bog",
+      "displayName": "Bog",
+      "group": "wilds",
+      "style": "bog",
+      "base": "moss",
+      "accent": "water_dark",
+      "spriteId": "ovr_tile_bog",
+      "walkable": true,
+      "flags": [
+        "hazard",
+        "slows"
+      ]
+    },
+    {
+      "id": "glass_growth_floor",
+      "displayName": "Glass-Growth Floor",
+      "group": "fracture",
+      "style": "glass",
+      "base": "purple_dark",
+      "accent": "cyan",
+      "spriteId": "ovr_tile_glass_growth_floor",
+      "walkable": true,
+      "flags": [
+        "glass"
+      ]
+    },
+    {
+      "id": "glass_vein",
+      "displayName": "Glass-Vein",
+      "group": "fracture",
+      "style": "glass",
+      "base": "slate",
+      "accent": "glass",
+      "spriteId": "ovr_tile_glass_vein",
+      "walkable": true,
+      "flags": [
+        "glass",
+        "glow"
+      ]
+    },
+    {
+      "id": "fractured_ground",
+      "displayName": "Fractured Ground",
+      "group": "fracture",
+      "style": "fracture",
+      "base": "slate",
+      "accent": "purple",
+      "spriteId": "ovr_tile_fractured_ground",
+      "walkable": true
+    },
+    {
+      "id": "dark_light_pool",
+      "displayName": "Dark-Light Pool",
+      "group": "fracture",
+      "style": "water",
+      "base": "purple_dark",
+      "accent": "cyan",
+      "spriteId": "ovr_tile_dark_light_pool",
+      "walkable": true,
+      "flags": [
+        "glow"
+      ]
+    },
+    {
+      "id": "cavern_rock",
+      "displayName": "Cavern Rock",
+      "group": "fracture",
+      "style": "cavern",
+      "base": "night",
+      "accent": "stone_dark",
+      "spriteId": "ovr_tile_cavern_rock",
+      "walkable": true
+    },
+    {
+      "id": "cramped_tunnel_floor",
+      "displayName": "Cramped Tunnel Floor",
+      "group": "fracture",
+      "style": "earth",
+      "base": "slate",
+      "accent": "purple_dark",
+      "spriteId": "ovr_tile_cramped_tunnel_floor",
+      "walkable": true
+    },
+    {
+      "id": "void",
+      "displayName": "Void",
+      "group": "void",
+      "style": "void",
+      "base": "void",
+      "accent": "void",
+      "spriteId": "ovr_tile_void",
+      "walkable": false,
+      "blocksMove": true,
+      "blocksLos": true,
+      "reservedVoid": true
+    },
+    {
+      "id": "grass_water_edge",
+      "displayName": "Grass/Water Edge",
+      "group": "transitions",
+      "style": "transition",
+      "base": "grass",
+      "accent": "water",
+      "spriteId": "ovr_tile_grass_water_edge",
+      "walkable": true
+    },
+    {
+      "id": "road_grass_edge",
+      "displayName": "Road/Grass Edge",
+      "group": "transitions",
+      "style": "transition",
+      "base": "road",
+      "accent": "grass",
+      "spriteId": "ovr_tile_road_grass_edge",
+      "walkable": true
+    },
+    {
+      "id": "grass_mud_edge",
+      "displayName": "Grass/Mud Edge",
+      "group": "transitions",
+      "style": "transition",
+      "base": "grass",
+      "accent": "dirt_dark",
+      "spriteId": "ovr_tile_grass_mud_edge",
+      "walkable": true
+    },
+    {
+      "id": "stone_grass_edge",
+      "displayName": "Stone/Grass Edge",
+      "group": "transitions",
+      "style": "transition",
+      "base": "stone",
+      "accent": "grass",
+      "spriteId": "ovr_tile_stone_grass_edge",
+      "walkable": true
+    },
+    {
+      "id": "reed_water_edge",
+      "displayName": "Reed/Water Edge",
+      "group": "transitions",
+      "style": "transition",
+      "base": "reed",
+      "accent": "water",
+      "spriteId": "ovr_tile_reed_water_edge",
+      "walkable": true
+    },
+    {
+      "id": "fracture_stone_edge",
+      "displayName": "Fracture/Stone Edge",
+      "group": "transitions",
+      "style": "transition",
+      "base": "purple_dark",
+      "accent": "stone",
+      "spriteId": "ovr_tile_fracture_stone_edge",
+      "walkable": true
+    }
+  ],
+  "objects": [
+    {
+      "id": "barrel",
+      "displayName": "Barrel",
+      "group": "systemic_props",
+      "style": "barrel",
+      "base": "wood",
+      "accent": "gold",
+      "flags": {
+        "pushable": true,
+        "flammable": true,
+        "container": true
+      },
+      "spriteId": "ovr_obj_barrel",
+      "chemSeed": {
+        "material": "wood"
+      }
+    },
+    {
+      "id": "crate",
+      "displayName": "Crate",
+      "group": "systemic_props",
+      "style": "crate",
+      "base": "wood",
+      "accent": "sand",
+      "flags": {
+        "pushable": true,
+        "flammable": true,
+        "fragile": true,
+        "container": true
+      },
+      "spriteId": "ovr_obj_crate",
+      "chemSeed": {
+        "material": "wood"
+      }
+    },
+    {
+      "id": "torch_sconce",
+      "displayName": "Torch/Sconce",
+      "group": "systemic_props",
+      "style": "fire",
+      "base": "wood_dark",
+      "accent": "orange",
+      "flags": {
+        "flammable": true,
+        "blocks_los": false
+      },
+      "spriteId": "ovr_obj_torch_sconce",
+      "chemSeed": {
+        "temperature": 350,
+        "light": 1
+      }
+    },
+    {
+      "id": "brazier",
+      "displayName": "Brazier",
+      "group": "systemic_props",
+      "style": "fire",
+      "base": "stone_dark",
+      "accent": "orange",
+      "flags": {
+        "blocks_move": true
+      },
+      "spriteId": "ovr_obj_brazier",
+      "chemSeed": {
+        "temperature": 400,
+        "light": 1
+      }
+    },
+    {
+      "id": "oil_pool",
+      "displayName": "Oil Pool",
+      "group": "systemic_props",
+      "style": "pool",
+      "base": "dirt_dark",
+      "accent": "orange",
+      "flags": {},
+      "spriteId": "ovr_obj_oil_pool",
+      "chemSeed": {
+        "surface_tag": "oil",
+        "fuel": 90
+      }
+    },
+    {
+      "id": "water_trough",
+      "displayName": "Water Trough",
+      "group": "systemic_props",
+      "style": "trough",
+      "base": "wood",
+      "accent": "water_light",
+      "flags": {
+        "pushable": true,
+        "blocks_move": true
+      },
+      "spriteId": "ovr_obj_water_trough",
+      "chemSeed": {
+        "saturation": 100
+      }
+    },
+    {
+      "id": "lantern",
+      "displayName": "Lantern",
+      "group": "systemic_props",
+      "style": "lantern",
+      "base": "stone_dark",
+      "accent": "gold",
+      "flags": {
+        "fragile": true
+      },
+      "spriteId": "ovr_obj_lantern",
+      "chemSeed": {
+        "light": 1,
+        "fuel": 30
+      }
+    },
+    {
+      "id": "rope",
+      "displayName": "Rope",
+      "group": "systemic_props",
+      "style": "rope",
+      "base": "road",
+      "accent": "sand",
+      "flags": {
+        "flammable": true,
+        "fragile": true
+      },
+      "spriteId": "ovr_obj_rope",
+      "chemSeed": {
+        "material": "fiber"
+      }
+    },
+    {
+      "id": "rope_bridge",
+      "displayName": "Rope Bridge",
+      "group": "systemic_props",
+      "style": "bridge",
+      "base": "wood",
+      "accent": "road",
+      "flags": {
+        "flammable": true,
+        "fragile": true
+      },
+      "spriteId": "ovr_obj_rope_bridge",
+      "chemSeed": {
+        "material": "wood"
+      }
+    },
+    {
+      "id": "lever_mechanism",
+      "displayName": "Lever/Mechanism",
+      "group": "systemic_props",
+      "style": "lever",
+      "base": "wood",
+      "accent": "red",
+      "flags": {
+        "fragile": true,
+        "conductive": true
+      },
+      "spriteId": "ovr_obj_lever_mechanism"
+    },
+    {
+      "id": "tree",
+      "displayName": "Tree",
+      "group": "nature",
+      "style": "tree",
+      "base": "grass_dark",
+      "accent": "grass_light",
+      "flags": {
+        "flammable": true,
+        "fellable": true,
+        "blocks_los": true,
+        "blocks_move": true
+      },
+      "spriteId": "ovr_obj_tree",
+      "chemSeed": {
+        "material": "wood"
+      }
+    },
+    {
+      "id": "stump",
+      "displayName": "Stump",
+      "group": "nature",
+      "style": "stump",
+      "base": "wood",
+      "accent": "sand",
+      "flags": {
+        "flammable": true,
+        "blocks_move": true
+      },
+      "spriteId": "ovr_obj_stump"
+    },
+    {
+      "id": "bush",
+      "displayName": "Bush",
+      "group": "nature",
+      "style": "bush",
+      "base": "grass",
+      "accent": "grass_light",
+      "flags": {
+        "flammable": true,
+        "blocks_los": true
+      },
+      "spriteId": "ovr_obj_bush",
+      "chemSeed": {
+        "material": "brush"
+      }
+    },
+    {
+      "id": "boulder",
+      "displayName": "Boulder",
+      "group": "nature",
+      "style": "boulder",
+      "base": "stone_dark",
+      "accent": "stone_light",
+      "flags": {
+        "pushable": true,
+        "blocks_los": true,
+        "blocks_move": true
+      },
+      "spriteId": "ovr_obj_boulder"
+    },
+    {
+      "id": "fallen_log",
+      "displayName": "Fallen Log",
+      "group": "nature",
+      "style": "log",
+      "base": "wood",
+      "accent": "sand",
+      "flags": {
+        "flammable": true,
+        "blocks_move": true
+      },
+      "spriteId": "ovr_obj_fallen_log"
+    },
+    {
+      "id": "tall_grass",
+      "displayName": "Tall Grass",
+      "group": "nature",
+      "style": "grass",
+      "base": "grass_dark",
+      "accent": "grass_light",
+      "flags": {
+        "flammable": true,
+        "blocks_los": true
+      },
+      "spriteId": "ovr_obj_tall_grass"
+    },
+    {
+      "id": "door",
+      "displayName": "Door",
+      "group": "built",
+      "style": "door",
+      "base": "wood",
+      "accent": "gold",
+      "flags": {
+        "flammable": true,
+        "blocks_los": true,
+        "blocks_move": true
+      },
+      "spriteId": "ovr_obj_door"
+    },
+    {
+      "id": "gate",
+      "displayName": "Gate",
+      "group": "built",
+      "style": "gate",
+      "base": "wood_dark",
+      "accent": "gold",
+      "flags": {
+        "flammable": true,
+        "blocks_los": true,
+        "blocks_move": true
+      },
+      "spriteId": "ovr_obj_gate"
+    },
+    {
+      "id": "fence",
+      "displayName": "Fence",
+      "group": "built",
+      "style": "fence",
+      "base": "wood",
+      "accent": "road",
+      "flags": {
+        "flammable": true,
+        "blocks_move": true
+      },
+      "spriteId": "ovr_obj_fence"
+    },
+    {
+      "id": "wall_segment",
+      "displayName": "Wall Segment",
+      "group": "built",
+      "style": "wall",
+      "base": "stone_dark",
+      "accent": "stone",
+      "flags": {
+        "blocks_los": true,
+        "blocks_move": true
+      },
+      "spriteId": "ovr_obj_wall_segment"
+    },
+    {
+      "id": "window",
+      "displayName": "Window",
+      "group": "built",
+      "style": "window",
+      "base": "wood",
+      "accent": "water_light",
+      "flags": {
+        "fragile": true,
+        "blocks_los": false,
+        "blocks_move": true
+      },
+      "spriteId": "ovr_obj_window"
+    },
+    {
+      "id": "signpost",
+      "displayName": "Signpost",
+      "group": "built",
+      "style": "sign",
+      "base": "wood",
+      "accent": "bone",
+      "flags": {
+        "flammable": true
+      },
+      "spriteId": "ovr_obj_signpost"
+    },
+    {
+      "id": "well",
+      "displayName": "Well",
+      "group": "built",
+      "style": "well",
+      "base": "stone_dark",
+      "accent": "water_light",
+      "flags": {
+        "blocks_move": true
+      },
+      "spriteId": "ovr_obj_well",
+      "chemSeed": {
+        "saturation": 100
+      }
+    },
+    {
+      "id": "market_stall",
+      "displayName": "Market Stall",
+      "group": "built",
+      "style": "stall",
+      "base": "wood",
+      "accent": "red",
+      "flags": {
+        "flammable": true,
+        "fragile": true,
+        "container": true,
+        "blocks_move": true
+      },
+      "spriteId": "ovr_obj_market_stall"
+    },
+    {
+      "id": "shrine",
+      "displayName": "Shrine",
+      "group": "built",
+      "style": "shrine",
+      "base": "stone_light",
+      "accent": "gold",
+      "flags": {
+        "blocks_move": true
+      },
+      "spriteId": "ovr_obj_shrine"
+    },
+    {
+      "id": "chest",
+      "displayName": "Chest",
+      "group": "containers_loot",
+      "style": "container",
+      "base": "wood",
+      "accent": "gold",
+      "flags": {
+        "flammable": true,
+        "fragile": true,
+        "container": true,
+        "blocks_move": true
+      },
+      "spriteId": "ovr_obj_chest"
+    },
+    {
+      "id": "sack",
+      "displayName": "Sack",
+      "group": "containers_loot",
+      "style": "container",
+      "base": "dirt",
+      "accent": "sand",
+      "flags": {
+        "flammable": true,
+        "fragile": true,
+        "container": true
+      },
+      "spriteId": "ovr_obj_sack"
+    },
+    {
+      "id": "urn",
+      "displayName": "Urn",
+      "group": "containers_loot",
+      "style": "container",
+      "base": "stone",
+      "accent": "bone",
+      "flags": {
+        "fragile": true,
+        "container": true
+      },
+      "spriteId": "ovr_obj_urn"
+    },
+    {
+      "id": "reliquary",
+      "displayName": "Reliquary",
+      "group": "containers_loot",
+      "style": "container",
+      "base": "stone_light",
+      "accent": "gold",
+      "flags": {
+        "fragile": true,
+        "container": true,
+        "blocks_move": true
+      },
+      "spriteId": "ovr_obj_reliquary"
+    },
+    {
+      "id": "grave_goods_cairn",
+      "displayName": "Grave-Goods Cairn",
+      "group": "containers_loot",
+      "style": "stone",
+      "base": "stone_dark",
+      "accent": "bone",
+      "flags": {
+        "fragile": true,
+        "container": true,
+        "blocks_move": true
+      },
+      "spriteId": "ovr_obj_grave_goods_cairn"
+    },
+    {
+      "id": "the_stone",
+      "displayName": "The Stone",
+      "group": "story_critical",
+      "style": "stone",
+      "base": "slate",
+      "accent": "cyan",
+      "flags": {
+        "blocks_los": true,
+        "blocks_move": true
+      },
+      "spriteId": "ovr_obj_the_stone",
+      "tags": [
+        "unique",
+        "lens-site",
+        "glow"
+      ]
+    },
+    {
+      "id": "glass_key_mass",
+      "displayName": "Glass Key Mass",
+      "group": "story_critical",
+      "style": "glass",
+      "base": "purple",
+      "accent": "glass",
+      "flags": {
+        "blocks_los": true,
+        "blocks_move": true
+      },
+      "spriteId": "ovr_obj_glass_key_mass",
+      "tags": [
+        "unique",
+        "glass",
+        "glow"
+      ]
+    },
+    {
+      "id": "covenant_marker",
+      "displayName": "Covenant Marker",
+      "group": "story_critical",
+      "style": "stone",
+      "base": "stone_dark",
+      "accent": "gold",
+      "flags": {
+        "blocks_move": true
+      },
+      "spriteId": "ovr_obj_covenant_marker"
+    },
+    {
+      "id": "comfort_shard",
+      "displayName": "Comfort-Shard",
+      "group": "story_critical",
+      "style": "glass",
+      "base": "cyan",
+      "accent": "glass",
+      "flags": {
+        "fragile": true
+      },
+      "spriteId": "ovr_obj_comfort_shard",
+      "tags": [
+        "glass",
+        "glow"
+      ]
+    },
+    {
+      "id": "glass_stalactite",
+      "displayName": "Glass Stalactite",
+      "group": "fracture_objects",
+      "style": "glass",
+      "base": "purple_dark",
+      "accent": "glass",
+      "flags": {
+        "fragile": true,
+        "blocks_los": true
+      },
+      "spriteId": "ovr_obj_glass_stalactite",
+      "tags": [
+        "glass",
+        "ceiling"
+      ]
+    },
+    {
+      "id": "glass_column",
+      "displayName": "Glass Column",
+      "group": "fracture_objects",
+      "style": "column",
+      "base": "purple",
+      "accent": "glass",
+      "flags": {
+        "fragile": true,
+        "blocks_los": true,
+        "blocks_move": true
+      },
+      "spriteId": "ovr_obj_glass_column",
+      "tags": [
+        "glass"
+      ]
+    },
+    {
+      "id": "glass_growth_cluster",
+      "displayName": "Glass-Growth Cluster",
+      "group": "fracture_objects",
+      "style": "glass",
+      "base": "cyan",
+      "accent": "green_glow",
+      "flags": {
+        "fragile": true,
+        "blocks_move": true
+      },
+      "spriteId": "ovr_obj_glass_growth_cluster",
+      "tags": [
+        "glass",
+        "glow"
+      ]
+    },
+    {
+      "id": "dark_light_emitter",
+      "displayName": "Dark-Light Emitter",
+      "group": "fracture_objects",
+      "style": "emitter",
+      "base": "purple_dark",
+      "accent": "cyan",
+      "flags": {
+        "fragile": true,
+        "blocks_move": true
+      },
+      "spriteId": "ovr_obj_dark_light_emitter",
+      "tags": [
+        "glow"
+      ]
+    }
+  ],
+  "entities": [
+    {
+      "id": "brother_aldric",
+      "displayName": "Brother Aldric",
+      "group": "named_story_npcs",
+      "archetype": "companion",
+      "style": "robed",
+      "body": "stone_light",
+      "accent": "gold",
+      "emotionalBaseline": {
+        "reverence": 62,
+        "grief": 48
+      },
+      "schedule": "companion",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_brother_aldric_north_idle",
+          "step": "ovr_ent_brother_aldric_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_brother_aldric_south_idle",
+          "step": "ovr_ent_brother_aldric_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_brother_aldric_east_idle",
+          "step": "ovr_ent_brother_aldric_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_brother_aldric_west_idle",
+          "step": "ovr_ent_brother_aldric_west_step"
+        }
+      }
+    },
+    {
+      "id": "esk",
+      "displayName": "Esk",
+      "group": "named_story_npcs",
+      "archetype": "companion",
+      "style": "humanoid",
+      "body": "road",
+      "accent": "red",
+      "emotionalBaseline": {
+        "valence": 52,
+        "arousal": 58,
+        "attachment": 42
+      },
+      "schedule": "companion",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_esk_north_idle",
+          "step": "ovr_ent_esk_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_esk_south_idle",
+          "step": "ovr_ent_esk_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_esk_east_idle",
+          "step": "ovr_ent_esk_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_esk_west_idle",
+          "step": "ovr_ent_esk_west_step"
+        }
+      }
+    },
+    {
+      "id": "reni",
+      "displayName": "Reni",
+      "group": "named_story_npcs",
+      "archetype": "companion",
+      "style": "humanoid",
+      "body": "purple_dark",
+      "accent": "cyan",
+      "emotionalBaseline": {
+        "attachment": 70,
+        "valence": 44
+      },
+      "schedule": "companion",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_reni_north_idle",
+          "step": "ovr_ent_reni_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_reni_south_idle",
+          "step": "ovr_ent_reni_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_reni_east_idle",
+          "step": "ovr_ent_reni_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_reni_west_idle",
+          "step": "ovr_ent_reni_west_step"
+        }
+      }
+    },
+    {
+      "id": "mother_hollin",
+      "displayName": "Mother Hollin",
+      "group": "named_story_npcs",
+      "archetype": "companion",
+      "style": "robed",
+      "body": "moss",
+      "accent": "bone",
+      "emotionalBaseline": {
+        "grief": 62,
+        "reverence": 45
+      },
+      "schedule": "companion",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_mother_hollin_north_idle",
+          "step": "ovr_ent_mother_hollin_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_mother_hollin_south_idle",
+          "step": "ovr_ent_mother_hollin_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_mother_hollin_east_idle",
+          "step": "ovr_ent_mother_hollin_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_mother_hollin_west_idle",
+          "step": "ovr_ent_mother_hollin_west_step"
+        }
+      }
+    },
+    {
+      "id": "wenna",
+      "displayName": "Wenna",
+      "group": "named_story_npcs",
+      "archetype": "watchfold",
+      "style": "robed",
+      "body": "stone",
+      "accent": "bone",
+      "emotionalBaseline": {
+        "grief": 78,
+        "reverence": 64,
+        "arousal": 28
+      },
+      "schedule": "fixed",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_wenna_north_idle",
+          "step": "ovr_ent_wenna_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_wenna_south_idle",
+          "step": "ovr_ent_wenna_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_wenna_east_idle",
+          "step": "ovr_ent_wenna_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_wenna_west_idle",
+          "step": "ovr_ent_wenna_west_step"
+        }
+      }
+    },
+    {
+      "id": "ode",
+      "displayName": "Ode",
+      "group": "named_story_npcs",
+      "archetype": "watchfold",
+      "style": "humanoid",
+      "body": "dirt",
+      "accent": "bone",
+      "emotionalBaseline": {
+        "grief": 64,
+        "valence": 38
+      },
+      "schedule": "diurnal",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_ode_north_idle",
+          "step": "ovr_ent_ode_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_ode_south_idle",
+          "step": "ovr_ent_ode_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_ode_east_idle",
+          "step": "ovr_ent_ode_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_ode_west_idle",
+          "step": "ovr_ent_ode_west_step"
+        }
+      }
+    },
+    {
+      "id": "maren",
+      "displayName": "Maren",
+      "group": "named_story_npcs",
+      "archetype": "watchfold",
+      "style": "robed",
+      "body": "slate",
+      "accent": "purple",
+      "emotionalBaseline": {
+        "reverence": 72,
+        "grief": 55
+      },
+      "schedule": "fixed",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_maren_north_idle",
+          "step": "ovr_ent_maren_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_maren_south_idle",
+          "step": "ovr_ent_maren_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_maren_east_idle",
+          "step": "ovr_ent_maren_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_maren_west_idle",
+          "step": "ovr_ent_maren_west_step"
+        }
+      }
+    },
+    {
+      "id": "prioress_cael",
+      "displayName": "Prioress Cael",
+      "group": "named_story_npcs",
+      "archetype": "combe",
+      "style": "robed",
+      "body": "bone",
+      "accent": "gold",
+      "emotionalBaseline": {
+        "grief": 72,
+        "reverence": 58
+      },
+      "schedule": "fixed",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_prioress_cael_north_idle",
+          "step": "ovr_ent_prioress_cael_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_prioress_cael_south_idle",
+          "step": "ovr_ent_prioress_cael_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_prioress_cael_east_idle",
+          "step": "ovr_ent_prioress_cael_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_prioress_cael_west_idle",
+          "step": "ovr_ent_prioress_cael_west_step"
+        }
+      }
+    },
+    {
+      "id": "sister_linnet",
+      "displayName": "Sister Linnet",
+      "group": "named_story_npcs",
+      "archetype": "combe",
+      "style": "robed",
+      "body": "grass_light",
+      "accent": "bone",
+      "emotionalBaseline": {
+        "grief": 58,
+        "valence": 48
+      },
+      "schedule": "diurnal",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_sister_linnet_north_idle",
+          "step": "ovr_ent_sister_linnet_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_sister_linnet_south_idle",
+          "step": "ovr_ent_sister_linnet_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_sister_linnet_east_idle",
+          "step": "ovr_ent_sister_linnet_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_sister_linnet_west_idle",
+          "step": "ovr_ent_sister_linnet_west_step"
+        }
+      }
+    },
+    {
+      "id": "doran",
+      "displayName": "Doran",
+      "group": "named_story_npcs",
+      "archetype": "combe",
+      "style": "humanoid",
+      "body": "stone_dark",
+      "accent": "red",
+      "emotionalBaseline": {
+        "grief": 80,
+        "arousal": 22,
+        "valence": 32
+      },
+      "schedule": "fixed",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_doran_north_idle",
+          "step": "ovr_ent_doran_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_doran_south_idle",
+          "step": "ovr_ent_doran_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_doran_east_idle",
+          "step": "ovr_ent_doran_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_doran_west_idle",
+          "step": "ovr_ent_doran_west_step"
+        }
+      }
+    },
+    {
+      "id": "ister",
+      "displayName": "Ister",
+      "group": "named_story_npcs",
+      "archetype": "marrowhouse",
+      "style": "robed",
+      "body": "purple_dark",
+      "accent": "gold",
+      "emotionalBaseline": {
+        "attachment": 76,
+        "reverence": 38
+      },
+      "schedule": "fixed",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_ister_north_idle",
+          "step": "ovr_ent_ister_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_ister_south_idle",
+          "step": "ovr_ent_ister_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_ister_east_idle",
+          "step": "ovr_ent_ister_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_ister_west_idle",
+          "step": "ovr_ent_ister_west_step"
+        }
+      }
+    },
+    {
+      "id": "orla",
+      "displayName": "Orla",
+      "group": "named_story_npcs",
+      "archetype": "marrowhouse",
+      "style": "humanoid",
+      "body": "night",
+      "accent": "cyan",
+      "emotionalBaseline": {
+        "attachment": 68,
+        "arousal": 42
+      },
+      "schedule": "diurnal",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_orla_north_idle",
+          "step": "ovr_ent_orla_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_orla_south_idle",
+          "step": "ovr_ent_orla_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_orla_east_idle",
+          "step": "ovr_ent_orla_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_orla_west_idle",
+          "step": "ovr_ent_orla_west_step"
+        }
+      }
+    },
+    {
+      "id": "girl_at_the_stone",
+      "displayName": "The Girl at the Stone",
+      "group": "named_story_npcs",
+      "archetype": "lens",
+      "style": "child",
+      "body": "white",
+      "accent": "cyan",
+      "emotionalBaseline": {
+        "reverence": 90,
+        "attachment": 88,
+        "arousal": 12
+      },
+      "schedule": "fixed",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_girl_at_the_stone_north_idle",
+          "step": "ovr_ent_girl_at_the_stone_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_girl_at_the_stone_south_idle",
+          "step": "ovr_ent_girl_at_the_stone_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_girl_at_the_stone_east_idle",
+          "step": "ovr_ent_girl_at_the_stone_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_girl_at_the_stone_west_idle",
+          "step": "ovr_ent_girl_at_the_stone_west_step"
+        }
+      }
+    },
+    {
+      "id": "watcher",
+      "displayName": "Watcher",
+      "group": "generic_townsfolk",
+      "archetype": "townsfolk",
+      "style": "humanoid",
+      "body": "stone",
+      "accent": "bone",
+      "emotionalBaseline": {
+        "reverence": 55
+      },
+      "schedule": "diurnal",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_watcher_north_idle",
+          "step": "ovr_ent_watcher_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_watcher_south_idle",
+          "step": "ovr_ent_watcher_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_watcher_east_idle",
+          "step": "ovr_ent_watcher_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_watcher_west_idle",
+          "step": "ovr_ent_watcher_west_step"
+        }
+      }
+    },
+    {
+      "id": "parishioner",
+      "displayName": "Parishioner",
+      "group": "generic_townsfolk",
+      "archetype": "townsfolk",
+      "style": "robed",
+      "body": "grass",
+      "accent": "bone",
+      "emotionalBaseline": {
+        "grief": 58
+      },
+      "schedule": "diurnal",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_parishioner_north_idle",
+          "step": "ovr_ent_parishioner_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_parishioner_south_idle",
+          "step": "ovr_ent_parishioner_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_parishioner_east_idle",
+          "step": "ovr_ent_parishioner_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_parishioner_west_idle",
+          "step": "ovr_ent_parishioner_west_step"
+        }
+      }
+    },
+    {
+      "id": "house_vessel",
+      "displayName": "House Vessel",
+      "group": "generic_townsfolk",
+      "archetype": "townsfolk",
+      "style": "robed",
+      "body": "purple_dark",
+      "accent": "gold",
+      "emotionalBaseline": {
+        "attachment": 72
+      },
+      "schedule": "fixed",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_house_vessel_north_idle",
+          "step": "ovr_ent_house_vessel_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_house_vessel_south_idle",
+          "step": "ovr_ent_house_vessel_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_house_vessel_east_idle",
+          "step": "ovr_ent_house_vessel_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_house_vessel_west_idle",
+          "step": "ovr_ent_house_vessel_west_step"
+        }
+      }
+    },
+    {
+      "id": "villager",
+      "displayName": "Villager",
+      "group": "generic_townsfolk",
+      "archetype": "townsfolk",
+      "style": "humanoid",
+      "body": "dirt",
+      "accent": "sand",
+      "emotionalBaseline": {
+        "valence": 50
+      },
+      "schedule": "diurnal",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_villager_north_idle",
+          "step": "ovr_ent_villager_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_villager_south_idle",
+          "step": "ovr_ent_villager_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_villager_east_idle",
+          "step": "ovr_ent_villager_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_villager_west_idle",
+          "step": "ovr_ent_villager_west_step"
+        }
+      }
+    },
+    {
+      "id": "child",
+      "displayName": "Child",
+      "group": "generic_townsfolk",
+      "archetype": "townsfolk",
+      "style": "child",
+      "body": "road",
+      "accent": "grass_light",
+      "emotionalBaseline": {
+        "valence": 55,
+        "arousal": 55
+      },
+      "schedule": "diurnal",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_child_north_idle",
+          "step": "ovr_ent_child_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_child_south_idle",
+          "step": "ovr_ent_child_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_child_east_idle",
+          "step": "ovr_ent_child_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_child_west_idle",
+          "step": "ovr_ent_child_west_step"
+        }
+      }
+    },
+    {
+      "id": "elder",
+      "displayName": "Elder",
+      "group": "generic_townsfolk",
+      "archetype": "townsfolk",
+      "style": "robed",
+      "body": "stone",
+      "accent": "white",
+      "emotionalBaseline": {
+        "grief": 50,
+        "arousal": 25
+      },
+      "schedule": "diurnal",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_elder_north_idle",
+          "step": "ovr_ent_elder_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_elder_south_idle",
+          "step": "ovr_ent_elder_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_elder_east_idle",
+          "step": "ovr_ent_elder_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_elder_west_idle",
+          "step": "ovr_ent_elder_west_step"
+        }
+      }
+    },
+    {
+      "id": "merchant",
+      "displayName": "Merchant",
+      "group": "generic_townsfolk",
+      "archetype": "townsfolk",
+      "style": "humanoid",
+      "body": "sand",
+      "accent": "gold",
+      "emotionalBaseline": {
+        "valence": 55,
+        "attachment": 45
+      },
+      "schedule": "diurnal",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_merchant_north_idle",
+          "step": "ovr_ent_merchant_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_merchant_south_idle",
+          "step": "ovr_ent_merchant_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_merchant_east_idle",
+          "step": "ovr_ent_merchant_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_merchant_west_idle",
+          "step": "ovr_ent_merchant_west_step"
+        }
+      }
+    },
+    {
+      "id": "guard",
+      "displayName": "Guard",
+      "group": "generic_townsfolk",
+      "archetype": "townsfolk",
+      "style": "guard",
+      "body": "slate",
+      "accent": "red",
+      "emotionalBaseline": {
+        "arousal": 45,
+        "attachment": 55
+      },
+      "schedule": "diurnal",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_guard_north_idle",
+          "step": "ovr_ent_guard_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_guard_south_idle",
+          "step": "ovr_ent_guard_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_guard_east_idle",
+          "step": "ovr_ent_guard_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_guard_west_idle",
+          "step": "ovr_ent_guard_west_step"
+        }
+      }
+    },
+    {
+      "id": "carrion_bird",
+      "displayName": "Carrion-Bird",
+      "group": "wildlife_threats",
+      "archetype": "wildlife",
+      "style": "bird",
+      "body": "slate",
+      "accent": "red",
+      "emotionalBaseline": {
+        "arousal": 55
+      },
+      "schedule": "diurnal",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_carrion_bird_north_idle",
+          "step": "ovr_ent_carrion_bird_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_carrion_bird_south_idle",
+          "step": "ovr_ent_carrion_bird_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_carrion_bird_east_idle",
+          "step": "ovr_ent_carrion_bird_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_carrion_bird_west_idle",
+          "step": "ovr_ent_carrion_bird_west_step"
+        }
+      }
+    },
+    {
+      "id": "fen_thing",
+      "displayName": "Fen-Thing",
+      "group": "wildlife_threats",
+      "archetype": "wildlife",
+      "style": "beast",
+      "body": "moss",
+      "accent": "water_light",
+      "emotionalBaseline": {
+        "arousal": 62,
+        "valence": 35
+      },
+      "schedule": "nocturnal",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_fen_thing_north_idle",
+          "step": "ovr_ent_fen_thing_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_fen_thing_south_idle",
+          "step": "ovr_ent_fen_thing_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_fen_thing_east_idle",
+          "step": "ovr_ent_fen_thing_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_fen_thing_west_idle",
+          "step": "ovr_ent_fen_thing_west_step"
+        }
+      }
+    },
+    {
+      "id": "wolf_hound",
+      "displayName": "Wolf/Hound",
+      "group": "wildlife_threats",
+      "archetype": "wildlife",
+      "style": "beast",
+      "body": "stone_dark",
+      "accent": "white",
+      "emotionalBaseline": {
+        "arousal": 66,
+        "valence": 38
+      },
+      "schedule": "nocturnal",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_wolf_hound_north_idle",
+          "step": "ovr_ent_wolf_hound_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_wolf_hound_south_idle",
+          "step": "ovr_ent_wolf_hound_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_wolf_hound_east_idle",
+          "step": "ovr_ent_wolf_hound_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_wolf_hound_west_idle",
+          "step": "ovr_ent_wolf_hound_west_step"
+        }
+      }
+    },
+    {
+      "id": "boar",
+      "displayName": "Boar",
+      "group": "wildlife_threats",
+      "archetype": "wildlife",
+      "style": "boar",
+      "body": "dirt_dark",
+      "accent": "bone",
+      "emotionalBaseline": {
+        "arousal": 70
+      },
+      "schedule": "diurnal",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_boar_north_idle",
+          "step": "ovr_ent_boar_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_boar_south_idle",
+          "step": "ovr_ent_boar_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_boar_east_idle",
+          "step": "ovr_ent_boar_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_boar_west_idle",
+          "step": "ovr_ent_boar_west_step"
+        }
+      }
+    },
+    {
+      "id": "grief_wraith",
+      "displayName": "Grief-Wraith",
+      "group": "grid_amplified_threats",
+      "archetype": "grid_threat",
+      "style": "wraith",
+      "body": "purple",
+      "accent": "cyan",
+      "emotionalBaseline": {
+        "grief": 90,
+        "valence": 18,
+        "arousal": 28
+      },
+      "schedule": "nocturnal",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_grief_wraith_north_idle",
+          "step": "ovr_ent_grief_wraith_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_grief_wraith_south_idle",
+          "step": "ovr_ent_grief_wraith_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_grief_wraith_east_idle",
+          "step": "ovr_ent_grief_wraith_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_grief_wraith_west_idle",
+          "step": "ovr_ent_grief_wraith_west_step"
+        }
+      }
+    },
+    {
+      "id": "hollowed_echo",
+      "displayName": "Hollowed-Echo",
+      "group": "grid_amplified_threats",
+      "archetype": "grid_threat",
+      "style": "echo",
+      "body": "stone_light",
+      "accent": "purple",
+      "emotionalBaseline": {
+        "reverence": 85,
+        "arousal": 12
+      },
+      "schedule": "fixed",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_hollowed_echo_north_idle",
+          "step": "ovr_ent_hollowed_echo_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_hollowed_echo_south_idle",
+          "step": "ovr_ent_hollowed_echo_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_hollowed_echo_east_idle",
+          "step": "ovr_ent_hollowed_echo_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_hollowed_echo_west_idle",
+          "step": "ovr_ent_hollowed_echo_west_step"
+        }
+      }
+    },
+    {
+      "id": "amplified_beast",
+      "displayName": "Amplified-Beast",
+      "group": "grid_amplified_threats",
+      "archetype": "grid_threat",
+      "style": "beast",
+      "body": "purple_dark",
+      "accent": "green_glow",
+      "emotionalBaseline": {
+        "arousal": 82,
+        "valence": 20
+      },
+      "schedule": "nocturnal",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_amplified_beast_north_idle",
+          "step": "ovr_ent_amplified_beast_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_amplified_beast_south_idle",
+          "step": "ovr_ent_amplified_beast_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_amplified_beast_east_idle",
+          "step": "ovr_ent_amplified_beast_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_amplified_beast_west_idle",
+          "step": "ovr_ent_amplified_beast_west_step"
+        }
+      }
+    },
+    {
+      "id": "ravener",
+      "displayName": "Ravener",
+      "group": "grid_amplified_threats",
+      "archetype": "grid_threat",
+      "style": "beast",
+      "body": "red",
+      "accent": "purple",
+      "emotionalBaseline": {
+        "attachment": 82,
+        "arousal": 78,
+        "valence": 18
+      },
+      "schedule": "nocturnal",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_ravener_north_idle",
+          "step": "ovr_ent_ravener_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_ravener_south_idle",
+          "step": "ovr_ent_ravener_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_ravener_east_idle",
+          "step": "ovr_ent_ravener_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_ravener_west_idle",
+          "step": "ovr_ent_ravener_west_step"
+        }
+      }
+    },
+    {
+      "id": "screaming_crawler",
+      "displayName": "Screaming-Faced Crawler",
+      "group": "alderamontican_horrors",
+      "archetype": "fracture_horror",
+      "style": "crawler",
+      "body": "night",
+      "accent": "skin",
+      "emotionalBaseline": {
+        "arousal": 75,
+        "valence": 10
+      },
+      "schedule": "fracture",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_screaming_crawler_north_idle",
+          "step": "ovr_ent_screaming_crawler_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_screaming_crawler_south_idle",
+          "step": "ovr_ent_screaming_crawler_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_screaming_crawler_east_idle",
+          "step": "ovr_ent_screaming_crawler_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_screaming_crawler_west_idle",
+          "step": "ovr_ent_screaming_crawler_west_step"
+        }
+      }
+    },
+    {
+      "id": "screaming_tall",
+      "displayName": "Tall Screaming-Faced Thing",
+      "group": "alderamontican_horrors",
+      "archetype": "fracture_horror",
+      "style": "tall",
+      "body": "purple_dark",
+      "accent": "skin",
+      "emotionalBaseline": {
+        "reverence": 20,
+        "arousal": 70
+      },
+      "schedule": "fracture",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_screaming_tall_north_idle",
+          "step": "ovr_ent_screaming_tall_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_screaming_tall_south_idle",
+          "step": "ovr_ent_screaming_tall_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_screaming_tall_east_idle",
+          "step": "ovr_ent_screaming_tall_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_screaming_tall_west_idle",
+          "step": "ovr_ent_screaming_tall_west_step"
+        }
+      }
+    },
+    {
+      "id": "screaming_swarm",
+      "displayName": "Screaming-Faced Swarm",
+      "group": "alderamontican_horrors",
+      "archetype": "fracture_horror",
+      "style": "swarm",
+      "body": "slate",
+      "accent": "skin",
+      "emotionalBaseline": {
+        "arousal": 85,
+        "valence": 5
+      },
+      "schedule": "fracture",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_screaming_swarm_north_idle",
+          "step": "ovr_ent_screaming_swarm_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_screaming_swarm_south_idle",
+          "step": "ovr_ent_screaming_swarm_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_screaming_swarm_east_idle",
+          "step": "ovr_ent_screaming_swarm_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_screaming_swarm_west_idle",
+          "step": "ovr_ent_screaming_swarm_west_step"
+        }
+      }
+    },
+    {
+      "id": "false_person",
+      "displayName": "False-Person",
+      "group": "alderamontican_horrors",
+      "archetype": "fracture_horror",
+      "style": "humanoid",
+      "body": "skin",
+      "accent": "red",
+      "emotionalBaseline": {
+        "attachment": 10,
+        "arousal": 60
+      },
+      "schedule": "fracture",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_false_person_north_idle",
+          "step": "ovr_ent_false_person_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_false_person_south_idle",
+          "step": "ovr_ent_false_person_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_false_person_east_idle",
+          "step": "ovr_ent_false_person_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_false_person_west_idle",
+          "step": "ovr_ent_false_person_west_step"
+        }
+      }
+    },
+    {
+      "id": "face_in_the_joint",
+      "displayName": "Face in the Joint",
+      "group": "alderamontican_horrors",
+      "archetype": "fracture_horror",
+      "style": "horror",
+      "body": "wood_dark",
+      "accent": "skin",
+      "emotionalBaseline": {
+        "grief": 65,
+        "arousal": 65
+      },
+      "schedule": "fracture",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_face_in_the_joint_north_idle",
+          "step": "ovr_ent_face_in_the_joint_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_face_in_the_joint_south_idle",
+          "step": "ovr_ent_face_in_the_joint_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_face_in_the_joint_east_idle",
+          "step": "ovr_ent_face_in_the_joint_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_face_in_the_joint_west_idle",
+          "step": "ovr_ent_face_in_the_joint_west_step"
+        }
+      }
+    },
+    {
+      "id": "lanternless",
+      "displayName": "Lanternless",
+      "group": "fracture_faction",
+      "archetype": "fracture_inhabitant",
+      "style": "robed",
+      "body": "night",
+      "accent": "gold",
+      "emotionalBaseline": {
+        "reverence": 18,
+        "arousal": 40
+      },
+      "schedule": "fracture",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_lanternless_north_idle",
+          "step": "ovr_ent_lanternless_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_lanternless_south_idle",
+          "step": "ovr_ent_lanternless_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_lanternless_east_idle",
+          "step": "ovr_ent_lanternless_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_lanternless_west_idle",
+          "step": "ovr_ent_lanternless_west_step"
+        }
+      }
+    },
+    {
+      "id": "uncounted",
+      "displayName": "Uncounted",
+      "group": "fracture_faction",
+      "archetype": "fracture_inhabitant",
+      "style": "humanoid",
+      "body": "slate",
+      "accent": "glass",
+      "emotionalBaseline": {
+        "attachment": 15,
+        "valence": 42
+      },
+      "schedule": "fracture",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_uncounted_north_idle",
+          "step": "ovr_ent_uncounted_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_uncounted_south_idle",
+          "step": "ovr_ent_uncounted_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_uncounted_east_idle",
+          "step": "ovr_ent_uncounted_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_uncounted_west_idle",
+          "step": "ovr_ent_uncounted_west_step"
+        }
+      }
+    },
+    {
+      "id": "ghost_shelter_keeper",
+      "displayName": "Ghost-Shelter Keeper",
+      "group": "fracture_faction",
+      "archetype": "fracture_inhabitant",
+      "style": "ghost",
+      "body": "glass",
+      "accent": "purple",
+      "emotionalBaseline": {
+        "grief": 45,
+        "reverence": 35
+      },
+      "schedule": "fracture",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_ghost_shelter_keeper_north_idle",
+          "step": "ovr_ent_ghost_shelter_keeper_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_ghost_shelter_keeper_south_idle",
+          "step": "ovr_ent_ghost_shelter_keeper_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_ghost_shelter_keeper_east_idle",
+          "step": "ovr_ent_ghost_shelter_keeper_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_ghost_shelter_keeper_west_idle",
+          "step": "ovr_ent_ghost_shelter_keeper_west_step"
+        }
+      }
+    },
+    {
+      "id": "cyber_ghost",
+      "displayName": "Cyber-Ghost",
+      "group": "fracture_faction",
+      "archetype": "fracture_inhabitant",
+      "style": "ghost",
+      "body": "cyan",
+      "accent": "green_glow",
+      "emotionalBaseline": {
+        "arousal": 45,
+        "reverence": 5
+      },
+      "schedule": "fracture",
+      "sprites": {
+        "north": {
+          "idle": "ovr_ent_cyber_ghost_north_idle",
+          "step": "ovr_ent_cyber_ghost_north_step"
+        },
+        "south": {
+          "idle": "ovr_ent_cyber_ghost_south_idle",
+          "step": "ovr_ent_cyber_ghost_south_step"
+        },
+        "east": {
+          "idle": "ovr_ent_cyber_ghost_east_idle",
+          "step": "ovr_ent_cyber_ghost_east_step"
+        },
+        "west": {
+          "idle": "ovr_ent_cyber_ghost_west_idle",
+          "step": "ovr_ent_cyber_ghost_west_step"
+        }
+      }
+    }
+  ],
+  "player": {
+    "id": "intercessor",
+    "displayName": "The Intercessor",
+    "sprites": {
+      "north": {
+        "idle": "ovr_ent_intercessor_north_idle",
+        "step": "ovr_ent_intercessor_north_step"
+      },
+      "south": {
+        "idle": "ovr_ent_intercessor_south_idle",
+        "step": "ovr_ent_intercessor_south_step"
+      },
+      "east": {
+        "idle": "ovr_ent_intercessor_east_idle",
+        "step": "ovr_ent_intercessor_east_step"
+      },
+      "west": {
+        "idle": "ovr_ent_intercessor_west_idle",
+        "step": "ovr_ent_intercessor_west_step"
+      }
+    },
+    "overlays": {
+      "on_fire": "ovr_overlay_player_on_fire",
+      "wet": "ovr_overlay_player_wet",
+      "frozen": "ovr_overlay_player_frozen"
+    }
+  },
+  "styleReferenceSpriteIds": [
+    "ovr_tile_grass",
+    "ovr_obj_the_stone",
+    "ovr_ent_girl_at_the_stone_south_idle",
+    "ovr_ent_screaming_crawler_south_idle",
+    "ovr_ent_intercessor_south_idle",
+    "ovr_obj_tree",
+    "ovr_tile_standing_water",
+    "ovr_ent_grief_wraith_south_idle"
+  ]
+}

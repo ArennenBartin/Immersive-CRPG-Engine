@@ -1,0 +1,162 @@
+[
+  {
+    "id": "void",
+    "hex": "#000000",
+    "role": "reserved void/fog only"
+  },
+  {
+    "id": "ink",
+    "hex": "#080A10",
+    "role": "near-black outline, not void"
+  },
+  {
+    "id": "night",
+    "hex": "#101827",
+    "role": "deep blue shadow"
+  },
+  {
+    "id": "slate",
+    "hex": "#243044",
+    "role": "cool dark stone"
+  },
+  {
+    "id": "stone_dark",
+    "hex": "#46515F",
+    "role": "dark masonry"
+  },
+  {
+    "id": "stone",
+    "hex": "#7C8796",
+    "role": "mid masonry"
+  },
+  {
+    "id": "stone_light",
+    "hex": "#CBD4DF",
+    "role": "bright masonry/bone glint"
+  },
+  {
+    "id": "grass_dark",
+    "hex": "#1E4A2D",
+    "role": "deep grass"
+  },
+  {
+    "id": "grass",
+    "hex": "#3D7A3F",
+    "role": "main grass"
+  },
+  {
+    "id": "grass_light",
+    "hex": "#77A85C",
+    "role": "grass highlight"
+  },
+  {
+    "id": "reed",
+    "hex": "#6E7F3C",
+    "role": "fen reed"
+  },
+  {
+    "id": "moss",
+    "hex": "#4B6B4A",
+    "role": "moss/old growth"
+  },
+  {
+    "id": "dirt_dark",
+    "hex": "#4A3324",
+    "role": "mud/earth dark"
+  },
+  {
+    "id": "dirt",
+    "hex": "#7A5635",
+    "role": "earth/wood"
+  },
+  {
+    "id": "road",
+    "hex": "#9B7B52",
+    "role": "packed road"
+  },
+  {
+    "id": "sand",
+    "hex": "#C9A86A",
+    "role": "sand/dry grass"
+  },
+  {
+    "id": "water_dark",
+    "hex": "#17465C",
+    "role": "deep water"
+  },
+  {
+    "id": "water",
+    "hex": "#287B91",
+    "role": "standing water"
+  },
+  {
+    "id": "water_light",
+    "hex": "#67C6D8",
+    "role": "water glint"
+  },
+  {
+    "id": "wood_dark",
+    "hex": "#5B321F",
+    "role": "wood outline"
+  },
+  {
+    "id": "wood",
+    "hex": "#8D5A2B",
+    "role": "wood"
+  },
+  {
+    "id": "skin",
+    "hex": "#C98B63",
+    "role": "faces/hands"
+  },
+  {
+    "id": "bone",
+    "hex": "#E5D6B8",
+    "role": "bone/parchment"
+  },
+  {
+    "id": "red",
+    "hex": "#A13B3B",
+    "role": "blood/cloth warning"
+  },
+  {
+    "id": "orange",
+    "hex": "#D46A2A",
+    "role": "fire body"
+  },
+  {
+    "id": "gold",
+    "hex": "#E3B640",
+    "role": "lamps/locks"
+  },
+  {
+    "id": "purple_dark",
+    "hex": "#3A244E",
+    "role": "fracture dark"
+  },
+  {
+    "id": "purple",
+    "hex": "#7B4FD1",
+    "role": "Grid/fracture violet"
+  },
+  {
+    "id": "cyan",
+    "hex": "#33D6E8",
+    "role": "dark-light cyan"
+  },
+  {
+    "id": "glass",
+    "hex": "#B9F2FF",
+    "role": "Glass bright edge"
+  },
+  {
+    "id": "white",
+    "hex": "#F4F1E8",
+    "role": "eyes/tiny highlights"
+  },
+  {
+    "id": "green_glow",
+    "hex": "#A6F24A",
+    "role": "sickly amplified glow"
+  }
+]
