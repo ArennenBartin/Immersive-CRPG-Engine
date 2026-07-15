@@ -167,20 +167,30 @@ import {
 import type { PlaySave } from "../src/schema/save";
 import { entityStateKey } from "../src/utils/entityState";
 import {
+  classifyFogRenderState,
+  classifyFogRenderStateForCells,
   computeFogVisibleCells,
   createFogLineOfSightBlockers,
   fogCellKey,
   hasFogLineOfSight,
+  resolveStructureFogCompositePolicy,
 } from "../src/utils/fogOfWar";
+import {
+  resolveActorSpriteBrightness,
+  resolveAuthoritativeLightRenderMetrics,
+} from "../src/utils/lightRendering";
 import { useFxStore } from "../src/store/fxStore";
 import {
+  PLAYMODE_ITEM_PICKUP_RADIUS_MACRO,
   PLAYMODE_COMMAND_WHEEL_VERBS,
   PLAYMODE_PHASE_2_ELEMENTAL_VERBS,
   PLAYMODE_PHASE_3_MOVEMENT_VERBS,
   playModeCommandWheelPhaseStatus,
+  selectPlayModePickupCandidate,
 } from "../src/utils/playModeCommands";
 import {
   dedupeFineTerrainCellsFor3D,
+  fineCellsCoveredByWorldMacroCell,
   isWorldPointInCameraOcclusionCorridor,
   logicalCellToWorld,
   logicalCoordToWorld,
@@ -244,6 +254,70 @@ console.log("engine-core: 3D render-space adapter");
         1.45,
       ),
     "wall occlusion direction follows quarter-turn camera rotation",
+  );
+  const positiveWallFineCells = fineCellsCoveredByWorldMacroCell(1, -2, 3);
+  const positiveWallFineKeys = new Set(
+    positiveWallFineCells.map((cell) => fogCellKey(cell[0], cell[1])),
+  );
+  ok(
+    positiveWallFineCells.length === 9 &&
+      positiveWallFineKeys.has(fogCellKey(3, -6)) &&
+      positiveWallFineKeys.has(fogCellKey(5, -4)) &&
+      !positiveWallFineKeys.has(fogCellKey(6, -4)),
+    "macro wall visibility samples its exact positive-coordinate fine block",
+  );
+  const negativeWallFineKeys = new Set(
+    fineCellsCoveredByWorldMacroCell(-4, -4, 3).map((cell) =>
+      fogCellKey(cell[0], cell[1]),
+    ),
+  );
+  ok(
+    negativeWallFineKeys.has(fogCellKey(-12, -12)) &&
+      negativeWallFineKeys.has(fogCellKey(-10, -10)) &&
+      !negativeWallFineKeys.has(fogCellKey(-9, -10)),
+    "macro wall visibility samples its exact negative-coordinate fine block",
+  );
+  const visibleWallEdge = new Set<string>([fogCellKey(3, -4)]);
+  const exploredWallEdge = new Set<string>([fogCellKey(3, -4)]);
+  ok(
+    classifyFogRenderStateForCells(
+      positiveWallFineCells,
+      true,
+      visibleWallEdge,
+      visibleWallEdge,
+    ) === "visible" &&
+      classifyFogRenderStateForCells(
+        positiveWallFineCells,
+        true,
+        new Set(),
+        exploredWallEdge,
+      ) === "explored" &&
+      classifyFogRenderStateForCells(
+        positiveWallFineCells,
+        true,
+        new Set([fogCellKey(6, -4)]),
+        new Set([fogCellKey(6, -4)]),
+      ) === "unseen",
+    "a visible or explored fine boundary retains only its owning macro wall",
+  );
+  const visibleSolidWall = resolveStructureFogCompositePolicy("visible", false);
+  const visibleFadedWall = resolveStructureFogCompositePolicy("visible", true);
+  const exploredWall = resolveStructureFogCompositePolicy("explored", true);
+  const unseenWall = resolveStructureFogCompositePolicy("unseen", true);
+  ok(
+    visibleSolidWall.render &&
+      visibleSolidWall.postFog &&
+      !visibleSolidWall.cameraFaded &&
+      visibleFadedWall.render &&
+      visibleFadedWall.postFog &&
+      visibleFadedWall.cameraFaded &&
+      exploredWall.render &&
+      !exploredWall.postFog &&
+      !exploredWall.cameraFaded &&
+      !unseenWall.render &&
+      !unseenWall.postFog &&
+      !unseenWall.cameraFaded,
+    "only currently visible walls composite or camera-fade above fog",
   );
   const fineCopies = Array.from({ length: 9 }, (_, index) => ({
     x: index % 3,
@@ -323,6 +397,43 @@ console.log("engine-core: macro/fine coordinate abstraction");
     !footprintIntersectsLeadingEdge(actorCenter, fineCoord(1, 0), fineCoord(13, 13)) &&
       !areAdjacentMacro(actorCenter, fineCoord(14, 10)),
     "footprint melee targeting excludes actors beyond the next movement step",
+  );
+
+  const twoMacroCardinal = { id: "cardinal", cell: fineCoord(7, 1) };
+  ok(
+    PLAYMODE_ITEM_PICKUP_RADIUS_MACRO === 2 &&
+      [0, 1, 2].every(
+        (localX) =>
+          selectPlayModePickupCandidate(
+            [twoMacroCardinal],
+            fineCoord(localX, 1),
+          )?.id === twoMacroCardinal.id,
+      ),
+    "item pickup halo reaches two macro tiles from every local fine offset",
+  );
+  ok(
+    selectPlayModePickupCandidate(
+      [{ id: "diagonal", cell: fineCoord(7, 7) }],
+      fineCoord(0, 0),
+    )?.id === "diagonal" &&
+      !selectPlayModePickupCandidate(
+        [{ id: "too_far", cell: fineCoord(8, 0) }],
+        fineCoord(0, 0),
+      ),
+    "item pickup halo includes its diagonal edge and excludes radius-plus-one",
+  );
+  const pickupCandidates = [
+    { id: "far", cell: fineCoord(6, 0) },
+    { id: "z_tie", cell: fineCoord(3, 0) },
+    { id: "a_tie", cell: fineCoord(0, 3) },
+  ];
+  ok(
+    selectPlayModePickupCandidate(pickupCandidates, fineCoord(0, 0))?.id === "a_tie" &&
+      selectPlayModePickupCandidate(
+        [...pickupCandidates].reverse(),
+        fineCoord(0, 0),
+      )?.id === "a_tie",
+    "item pickup chooses the nearest candidate with a stable ID tie-break",
   );
 }
 
@@ -1014,6 +1125,56 @@ console.log("engine-core: v1 package/save grid adapter");
       (task) => task.task_type === "investigate" && task.source_kind === "sound",
     ),
     "emit_sound begins Simulation S5 by queueing NPC investigation tasks",
+  );
+  const soundEvent = soundPulse.events.find((event) => event.type === "sound_propagated");
+  const propagatedSoundFields = Object.values(
+    soundPulse.save.map_deltas?.[demoMap.id]?.environment_fields || {},
+  ).flat();
+  ok(
+    propagatedSoundFields.length === Number(soundEvent?.payload?.cells || 0) &&
+      propagatedSoundFields.every(
+        (field) =>
+          field.kind === "sound" &&
+          field.frequency_tag === "bell" &&
+          field.origin_cell?.[0] === 0 &&
+          field.origin_cell?.[1] === 5 &&
+          field.created_at_tick === 9 * 60 &&
+          field.expires_at_tick === 9 * 60 + 8,
+      ),
+    "emit_sound batches the exact propagated field count and metadata reported by the event",
+  );
+
+  const seededSoundFields = Array.from({ length: 12 }, (_, index) => ({
+    id: `seed_sound_${index}`,
+    kind: "sound" as const,
+    intensity: 0.1,
+    age_ticks: index,
+    source: "runtime" as const,
+    tag: "seed",
+    created_at_tick: 500 + index,
+    expires_at_tick: 800,
+  }));
+  const cappedSoundPulse = dispatchV1EmitSound({
+    gamePackage,
+    save: makeSave([0, 6], {
+      map_deltas: {
+        [demoMap.id]: {
+          environment_fields: { "0:5": seededSoundFields },
+        },
+      },
+    }),
+    cell: [0, 5],
+    loudness: 1,
+    tag: "tap",
+  });
+  const cappedOriginFields =
+    cappedSoundPulse.save.map_deltas?.[demoMap.id]?.environment_fields?.["0:5"] || [];
+  ok(
+    cappedOriginFields.length === 10 &&
+      cappedOriginFields[0]?.id === "seed_sound_3" &&
+      cappedOriginFields[8]?.id === "seed_sound_11" &&
+      cappedOriginFields[9]?.id === "env_sound_540_0_5_12",
+    "batched sound propagation preserves per-cell history caps and stable id suffixes",
   );
 
   const igniteFire = dispatchV1IgniteFire({
@@ -3262,6 +3423,31 @@ console.log("engine-core: v1 package/save grid adapter");
       openDoorVisibility.has(fogCellKey(-3, -4)),
     "3D fog visibility culls actors behind closed doors and reveals them when opened",
   );
+  const currentFogCells = new Set([fogCellKey(1, 1)]);
+  const discoveredFogCells = new Set([fogCellKey(1, 1), fogCellKey(2, 2)]);
+  ok(
+    classifyFogRenderState(fogCellKey(1, 1), true, currentFogCells, discoveredFogCells) === "visible" &&
+      classifyFogRenderState(fogCellKey(2, 2), true, currentFogCells, discoveredFogCells) === "explored" &&
+      classifyFogRenderState(fogCellKey(3, 3), true, currentFogCells, discoveredFogCells) === "unseen" &&
+      classifyFogRenderState(fogCellKey(3, 3), false, currentFogCells, discoveredFogCells) === "visible",
+    "3D fog render classification distinguishes visible, explored, and unseen cells and reveals all static geometry when disabled",
+  );
+  const lightRenderMetrics = resolveAuthoritativeLightRenderMetrics(14, 1 / 3);
+  ok(
+    Math.abs(lightRenderMetrics.worldRadius - 14 / 3) < 0.000001 &&
+      lightRenderMetrics.pointDistance === lightRenderMetrics.worldRadius &&
+      lightRenderMetrics.poolRadius === lightRenderMetrics.worldRadius &&
+      lightRenderMetrics.decay === 1,
+    "authoritative 3D light cutoff and pool preserve the simulation's literal radius",
+  );
+  ok(
+    Math.abs(resolveActorSpriteBrightness(0) - 0.3) < 0.000001 &&
+      Math.abs(resolveActorSpriteBrightness(1) - 1) < 0.000001 &&
+      Math.abs(resolveActorSpriteBrightness(-1) - 0.3) < 0.000001 &&
+      Math.abs(resolveActorSpriteBrightness(2) - 1) < 0.000001 &&
+      resolveActorSpriteBrightness(0.64) > resolveActorSpriteBrightness(0.16),
+    "actor sprite lighting shades the whole billboard from its authoritative foot-cell illumination with a darkness floor",
+  );
 
   const world = createV1GridWorld({ gamePackage, save: makeSave([0, 6]) });
   ok(world.map.id === demoMap.id, "v1 adapter loads the save's current map");
@@ -5282,10 +5468,10 @@ console.log("engine-core: v1 package/save grid adapter");
     didInitialMapLoad: true,
   });
   ok(
-    acceptanceEditorPlayMap.map?.id === demoMap.id &&
+    acceptanceEditorPlayMap.map?.id === "map_overworld" &&
       acceptanceEditorPlayMap.versionOk &&
       acceptanceMidRunMap.map?.id === "map_overworld",
-    "phase 6 acceptance: editor Play Mode starts from current map, then preserves save map mid-run",
+    "phase 6 acceptance: a resumable save wins across Studio/Play transitions",
   );
 }
 

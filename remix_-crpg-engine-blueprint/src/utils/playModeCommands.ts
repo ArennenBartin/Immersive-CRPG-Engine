@@ -1,4 +1,9 @@
-import type { AlderamonticoEmotionalVerbKind, ImmersiveGlobalVerbKind } from "../engine-core";
+import {
+  FINE_HALF_EXTENT,
+  FINE_PER_MACRO,
+  type AlderamonticoEmotionalVerbKind,
+  type ImmersiveGlobalVerbKind,
+} from "../engine-core";
 
 // Everything the Play command wheel can offer: the immersive global verbs
 // (physical operators on cells/objects) plus the Alderamontico emotional verbs
@@ -12,6 +17,38 @@ export interface PlayModeCommandWheelVerb {
   enabled: boolean;
   hint?: string;
 }
+
+export interface PlayModePickupCandidate {
+  id: string;
+  cell: readonly [number, number];
+}
+
+export const PLAYMODE_ITEM_PICKUP_RADIUS_MACRO = 2;
+
+// Items get a forgiving, item-only magnetic pickup halo. Reach is measured
+// from the edge of the actor's fine-grid footprint so it remains consistent
+// at every sub-tile offset. Other Act interactions keep their faced-cell rules.
+export const selectPlayModePickupCandidate = <T extends PlayModePickupCandidate>(
+  items: readonly T[],
+  actorCell: readonly [number, number],
+  radiusMacro = PLAYMODE_ITEM_PICKUP_RADIUS_MACRO,
+): T | undefined => {
+  const maxReachFromCenter =
+    Math.max(0, radiusMacro) * FINE_PER_MACRO + FINE_HALF_EXTENT;
+  return items
+    .map((item) => ({
+      item,
+      distance: Math.max(
+        Math.abs(item.cell[0] - actorCell[0]),
+        Math.abs(item.cell[1] - actorCell[1]),
+      ),
+    }))
+    .filter((entry) => entry.distance <= maxReachFromCenter)
+    .sort(
+      (left, right) =>
+        left.distance - right.distance || left.item.id.localeCompare(right.item.id),
+    )[0]?.item;
+};
 
 export const PLAYMODE_PHASE_1_VERBS: ImmersiveGlobalVerbKind[] = ["drop"];
 

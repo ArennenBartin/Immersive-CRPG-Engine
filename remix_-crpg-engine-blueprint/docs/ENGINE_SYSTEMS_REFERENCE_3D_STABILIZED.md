@@ -182,7 +182,12 @@ The current export envelope is crpg_engine_save_v2. Save state covers:
 
 ### 4.3 Storage
 
-- The Studio workspace uses IndexedDB under crpg_engine_package_store_v2.
+- The Studio workspace writes to IndexedDB under
+  `crpg_engine_package_store_v3` and falls back to the legacy v2 database on
+  hydration so an existing authored workspace remains visible after upgrade.
+- Studio remains behind a loading gate until hydration finishes; if a
+  programmatic edit occurs during that window, the newer in-memory workspace
+  wins and is persisted rather than being overwritten by stale storage.
 - Play autosave uses Zustand persistence.
 - Three explicit save slots use localStorage keys shaped as
   crpg-save-slot-<slot>; each stored payload uses the
@@ -551,10 +556,16 @@ Core systems provide:
 - a simulation scheduler
 - layered tile state
 - reaction rules
-- perception and alerts
+- authoritative illumination, viewer visibility, perception, and alerts
 - global verbs
 - tactical snapshots
 - spatial inventory and world-state gates
+
+Illumination resolves authored, moved, carried, dropped, environmental, and
+fire sources into queryable per-cell values. Solid geometry blocks
+transmission while smoke attenuates it. Viewer state keeps discovered,
+currently visible, illuminated, and sensed cells separate; persistent light
+and exploration state use the ordinary save/map-delta contracts.
 
 The global verb catalog includes push, pull, throw, drop, stack, climb, burn,
 douse, freeze, break, hack, wet, electrify, foam, and mimic.
@@ -581,6 +592,12 @@ entity state.
 
 ### 10.2 Perception
 
+Entities may author independent sensory channels for ordinary sight, hearing,
+and tagged light/Glass sensitivity. Channels define accepted stimulus kinds
+and tags, range, threshold, sensitivity, LOS/view-cone/illumination
+requirements, and whether valid contact tracks a live target. Stimuli retain
+their origin, intensity, source, tags, and evidence time.
+
 Stimuli and alerts move actors through:
 
 - oblivious
@@ -588,7 +605,11 @@ Stimuli and alerts move actors through:
 - searching
 - combat
 
-Perception can create tasks and feed reactive behavior.
+Perception records its profile, channel, cause, and last-known evidence cell.
+Losing valid contact clears live tracking, creates or retains an investigation
+at that evidence cell, accepts newer evidence, and de-escalates on configured
+search/memory timers. Alert-gated combat does not begin from hostile proximity
+alone.
 
 ### 10.3 Combat
 
@@ -780,7 +801,8 @@ Play uses:
 - quarter-turn rotation
 - adaptive device-pixel ratio
 - performance-oriented Canvas settings
-- fog and the dynamic Black Star light rig
+- mechanically driven fog/darkness plus resolved world light sources and a
+  weak ambient Black Star readability rig
 
 The Map Editor supports perspective 3D and top-down orthographic views, grid
 overlays, and validation overlays.
@@ -795,6 +817,12 @@ The renderer handles:
 - sprites, billboards, animated GIF workers/caches/atlases
 - actors, props, barks, popups, readouts, and intent indicators
 - macro/fine fog and explored state
+- separate terrain-visible and actor-acquired sight layers: static structures
+  use physical LOS/light while actors, items, and readouts use exact current
+  acquisition
+- macro-footprint fog aggregation, protected visible-wall compositing, and
+  max-footprint authoritative structure-light fill
+- illumination and sensed-cell debug overlays through the Play **Senses** view
 - chemistry/environment overlays
 - targeting, range, denied-action, overwatch, and intent overlays
 

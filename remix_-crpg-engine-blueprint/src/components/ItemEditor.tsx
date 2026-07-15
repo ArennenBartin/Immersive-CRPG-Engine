@@ -2,7 +2,19 @@ import React, { useState } from "react";
 import { useEngineStore } from "../store/engineStore";
 import { Plus, Trash2, Sparkles, Briefcase } from "lucide-react";
 import { AIGenerationModal } from "./AIGenerationModal";
-import { ItemData, ItemSchema } from "../schema/game";
+import { ItemData, ItemSchema, type LightSourceProfile } from "../schema/game";
+
+const DEFAULT_ITEM_LIGHT_SOURCE: LightSourceProfile = {
+  intensity: 0.8,
+  radius: 10,
+  color: "#facc15",
+  active_by_default: true,
+  extinguishable: true,
+  mobility: "portable",
+  persistent: true,
+  stimulus_tags: ["light"],
+  exposes_carrier: true,
+};
 
 export function ItemEditor() {
   const { gamePackage, addItem, updateItem, selectedItemId, setSelectedItemId } = useEngineStore();
@@ -27,6 +39,11 @@ export function ItemEditor() {
   const handleUpdate = (updates: Partial<ItemData>) => {
     if (!activeItem) return;
     updateItem(activeItem.id, updates);
+  };
+
+  const patchLightSource = (updates: Partial<LightSourceProfile>) => {
+    if (!activeItem?.light_source) return;
+    handleUpdate({ light_source: { ...activeItem.light_source, ...updates } });
   };
 
   const handleDelete = () => {
@@ -234,6 +251,152 @@ export function ItemEditor() {
               </div>
             </div>
 
+            <div className="space-y-4 border-t border-neutral-800 pt-6">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-neutral-300">Light Source</h3>
+                  <p className="mt-1 text-xs text-neutral-500">
+                    Makes this item an authored mechanical light source for illumination and perception.
+                  </p>
+                </div>
+                <label className="flex shrink-0 items-center gap-2 text-xs text-neutral-300">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(activeItem.light_source)}
+                    onChange={(event) =>
+                      handleUpdate({
+                        light_source: event.target.checked
+                          ? { ...DEFAULT_ITEM_LIGHT_SOURCE, stimulus_tags: [...DEFAULT_ITEM_LIGHT_SOURCE.stimulus_tags] }
+                          : undefined,
+                      })
+                    }
+                  />
+                  Enabled
+                </label>
+              </div>
+
+              {activeItem.light_source && (
+                <div className="space-y-4 rounded-md border border-neutral-800 bg-neutral-950/50 p-4">
+                  <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
+                    <div className="space-y-1 text-sm">
+                      <label className="text-neutral-400">Intensity</label>
+                      <input
+                        type="number"
+                        min={0}
+                        max={1}
+                        step={0.05}
+                        className="w-full rounded border border-neutral-800 bg-black p-1.5"
+                        value={activeItem.light_source.intensity}
+                        onChange={(event) =>
+                          patchLightSource({
+                            intensity: Math.max(0, Math.min(1, Number(event.target.value) || 0)),
+                          })
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1 text-sm">
+                      <label className="text-neutral-400">Radius</label>
+                      <input
+                        type="number"
+                        min={0}
+                        step={0.5}
+                        className="w-full rounded border border-neutral-800 bg-black p-1.5"
+                        value={activeItem.light_source.radius}
+                        onChange={(event) =>
+                          patchLightSource({ radius: Math.max(0, Number(event.target.value) || 0) })
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1 text-sm">
+                      <label className="text-neutral-400">Duration ticks</label>
+                      <input
+                        type="number"
+                        min={1}
+                        className="w-full rounded border border-neutral-800 bg-black p-1.5"
+                        value={activeItem.light_source.duration_ticks ?? ""}
+                        placeholder="No expiry"
+                        onChange={(event) =>
+                          patchLightSource({
+                            duration_ticks:
+                              event.target.value === ""
+                                ? undefined
+                                : Math.max(1, parseInt(event.target.value, 10) || 1),
+                          })
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1 text-sm">
+                      <label className="text-neutral-400">Mobility</label>
+                      <select
+                        className="w-full rounded border border-neutral-800 bg-black p-1.5"
+                        value={activeItem.light_source.mobility}
+                        onChange={(event) =>
+                          patchLightSource({ mobility: event.target.value as LightSourceProfile["mobility"] })
+                        }
+                      >
+                        <option value="fixed">Fixed</option>
+                        <option value="portable">Portable</option>
+                        <option value="throwable">Throwable</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                    <div className="space-y-1 text-sm">
+                      <label className="text-neutral-400">Color</label>
+                      <div className="flex gap-2">
+                        <input
+                          type="color"
+                          className="h-9 w-12 rounded border border-neutral-800 bg-black p-1"
+                          value={activeItem.light_source.color}
+                          onChange={(event) => patchLightSource({ color: event.target.value })}
+                        />
+                        <input
+                          className="min-w-0 flex-1 rounded border border-neutral-800 bg-black p-1.5 font-mono"
+                          value={activeItem.light_source.color}
+                          onChange={(event) => patchLightSource({ color: event.target.value })}
+                        />
+                      </div>
+                    </div>
+                    <div className="space-y-1 text-sm">
+                      <label className="text-neutral-400">Stimulus tags</label>
+                      <input
+                        className="w-full rounded border border-neutral-800 bg-black p-1.5"
+                        value={activeItem.light_source.stimulus_tags.join(", ")}
+                        placeholder="light, glass"
+                        onChange={(event) =>
+                          patchLightSource({
+                            stimulus_tags: event.target.value
+                              .split(",")
+                              .map((tag) => tag.trim())
+                              .filter(Boolean),
+                          })
+                        }
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 text-xs text-neutral-300 md:grid-cols-4">
+                    {([
+                      ["active_by_default", "Starts active"],
+                      ["extinguishable", "Extinguishable"],
+                      ["persistent", "Persists in saves"],
+                      ["exposes_carrier", "Exposes carrier"],
+                    ] as const).map(([key, label]) => (
+                      <label key={key} className="flex items-center gap-2 rounded border border-neutral-800 px-2 py-2">
+                        <input
+                          type="checkbox"
+                          checked={activeItem.light_source?.[key] || false}
+                          onChange={(event) => patchLightSource({ [key]: event.target.checked })}
+                        />
+                        {label}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
           </div>
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center text-neutral-500 p-8">
@@ -267,6 +430,21 @@ export function ItemEditor() {
                       attack_bonus: { type: "NUMBER" },
                       defense_bonus: { type: "NUMBER" },
                       speed_bonus: { type: "NUMBER" }
+                    }
+                 },
+                 light_source: {
+                    type: "OBJECT",
+                    properties: {
+                      intensity: { type: "NUMBER" },
+                      radius: { type: "NUMBER" },
+                      duration_ticks: { type: "NUMBER" },
+                      color: { type: "STRING" },
+                      active_by_default: { type: "BOOLEAN" },
+                      extinguishable: { type: "BOOLEAN" },
+                      mobility: { type: "STRING", enum: ["fixed", "portable", "throwable"] },
+                      persistent: { type: "BOOLEAN" },
+                      stimulus_tags: { type: "ARRAY", items: { type: "STRING" } },
+                      exposes_carrier: { type: "BOOLEAN" }
                     }
                  }
               },

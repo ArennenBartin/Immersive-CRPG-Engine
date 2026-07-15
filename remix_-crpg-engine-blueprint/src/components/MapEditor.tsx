@@ -43,6 +43,7 @@ import {
   ChevronDown,
   Trash2,
   AlertTriangle,
+  Copy,
 } from "lucide-react";
 import { ConditionEditor } from "./ConditionEditor";
 import {
@@ -55,6 +56,7 @@ import { validateOrdinaryMap } from "../engine-core/mapReadinessValidator";
 import { normalizeJamMapElevations } from "../utils/legacyJamCompatibility";
 // Side-effect: registers stamps with the DSL registry.
 import { STAMP_PRESETS } from "../utils/basicStamps";
+import { remapGeneratedMapNamespace } from "../generation-facing/deterministicIds";
 
 type InspectorSelection =
   | { kind: "entity"; index: number }
@@ -89,7 +91,7 @@ export function MapEditor() {
     selectedMapId,
     setSelectedMapId,
   } = useEngineStore();
-  const { resetRun } = usePlayStore();
+  const { resetRun, saveData } = usePlayStore();
 
   const [activeMapId, setActiveMapId] = useState<string | null>(
     selectedMapId || gamePackage.maps[0]?.id || null,
@@ -324,6 +326,23 @@ export function MapEditor() {
     }
 
     updateMap(activeMap.id, { width: cw, height: ch, cells: newCells });
+  };
+
+  const handleDuplicateMap = () => {
+    if (!activeMap) return;
+    const existingIds = new Set(gamePackage.maps.map((map) => map.id));
+    const baseId = `${activeMap.id}_copy`;
+    let id = baseId;
+    let suffix = 2;
+    while (existingIds.has(id)) id = `${baseId}_${suffix++}`;
+
+    const duplicate = remapGeneratedMapNamespace(activeMap, id);
+    addMap({
+      ...duplicate,
+      display_name: `${activeMap.display_name || activeMap.id} Copy`,
+    });
+    setActiveMapId(id);
+    setSelectedMapId(id);
   };
 
   // Apply a single-cell tool effect to a cells array. Returns the same array
@@ -570,6 +589,15 @@ export function MapEditor() {
 
   const handleTestPlay = () => {
     if (!activeMap) return;
+    if (
+      saveData &&
+      !window.confirm(
+        `Start a clean test run on ${activeMap.display_name || activeMap.id}? The current runtime session will be discarded; authored map data will not change.`,
+      )
+    ) {
+      return;
+    }
+    setSelectedMapId(activeMap.id);
     resetRun();
     setMode("play");
   };
@@ -860,6 +888,13 @@ export function MapEditor() {
             title="New Map"
           >
             <Plus className="w-4 h-4" />
+          </button>
+          <button
+            onClick={handleDuplicateMap}
+            className="p-2 text-neutral-400 hover:bg-neutral-800 hover:text-white rounded-md transition-colors"
+            title="Duplicate Map"
+          >
+            <Copy className="w-4 h-4" />
           </button>
           <button
             onClick={() => setTopDown((value) => !value)}

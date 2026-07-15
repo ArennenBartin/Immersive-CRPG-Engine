@@ -3,7 +3,7 @@
 // authored content lives in src/data/qaSuite/* wing modules; this file merges
 // them into a package for the explicit builders in qaSuiteInstaller.ts.
 //
-// The suite is the engine's living acceptance test: a hub and nine labs that
+// The suite is the engine's living acceptance test: a hub and ten labs that
 // prove the fine-grid movement rebuild, the flowing chemistry (button-released
 // floods, a viscosity race, fire with a wet moat, dissipating gas), the
 // emotional layer, dialogue/cutscene/quest/story systems, combat, world
@@ -26,6 +26,7 @@ import { chemistryWing } from "./qaSuite/chemistryWing";
 import { storyWing } from "./qaSuite/storyWing";
 import { combatWing } from "./qaSuite/combatWing";
 import { worldWing } from "./qaSuite/worldWing";
+import { perceptionWing } from "./qaSuite/perceptionWing";
 
 export const TEST_SUITE_START_MAP_ID = QA_START_MAP_ID;
 export const TEST_SUITE_START_SPAWN_ID = QA_START_SPAWN_ID;
@@ -33,9 +34,16 @@ export const TEST_SUITE_PLAYER_SPRITE_ID = peopleHorrorSpriteId(1, 1);
 // Bump on any suite-content change: persisted packages refresh their qa_*
 // content when this differs (engineStore hydration), and stale play saves
 // rebuild against the new version.
-export const TEST_SUITE_VERSION = "2.2.2";
+export const TEST_SUITE_VERSION = "2.3.0";
 
-const wings = mergeWings([hubWing, chemistryWing, storyWing, combatWing, worldWing]);
+const wings = mergeWings([
+  hubWing,
+  chemistryWing,
+  storyWing,
+  combatWing,
+  worldWing,
+  perceptionWing,
+]);
 export const TEST_SUITE_MAP_IDS = wings.maps.map((map) => map.id);
 const TEST_SUITE_MAP_ID_SET = new Set(TEST_SUITE_MAP_IDS);
 

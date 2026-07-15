@@ -252,6 +252,7 @@ export interface V1CombatSessionDispatchOptions extends V1GridWorldOptions {
   chaseRadius?: number;
   partyFollowers?: CombatPartyFollowerRef[];
   forceEnd?: boolean;
+  requireAlert?: boolean;
 }
 
 export interface V1CombatTurnDispatchOptions extends V1GridWorldOptions {
@@ -483,6 +484,12 @@ type CombatActorRuntime = {
   entityDef?: EntityData;
 };
 
+type CurrentObjectPlacement = {
+  key: string;
+  placement: ObjectPlacementData;
+  object: ObjectData | undefined;
+};
+
 export class V1GridWorld implements InteractiveGridWorld {
   tick: number;
   rng: RngStreams;
@@ -492,6 +499,12 @@ export class V1GridWorld implements InteractiveGridWorld {
   private activeMap: MapData;
   private objectById: Map<string, ObjectData>;
   private topCellByCoord = new Map<string, CellData>();
+  private currentPlacementCache?: {
+    moved: MapDelta["moved_objects"];
+    removed: MapDelta["removed_objects"];
+    carried: MapDelta["carried_objects"];
+    placements: CurrentObjectPlacement[];
+  };
 
   constructor(private options: V1GridWorldOptions) {
     this.save = cloneSaveForRuntime(options.save);
@@ -1025,6 +1038,7 @@ export class V1GridWorld implements InteractiveGridWorld {
     if (door.locked && door.consumeKey && door.keyItemId) {
       this.removeItem(door.keyItemId, 1);
     }
+    this.emitSoundAt(door.cell, 3, "door_open", PLAYER_ENTITY_ID, "wood");
   }
 
   closeDoor(door: DoorRef): void {
@@ -1046,6 +1060,7 @@ export class V1GridWorld implements InteractiveGridWorld {
         },
       ),
     );
+    this.emitSoundAt(door.cell, 3, "door_close", PLAYER_ENTITY_ID, "wood");
   }
 
   getMapTransition(
@@ -1082,6 +1097,7 @@ export class V1GridWorld implements InteractiveGridWorld {
       },
     };
     this.activeMap = this.resolveMap(transition.toMapId);
+    this.currentPlacementCache = undefined;
     this.indexCells();
   }
 
@@ -1322,6 +1338,7 @@ export class V1GridWorld implements InteractiveGridWorld {
       },
     };
     this.activeMap = nextMap;
+    this.currentPlacementCache = undefined;
     this.indexCells();
   }
 
@@ -1613,6 +1630,7 @@ export class V1GridWorld implements InteractiveGridWorld {
       Math.max(0, target.defense + targetMods.defense),
     );
     const firstHit = this.damageActor(target, roll.dmg);
+    this.emitSoundAt(target.cell, 4, "combat_melee", actor.id, "metal");
     if (actor.kind !== "entity") {
       this.markHostileCombatAlert(target, actor.cell);
     }
@@ -1679,6 +1697,7 @@ export class V1GridWorld implements InteractiveGridWorld {
     const actor = this.getCombatActor(actorId)!;
     const skill = this.getSkill(skillId)!;
     this.spendSkillResources(actor, skill);
+    this.emitSoundAt(actor.cell, 5, `combat_skill:${skill.id}`, actor.id, skill.element || "magic");
     const hits: SkillCastHit[] = [];
     const experience: NonNullable<SkillCastOutcome["experience"]> = [];
     const objectiveCompletions: QuestObjectiveCompletion[] = [];
@@ -1804,7 +1823,7 @@ export class V1GridWorld implements InteractiveGridWorld {
     return undefined;
   }
 
-  getNearbyHostiles(radius: number): V1CombatantSnapshot[] {
+  getNearbyHostiles(radius: number, requireAlert = false): V1CombatantSnapshot[] {
     const player = this.getCombatActor(PLAYER_ENTITY_ID);
     if (!player) return [];
     const results: V1CombatantSnapshot[] = [];
@@ -1818,6 +1837,7 @@ export class V1GridWorld implements InteractiveGridWorld {
       if (!actor) continue;
       const dist = this.manhattan(player.cell, actor.cell);
       const combatAlerted = this.isHostileCombatAlert(key);
+      if (requireAlert && !combatAlerted) continue;
       if (
         dist > radius &&
         !(combatAlerted && dist <= Math.max(radius, this.scaleMacroDistanceToFine(COMBAT_ALERT_CHASE_RADIUS_MACRO)))
@@ -1861,7 +1881,7 @@ export class V1GridWorld implements InteractiveGridWorld {
     if (options.forceEnd && this.save.in_combat) return this.endCombatSession();
 
     if (!this.save.in_combat) {
-      const hostiles = this.getNearbyHostiles(threatRadius);
+      const hostiles = this.getNearbyHostiles(threatRadius, Boolean(options.requireAlert));
       if (hostiles.length === 0) return { status: "unchanged" };
       hostiles.forEach((hostile) => {
         const actor = this.getCombatActor(hostile.id);
@@ -1896,7 +1916,7 @@ export class V1GridWorld implements InteractiveGridWorld {
       active_turn_id: alliedTurn,
     };
 
-    const hostiles = this.getNearbyHostiles(chaseRadius);
+    const hostiles = this.getNearbyHostiles(chaseRadius, Boolean(options.requireAlert));
     if (hostiles.length === 0) return this.endCombatSession();
 
     const queue = this.save.combat_queue || [];
@@ -4118,14 +4138,15 @@ export class V1GridWorld implements InteractiveGridWorld {
 
   private propagateLight(origin: [number, number], intensity: number, radius: number, actorId?: string): number {
     let emitted = 0;
-    const maxRadius = Math.max(1, Math.floor(radius));
-    for (let dx = -maxRadius; dx <= maxRadius; dx += 1) {
-      for (let dy = -maxRadius; dy <= maxRadius; dy += 1) {
+    const propagationRadius = Math.max(1, Math.floor(radius));
+    const illuminationRadius = Math.max(6, propagationRadius);
+    for (let dx = -propagationRadius; dx <= propagationRadius; dx += 1) {
+      for (let dy = -propagationRadius; dy <= propagationRadius; dy += 1) {
         const distance = Math.abs(dx) + Math.abs(dy);
-        if (distance > maxRadius) continue;
+        if (distance > propagationRadius) continue;
         const cell: [number, number] = [origin[0] + dx, origin[1] + dy];
         if (!this.getActiveCell(cell[0], cell[1])) continue;
-        const falloff = Math.max(0.05, intensity * (1 - distance / (maxRadius + 1)));
+        const falloff = Math.max(0.05, intensity * (1 - distance / (propagationRadius + 1)));
         this.appendEnvironmentField(cell, {
           kind: "light",
           intensity: falloff,
@@ -4134,7 +4155,7 @@ export class V1GridWorld implements InteractiveGridWorld {
           actor_id: actorId,
           action: "fire_light",
           origin_cell: cloneCell(origin),
-          radius: maxRadius,
+          radius: illuminationRadius,
           color: "#f59e0b",
           decay_per_tick: 0.08,
           expires_at_tick: this.tick + 24,
@@ -4270,7 +4291,10 @@ export class V1GridWorld implements InteractiveGridWorld {
     const materialBoost = materialTag === "metal" || materialTag === "glass" ? 1.25 : materialTag === "cloth" ? 0.7 : 1;
     const effectiveLoudness = Math.max(1, loudness * materialBoost);
     const radius = Math.max(1, Math.min(8, Math.ceil(effectiveLoudness)));
-    let cells = 0;
+    const propagatedFields: Array<{
+      cell: [number, number];
+      field: Omit<SimulationEnvironmentFieldRecord, "id" | "created_at_tick" | "age_ticks">;
+    }> = [];
     for (let dx = -radius; dx <= radius; dx += 1) {
       for (let dy = -radius; dy <= radius; dy += 1) {
         const distance = Math.abs(dx) + Math.abs(dy);
@@ -4278,31 +4302,76 @@ export class V1GridWorld implements InteractiveGridWorld {
         const target: [number, number] = [cell[0] + dx, cell[1] + dy];
         const targetCell = this.getActiveCell(target[0], target[1]);
         if (!targetCell) continue;
-        const occlusion = targetCell.blocks_los ? 0.35 : targetCell.terrain === "water" ? 0.1 : 0;
-        const intensity = Math.max(0.02, (effectiveLoudness - distance) / Math.max(1, effectiveLoudness) - occlusion);
+        const steps = Math.max(Math.abs(dx), Math.abs(dy));
+        let occlusion = targetCell.terrain === "water" ? 0.1 : 0;
+        for (let step = 1; step <= steps; step += 1) {
+          const rayCell = this.getActiveCell(
+            Math.round(cell[0] + (dx * step) / Math.max(1, steps)),
+            Math.round(cell[1] + (dy * step) / Math.max(1, steps)),
+          );
+          if (!rayCell) {
+            occlusion = 1;
+            break;
+          }
+          if (rayCell.blocks_los) occlusion += 0.28;
+        }
+        occlusion = Math.min(0.92, occlusion);
+        const openIntensity = (effectiveLoudness - distance) / Math.max(1, effectiveLoudness);
+        const intensity = Math.max(0.02, openIntensity * (1 - occlusion));
         if (intensity <= 0.02) continue;
-        this.appendEnvironmentField(target, {
-          kind: "sound",
-          intensity,
-          source: distance === 0 ? "runtime" : "propagation",
-          tag,
-          actor_id: actorId,
-          action: "emit_sound",
-          origin_cell: cloneCell(cell),
-          radius,
-          frequency_tag: tag,
-          material_tag: materialTag,
-          occlusion,
-          decay_per_tick: 0.25,
-          expires_at_tick: this.tick + 8,
+        propagatedFields.push({
+          cell: target,
+          field: {
+            kind: "sound",
+            intensity,
+            source: distance === 0 ? "runtime" : "propagation",
+            tag,
+            actor_id: actorId,
+            action: "emit_sound",
+            origin_cell: cloneCell(cell),
+            radius,
+            frequency_tag: tag,
+            material_tag: materialTag,
+            occlusion,
+            decay_per_tick: 0.25,
+            expires_at_tick: this.tick + 8,
+          },
         });
-        cells += 1;
       }
+    }
+    if (propagatedFields.length > 0) {
+      // A sound pulse can touch dozens of cells. Applying each field through
+      // `appendEnvironmentField` copied the complete map-delta and field index
+      // once per cell. Build the identical capped records in one immutable
+      // update instead; when several entries ever share a cell, reading back
+      // from `environmentFields` preserves the original sequential semantics.
+      this.updateMapDelta((delta) => {
+        const environmentFields = { ...(delta.environment_fields || {}) };
+        propagatedFields.forEach(({ cell: target, field }) => {
+          const key = this.environmentFieldKey(target);
+          const current = environmentFields[key] || [];
+          environmentFields[key] = [
+            ...current.slice(-9),
+            {
+              ...field,
+              id: `env_${field.kind}_${this.tick}_${target[0]}_${target[1]}_${current.length}`,
+              age_ticks: 0,
+              created_at_tick: this.tick,
+            },
+          ];
+        });
+        return { ...delta, environment_fields: environmentFields };
+      });
     }
     if (effectiveLoudness >= 3) {
       this.queueNpcTasksForDisturbance("sound", cell, cell, Math.min(1, effectiveLoudness / 8), radius);
     }
-    return { origin: cloneCell(cell), cells, loudness: effectiveLoudness, tag };
+    return {
+      origin: cloneCell(cell),
+      cells: propagatedFields.length,
+      loudness: effectiveLoudness,
+      tag,
+    };
   }
 
   advanceEnvironmentFields(ticks: number): { aged: number; removed: number; spread: number; emitted: number; damaged: number } {
@@ -4366,11 +4435,12 @@ export class V1GridWorld implements InteractiveGridWorld {
         emitted += 1;
       }
       this.queueNpcTasksForDisturbance("fire", origin, origin, Math.max(0.75, fire.intensity), 8);
-      const lightRadius = Math.max(2, Math.round((fire.radius || 2) + 1));
-      for (let lx = -lightRadius; lx <= lightRadius; lx += 1) {
-        for (let ly = -lightRadius; ly <= lightRadius; ly += 1) {
+      const lightPropagationRadius = Math.max(2, Math.round((fire.radius || 2) + 1));
+      const lightRadius = Math.max(6, lightPropagationRadius);
+      for (let lx = -lightPropagationRadius; lx <= lightPropagationRadius; lx += 1) {
+        for (let ly = -lightPropagationRadius; ly <= lightPropagationRadius; ly += 1) {
           const distance = Math.abs(lx) + Math.abs(ly);
-          if (distance > lightRadius) continue;
+          if (distance > lightPropagationRadius) continue;
           const target: [number, number] = [origin[0] + lx, origin[1] + ly];
           if (!this.getActiveCell(target[0], target[1])) continue;
           const targetKey = this.environmentFieldKey(target);
@@ -4379,7 +4449,7 @@ export class V1GridWorld implements InteractiveGridWorld {
             {
               id: `env_light_${nextTick}_${origin[0]}_${origin[1]}_${target[0]}_${target[1]}`,
               kind: "light",
-              intensity: Math.max(0.05, fire.intensity * (1 - distance / (lightRadius + 1))),
+              intensity: Math.max(0.05, fire.intensity * (1 - distance / (lightPropagationRadius + 1))),
               age_ticks: 0,
               source: distance === 0 ? "runtime" : "propagation",
               tag: "firelight",
@@ -4543,15 +4613,23 @@ export class V1GridWorld implements InteractiveGridWorld {
 
   // Authored placements with push/remove deltas applied, each tagged with its
   // stable authored origin key (so manipulation can address a moved object).
-  private currentPlacements(): {
-    key: string;
-    placement: ObjectPlacementData;
-    object: ObjectData | undefined;
-  }[] {
+  private currentPlacements(): CurrentObjectPlacement[] {
     const delta = this.getMapDelta();
-    const removed = new Set(delta?.removed_objects || []);
-    const carried = new Set(Object.keys(delta?.carried_objects || {}));
-    const out: { key: string; placement: ObjectPlacementData; object: ObjectData | undefined }[] = [];
+    const movedObjects = delta?.moved_objects;
+    const removedObjects = delta?.removed_objects;
+    const carriedObjects = delta?.carried_objects;
+    const cached = this.currentPlacementCache;
+    if (
+      cached &&
+      cached.moved === movedObjects &&
+      cached.removed === removedObjects &&
+      cached.carried === carriedObjects
+    ) {
+      return cached.placements;
+    }
+    const removed = new Set(removedObjects || []);
+    const carried = new Set(Object.keys(carriedObjects || {}));
+    const out: CurrentObjectPlacement[] = [];
     for (const authored of this.activeMap.custom_object_placements || []) {
       const key = placementOriginKey(authored);
       if (removed.has(key) || carried.has(key)) continue;
@@ -4559,6 +4637,12 @@ export class V1GridWorld implements InteractiveGridWorld {
       const placement = moved ? { ...authored, cell: moved.cell, facing: moved.facing } : authored;
       out.push({ key, placement, object: this.objectById.get(authored.object_id) });
     }
+    this.currentPlacementCache = {
+      moved: movedObjects,
+      removed: removedObjects,
+      carried: carriedObjects,
+      placements: out,
+    };
     return out;
   }
 
@@ -5543,6 +5627,7 @@ export const dispatchV1UpdateCombatSession = (options: V1CombatSessionDispatchOp
         chaseRadius: options.chaseRadius,
         partyFollowers: options.partyFollowers,
         forceEnd: options.forceEnd,
+        requireAlert: options.requireAlert,
       },
     },
     world,

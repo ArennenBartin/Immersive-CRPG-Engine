@@ -27,7 +27,8 @@ import type { PlaySave } from "../src/schema/save";
 import {
   TEST_SUITE_MAP_IDS,
   TEST_SUITE_PLAYER_SPRITE_ID,
-  TEST_SUITE_VERSION,
+  TEST_SUITE_START_MAP_ID,
+  TEST_SUITE_START_SPAWN_ID,
 } from "../src/data/testingMapSuite";
 import {
   FINE_PER_MACRO,
@@ -71,7 +72,7 @@ console.log("suite: reference integrity");
   );
 
   ok(
-    "fresh Studio workspace is the canonical ten-map QA suite",
+    "fresh Studio workspace is the canonical eleven-map QA suite",
     defaultPackage.maps.length === TEST_SUITE_MAP_IDS.length &&
       defaultPackage.maps.every((map) => TEST_SUITE_MAP_IDS.includes(map.id)),
   );
@@ -92,15 +93,19 @@ console.log("suite: reference integrity");
       }),
   );
 
-  const staleQaPackage = {
+  const editedQaPackage = {
     ...defaultPackage,
     metadata: { ...defaultPackage.metadata, version: "stale-qa-version" },
+    maps: defaultPackage.maps.map((map, index) =>
+      index === 0 ? { ...map, display_name: "Hand-edited QA sentinel" } : map,
+    ),
   };
-  const refreshedQaPackage = refreshBundledEnginePackage(staleQaPackage);
+  const hydratedQaPackage = refreshBundledEnginePackage(editedQaPackage);
   ok(
-    "stale bundled QA workspaces refresh to the repository version",
-    refreshedQaPackage.metadata.version === TEST_SUITE_VERSION &&
-      refreshedQaPackage.maps.every((map) => TEST_SUITE_MAP_IDS.includes(map.id)),
+    "QA-shaped persisted workspaces are never refreshed during hydration",
+    hydratedQaPackage === editedQaPackage &&
+      hydratedQaPackage.metadata.version === "stale-qa-version" &&
+      hydratedQaPackage.maps[0]?.display_name === "Hand-edited QA sentinel",
   );
 
   const customPackage = {
@@ -130,11 +135,99 @@ console.log("suite: reference integrity");
 
   ok("suite start map exists", mapById.has(authored.metadata.start_map_id));
   ok(
-    "suite contains exactly the hub plus nine labs",
-    authored.maps.length === 10 &&
-      qaMaps.length === 10 &&
+    "suite contains exactly the hub plus ten labs",
+    authored.maps.length === 11 &&
+      qaMaps.length === 11 &&
       authored.maps.every((map) => expectedMapIds.has(map.id)),
     `maps: ${authored.maps.map((m) => m.id).join(", ")}`,
+  );
+
+  const perceptionMap = mapById.get("qa_perception_lab");
+  const portableLamp = authored.items.find((item) => item.id === "qa_portable_lamp");
+  const darkArtifact = authored.items.find((item) => item.id === "qa_dark_artifact");
+  const perceptionEntities = [
+    "qa_sight_watcher",
+    "qa_sound_hunter",
+    "qa_light_glass_watcher",
+  ].map((id) => authored.entities.find((entity) => entity.id === id));
+
+  ok(
+    "perception lab authors true zero ambient light",
+    perceptionMap?.ambient_light === 0,
+    `ambient=${perceptionMap?.ambient_light}`,
+  );
+  ok(
+    "portable QA lamp is a persistent radius-14 throwable light that exposes its carrier",
+    portableLamp?.light_source?.mobility === "throwable" &&
+      portableLamp.light_source.persistent === true &&
+      portableLamp.light_source.exposes_carrier === true &&
+      portableLamp.light_source.intensity > 0 &&
+      portableLamp.light_source.radius === 14 &&
+      portableLamp.light_source.stimulus_tags.includes("glass") &&
+      perceptionMap?.item_placements.some(
+        (placement) => placement.item_id === portableLamp.id,
+      ) === true,
+  );
+
+  const [sightWatcher, soundHunter, glassWatcher] = perceptionEntities;
+  const sensoryProfileIds = perceptionEntities
+    .map((entity) => entity?.sensory_profile?.id)
+    .filter((id): id is string => Boolean(id));
+  ok(
+    "perception lab has three distinct, channel-authored sensory profiles",
+    perceptionEntities.every((entity) => Boolean(entity?.sensory_profile?.channels.length)) &&
+      new Set(sensoryProfileIds).size === 3 &&
+      sightWatcher?.sensory_profile?.channels.some(
+        (channel) =>
+          channel.stimulus_kinds.includes("visible_player") &&
+          channel.requires_los &&
+          channel.requires_view_cone &&
+          channel.requires_illumination,
+      ) === true &&
+      soundHunter?.sensory_profile?.channels.some(
+        (channel) =>
+          channel.stimulus_kinds.includes("sound") &&
+          !channel.requires_los &&
+          !channel.requires_illumination,
+      ) === true &&
+      glassWatcher?.sensory_profile?.channels.some(
+        (channel) =>
+          channel.stimulus_kinds.includes("light") &&
+          channel.stimulus_tags?.includes("glass"),
+      ) === true,
+  );
+  ok(
+    "perception lab includes interior LOS occlusion and tagged smoke",
+    perceptionMap?.cells.some(
+      (cell) => cell.blocks_los && Math.abs(cell.x) < 10 && Math.abs(cell.z) < 10,
+    ) === true &&
+      perceptionMap.cells.some(
+        (cell) => cell.hazard === "smoke" && cell.tag === "smoke_obscurance",
+      ),
+  );
+  ok(
+    "dark artifact is placed as a non-emissive control",
+    Boolean(darkArtifact) &&
+      !darkArtifact?.light_source &&
+      perceptionMap?.item_placements.some(
+        (placement) => placement.item_id === darkArtifact?.id,
+      ) === true,
+  );
+  ok(
+    "perception lab has fixed/noise props and a return to the canonical hub spawn",
+    perceptionMap?.custom_object_placements.some(
+      (placement) =>
+        placement.id === "qa_fixed_environment_lamp" &&
+        placement.object_id === "obj_oil_lamp",
+    ) === true &&
+      perceptionMap.custom_object_placements.some(
+        (placement) => placement.id === "qa_noise_crate" && placement.object_id === "obj_crate",
+      ) &&
+      perceptionMap.exits.some(
+        (mapExit) =>
+          mapExit.target_map_id === TEST_SUITE_START_MAP_ID &&
+          mapExit.target_spawn_id === TEST_SUITE_START_SPAWN_ID,
+      ),
   );
 
   const checkActions = (owner: string, actions: EventActionData[]) => {

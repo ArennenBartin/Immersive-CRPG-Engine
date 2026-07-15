@@ -10,6 +10,7 @@ import {
 import {
   normalizePackageImportPayload,
   normalizePackageImportPayloadWithReport,
+  refreshBundledEnginePackage,
   serializePackageForExport,
   useEngineStore,
 } from "../src/store/engineStore";
@@ -91,7 +92,13 @@ useEngineStore.getState().setGamePackage(authoredPackage);
 
 const firstExport = serializePackageForExport(normalizedReport.package);
 const imported = normalizePackageImportPayload(JSON.parse(firstExport));
+const importedTwice = normalizePackageImportPayload(imported);
 const secondExport = serializePackageForExport(imported);
+assert.deepEqual(
+  importedTwice,
+  imported,
+  "importing an already-normalized package twice must not accumulate content or IDs",
+);
 assert.deepEqual(
   JSON.parse(secondExport),
   JSON.parse(firstExport),
@@ -103,6 +110,23 @@ assert.deepEqual(
   qaPackage.maps.map((map) => map.id),
   TEST_SUITE_MAP_IDS,
   "the explicit QA builder must create the canonical suite",
+);
+
+const editedQaShapedPackage: GamePackage = {
+  ...qaPackage,
+  metadata: { ...qaPackage.metadata, version: "author-controlled-version" },
+  maps: qaPackage.maps.map((map, index) =>
+    index === 0 ? { ...map, display_name: "Authored hydration sentinel" } : map,
+  ),
+};
+assert.equal(
+  refreshBundledEnginePackage(editedQaShapedPackage),
+  editedQaShapedPackage,
+  "browser hydration must never replace a QA-shaped authored workspace",
+);
+assert.equal(
+  refreshBundledEnginePackage(editedQaShapedPackage).maps[0]?.display_name,
+  "Authored hydration sentinel",
 );
 
 const maplessPackage: GamePackage = { ...base, maps: [] };

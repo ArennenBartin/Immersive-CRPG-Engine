@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { Canvas } from "@react-three/fiber";
+import { Canvas, useThree } from "@react-three/fiber";
+import { useShallow } from "zustand/react/shallow";
 import { useEngineStore } from "../store/engineStore";
 import {
   dispatchV1MoveEntity,
@@ -90,6 +91,7 @@ import {
   footprintIntersectsLeadingEdge,
   footprintsOverlap,
   macroKeyOfFine,
+  parseFineCoordKey,
   sameMacroCoord,
   scaleMacroDistanceToFine,
   getAlderamonticoEmotionalVerb,
@@ -100,8 +102,9 @@ import {
   recordEntityBehaviorDecision,
   resolveAlderamonticoBehavior,
   createImmersiveCombatTacticalSnapshotFromV1,
-  createImmersivePerceptionSnapshotFromV1,
+  createImmersiveViewerVisibilityFromV1,
   evaluateImmersiveWorldStateForSave,
+  queryImmersiveIlluminationAtCell,
   type AlderamonticoConditionReadout,
   type AlderamonticoAttendNode,
   type AlderamonticoAttendReading,
@@ -136,6 +139,7 @@ import {
   type ImmersiveStage4PerceptionAdvanceResult,
   type ImmersiveStage4PerceptionSnapshot,
   type ImmersiveStage6TacticalSnapshot,
+  type ImmersiveViewerVisibilitySnapshot,
   type ImmersiveGlobalVerbOptions,
   type ImmersiveGlobalVerbResult,
   type ImmersiveWorldStateAdvanceResult,
@@ -163,6 +167,7 @@ import { ScreenFX } from "./ScreenFX";
 import { SpatialInventoryGrid } from "./SpatialInventoryGrid";
 import {
   PLAYMODE_VERB_PAST_TENSE,
+  selectPlayModePickupCandidate,
   type PlayModeWheelVerbKind,
 } from "../utils/playModeCommands";
 import {
@@ -179,6 +184,7 @@ import {
   ObjectPlacementData,
   ScheduleEntryData,
   GamePackage,
+  CutsceneData,
   SkillData,
   SimulationWorkstationData,
 } from "../schema/game";
@@ -340,6 +346,10 @@ const registerRuntimeMapWindow = (map: MapData) => {
 };
 
 const MOVEMENT_REPEAT_START_MS = 105;
+// Allow a near-simultaneous second key to form a diagonal without making every
+// ordinary cardinal press feel delayed. The previous 80 ms window was longer
+// than a full responsive input budget before any game work even began.
+const MOVEMENT_CHORD_BUFFER_MS = 24;
 // Held-to-move cadence: three fine steps should take roughly one legacy macro
 // step. Use 100/ratio instead of 105/ratio so the repeat lands cleanly on a
 // 60fps frame cadence instead of aliasing into visible 50ms chunks.
@@ -350,7 +360,13 @@ const PLAYER_FOOTSTEP_FINE_STEP_INTERVAL = FINE_PER_MACRO;
 // sixth step while movement is repeating quickly.
 const PLAYER_FOOTSTEP_COOLDOWN_MS = 70;
 const COMBAT_ACTOR_SWITCH_INPUT_DELAY_MS = 180;
+const EMPTY_ENGINE_EVENTS: ReturnType<typeof usePlayStore.getState>["engineEvents"] = [];
 const PLAY_RENDER_RADIUS = scaleMacroDistanceToFine(20);
+const PERFORMANCE_FRAME_INTERVAL_MS = 1000 / 45;
+// Moving observers already refresh perception at each macro-tile boundary.
+// While stationary, Performance mode uses a coarser clock bucket so the same
+// large sensory snapshot is not rebuilt again between those boundaries.
+const PERFORMANCE_PERCEPTION_CLOCK_BUCKET_MINUTES = 15;
 const PLAY_NATIVE_DPR = Math.max(
   1,
   typeof window === "undefined" ? 1 : window.devicePixelRatio || 1,
@@ -361,6 +377,20 @@ const PLAY_DPR_MAX = Math.max(
   1.5,
   Math.min(PLAY_NATIVE_DPR + 0.25, 2.25),
 );
+
+function PerformanceFrameDriver({ enabled }: { enabled: boolean }) {
+  const invalidate = useThree((state) => state.invalidate);
+  useEffect(() => {
+    if (!enabled) return undefined;
+    invalidate();
+    const interval = window.setInterval(
+      invalidate,
+      PERFORMANCE_FRAME_INTERVAL_MS,
+    );
+    return () => window.clearInterval(interval);
+  }, [enabled, invalidate]);
+  return null;
+}
 const NPC_SIMULATION_RADIUS = scaleMacroDistanceToFine(16);
 const NPC_SCHEDULE_PATH_LIMIT = scaleMacroDistanceToFine(96);
 // Shove distance is authored in macro tiles and resolved cell-by-cell in fine
@@ -990,6 +1020,140 @@ const getEffectiveWorldItems = (
   ];
 };
 
+const VISIBILITY_ENVIRONMENT_KINDS = new Set([
+  "light",
+  "fire",
+  "smoke",
+  "steam",
+  "poison_gas",
+  "acid_fumes",
+]);
+
+const sensoryEnvironmentSignature = (
+  delta: MapDelta | undefined,
+  includeNonFootstepSound: boolean,
+) =>
+  Object.entries(delta?.environment_fields || {}).flatMap(([cellKey, fields]) =>
+    fields
+      .filter((field) => {
+        if (VISIBILITY_ENVIRONMENT_KINDS.has(field.kind)) return true;
+        if (!includeNonFootstepSound || field.kind !== "sound") return false;
+        return field.action !== "footstep" && field.tag !== "footstep";
+      })
+      .map((field) => [
+        cellKey,
+        field.id,
+        field.kind,
+        field.intensity,
+        field.radius,
+        field.created_at_tick,
+        field.expires_at_tick,
+        field.action,
+        field.tag,
+        field.frequency_tag,
+        field.origin_cell,
+        field.actor_id,
+      ]),
+  );
+
+const perceptionInputKeyForSave = (
+  gamePackage: GamePackage,
+  map: MapData,
+  save: PlaySave,
+  coarseCadence = false,
+) => {
+  const delta = save.map_deltas?.[map.id];
+  const party = new Set(save.party_members || []);
+  const perceivers = (map.entity_placements || [])
+    .map((placement, index) => {
+      if (party.has(placement.entity_id)) return null;
+      const key = entityPlacementStateKey(map.id, placement, index);
+      const state = save.entity_states?.[key] || save.entity_states?.[placement.entity_id] || {};
+      const cell = state.cell || placement.cell;
+      const facing = state.facing || placement.facing || [0, -1];
+      return [
+        key,
+        Boolean(state.dead),
+        Boolean(state.hidden),
+        Math.floor(cell[0] / FINE_PER_MACRO),
+        Math.floor(cell[1] / FINE_PER_MACRO),
+        facing[0],
+        facing[1],
+      ];
+    })
+    .filter(Boolean);
+  const playerCell = save.player.cell || [0, 0];
+
+  return JSON.stringify({
+    map: map.id,
+    clock: Math.floor((save.clock_minutes || 0) / (coarseCadence ? 5 : 1)),
+    combat: Boolean(save.in_combat),
+    player_macro: [
+      Math.floor(playerCell[0] / FINE_PER_MACRO),
+      Math.floor(playerCell[1] / FINE_PER_MACRO),
+    ],
+    perceivers,
+    party: save.party_members || [],
+    inventory: (save.inventory || []).map((entry) => [entry.id, entry.count]),
+    light_states: save.flags?.immersive_light_states || {},
+    environment: sensoryEnvironmentSignature(delta, true),
+    opened_doors: delta?.opened_doors || [],
+    moved_objects: delta?.moved_objects || {},
+    carried_objects: delta?.carried_objects || {},
+    removed_objects: delta?.removed_objects || [],
+    taken_items: delta?.taken_items || [],
+    dropped_items: delta?.dropped_items || [],
+    // Performance mode consumes the already-normalized sensory and physical
+    // world deltas above; serializing a full tile-layer snapshot every fine step is
+    // both redundant and disproportionately expensive on large maps.
+    immersive_tile_layers: coarseCadence
+      ? undefined
+      : save.immersive_tile_layers?.[map.id] || null,
+    package_version: gamePackage.metadata.version,
+  });
+};
+
+const viewerVisibilityInputKeyForSave = (
+  gamePackage: GamePackage,
+  map: MapData,
+  save: PlaySave,
+  coarseObserver = false,
+) => {
+  const delta = save.map_deltas?.[map.id];
+  const stablePlayerCell: [number, number] = coarseObserver
+    ? [
+        Math.floor(save.player.cell[0] / FINE_PER_MACRO) * FINE_PER_MACRO + FINE_HALF_EXTENT,
+        Math.floor(save.player.cell[1] / FINE_PER_MACRO) * FINE_PER_MACRO + FINE_HALF_EXTENT,
+      ]
+    : [save.player.cell[0], save.player.cell[1]];
+  const carriedActorIds = new Set(
+    Object.values(delta?.carried_objects || {}).flatMap(
+      (record) => record.actor_ids || [],
+    ),
+  );
+  const carrierCells = [...carriedActorIds].map((actorId) => {
+    if (actorId === "player") return [actorId, stablePlayerCell];
+    return [actorId, save.entity_states?.[actorId]?.cell || null];
+  });
+
+  return JSON.stringify({
+    map: map.id,
+    package_version: gamePackage.metadata.version,
+    clock: Math.floor((save.clock_minutes || 0) / (coarseObserver ? 5 : 1)),
+    player: stablePlayerCell,
+    inventory: (save.inventory || []).map((entry) => [entry.id, entry.count]),
+    light_states: save.flags?.immersive_light_states || {},
+    opened_doors: delta?.opened_doors || [],
+    moved_objects: delta?.moved_objects || {},
+    carried_objects: delta?.carried_objects || {},
+    carrier_cells: carrierCells,
+    removed_objects: delta?.removed_objects || [],
+    taken_items: delta?.taken_items || [],
+    dropped_items: delta?.dropped_items || [],
+    environment: sensoryEnvironmentSignature(delta, false),
+  });
+};
+
 // Authored container values overridden by anything the save remembers.
 const getContainerRuntimeState = (
   container: ContainerPlacementData,
@@ -1051,16 +1215,37 @@ const getNearbyHostiles = (
   gp: GamePackage,
   radius: number,
 ): NearbyHostile[] => {
-  if (!save || !map) return [];
-  return getV1NearbyHostiles({ gamePackage: gp, save, mapId: map.id, radius }).map((hostile) => ({
-    key: hostile.id,
-    name: hostile.name,
-    cell: hostile.cell,
-    hp: hostile.hp,
-    maxHp: hostile.maxHp,
-    speed: hostile.speed,
-    dist: hostile.dist ?? 0,
-  }));
+  if (!save || !map || (save.playerStats.hp ?? 0) <= 0) return [];
+  const party = new Set(save.party_members || []);
+  const entityById = new Map(gp.entities.map((entity) => [entity.id, entity]));
+  const alertedChaseRadius = Math.max(radius, scaleMacroDistanceToFine(14));
+  return (map.entity_placements || [])
+    .flatMap((placement, index): NearbyHostile[] => {
+      if (party.has(placement.entity_id)) return [];
+      const definition = entityById.get(placement.entity_id);
+      if (!definition || definition.is_npc) return [];
+      const key = entityPlacementStateKey(map.id, placement, index);
+      const state = save.entity_states?.[key] || {};
+      const hp = state.hp ?? definition.max_hp ?? 1;
+      if (state.dead || state.hidden || hp <= 0) return [];
+      const cell = (state.cell || placement.cell) as [number, number];
+      const dist =
+        Math.abs(save.player.cell[0] - cell[0]) +
+        Math.abs(save.player.cell[1] - cell[1]);
+      const combatAlerted =
+        state.alertness === "combat" && Number(state.alert_score || 0) >= 0.45;
+      if (dist > radius && !(combatAlerted && dist <= alertedChaseRadius)) return [];
+      return [{
+        key,
+        name: definition.display_name,
+        cell: [cell[0], cell[1]],
+        hp,
+        maxHp: definition.max_hp ?? 1,
+        speed: definition.speed ?? 10,
+        dist,
+      }];
+    })
+    .sort((left, right) => left.dist - right.dist || left.key.localeCompare(right.key));
 };
 
 // ── The controlled actor ────────────────────────────────────────────────────
@@ -1113,6 +1298,28 @@ const getControlledActor = (
   gp: GamePackage,
 ): ControlledActor | null => {
   if (!save) return null;
+  // Exploration always controls the player. Reading that snapshot directly
+  // avoids constructing a full V1GridWorld (including save cloning and map
+  // indexing) every render and again for every fine movement input. Combat
+  // still delegates to the authoritative turn-aware adapter below.
+  if (!save.in_combat) {
+    if ((save.playerStats.hp ?? 0) <= 0) return null;
+    return {
+      key: "player",
+      isPlayer: true,
+      name: "You",
+      cell: [save.player.cell[0], save.player.cell[1]],
+      facing: [save.player.facing[0], save.player.facing[1]],
+      hp: save.playerStats.hp,
+      maxHp: save.playerStats.max_hp,
+      attack: save.playerStats.attack,
+      defense: save.playerStats.defense,
+      speed: save.playerStats.speed ?? 10,
+      mp: save.playerStats.mp ?? 0,
+      maxMp: save.playerStats.max_mp ?? 0,
+      skills: [...(save.known_skills || [])],
+    };
+  }
   const actor = getV1ControlledCombatant({ gamePackage: gp, save });
   if (!actor) return null;
   return {
@@ -1556,7 +1763,30 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     activeContainerId,
     closeContainer,
     chooseLevelUpStat,
-  } = usePlayStore();
+  } = usePlayStore(
+    useShallow((state) => ({
+      saveData: state.saveData,
+      logMessages: state.logMessages,
+      initSave: state.initSave,
+      updatePlayer: state.updatePlayer,
+      commitRuntimeSave: state.commitRuntimeSave,
+      addLog: state.addLog,
+      resetRun: state.resetRun,
+      activeDialogueId: state.activeDialogueId,
+      activeDialogueNodeId: state.activeDialogueNodeId,
+      advanceDialogue: state.advanceDialogue,
+      endDialogue: state.endDialogue,
+      setQuestState: state.setQuestState,
+      updatePlayerHp: state.updatePlayerHp,
+      activeShopId: state.activeShopId,
+      openShop: state.openShop,
+      closeShop: state.closeShop,
+      updateMoney: state.updateMoney,
+      activeContainerId: state.activeContainerId,
+      closeContainer: state.closeContainer,
+      chooseLevelUpStat: state.chooseLevelUpStat,
+    })),
+  );
   const [activeMapState, setActiveMap] = useState<MapData | null>(null);
   const activeMap = useMemo(() => {
     if (!saveData?.current_map_id) return activeMapState;
@@ -1656,6 +1886,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   const [activeAttendNodePanel, setActiveAttendNodePanel] = useState<AttendNodePanelState | null>(null);
   const verbTargetingRef = useRef<{ verb: PlayModeWheelVerbKind; itemId?: string } | null>(null);
   const perceptionAdvanceKeyRef = useRef("");
+  const lastExplorationPerceptionRef = useRef<ImmersiveStage4PerceptionSnapshot | null>(null);
+  const [perceptionSnapshotState, setPerceptionSnapshotState] =
+    useState<ImmersiveStage4PerceptionSnapshot | null>(null);
   const stealthAlertStateRef = useRef<Map<string, ImmersiveAlertnessState>>(new Map());
   const worldStateAdvanceKeyRef = useRef("");
   const worldStateNoticeKeyRef = useRef("");
@@ -1701,7 +1934,155 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   const setVisualPreset = useVisualSettingsStore((s) => s.setPreset);
   const fogOfWar = useVisualSettingsStore((s) => s.fogOfWar);
   const setFogOfWar = useVisualSettingsStore((s) => s.setFogOfWar);
-  const engineEvents = usePlayStore((s) => s.engineEvents);
+  const [pageVisible, setPageVisible] = useState(
+    () => typeof document === "undefined" || document.visibilityState !== "hidden",
+  );
+  useEffect(() => {
+    const syncVisibility = () => {
+      setPageVisible(document.visibilityState !== "hidden");
+    };
+    document.addEventListener("visibilitychange", syncVisibility);
+    return () => document.removeEventListener("visibilitychange", syncVisibility);
+  }, []);
+  const performancePerceptionCadence = visualPreset === "performance";
+  const perceptionMapDelta =
+    activeMap && saveData
+      ? saveData.map_deltas?.[activeMap.id]
+      : undefined;
+  const perceptionClockCadence = performancePerceptionCadence
+    ? Math.floor(
+        (saveData?.clock_minutes || 0) /
+          PERFORMANCE_PERCEPTION_CLOCK_BUCKET_MINUTES,
+      )
+    : saveData?.clock_minutes;
+  // The runtime adapter defensively clones these arrays on every command.
+  // Depend on their contents in coarse mode so an otherwise identical fine
+  // step does not defeat the perception memo just because the array identity
+  // changed.
+  const perceptionPartySignature = (saveData?.party_members || []).join("\u001f");
+  const perceptionInventorySignature = (saveData?.inventory || [])
+    .map((entry) => `${entry.id}:${entry.count}`)
+    .join("\u001f");
+  // Building perception keys walks every sensory field. In Performance mode,
+  // rebuild on macro movement, meaningful world changes, or a coarse
+  // stationary clock bucket; fine footsteps no longer pay for two full scans
+  // just to reproduce the previous key.
+  const perceptionInputKey = useMemo(
+    () =>
+      activeMap && saveData
+        ? perceptionInputKeyForSave(
+            gamePackage,
+            activeMap,
+            saveData,
+            performancePerceptionCadence,
+          )
+        : "",
+    [
+      activeMap,
+      gamePackage,
+      performancePerceptionCadence,
+      performancePerceptionCadence ? null : saveData,
+      performancePerceptionCadence ? playerMacroX : saveData?.player.cell[0],
+      performancePerceptionCadence ? playerMacroZ : saveData?.player.cell[1],
+      perceptionClockCadence,
+      saveData?.in_combat,
+      performancePerceptionCadence
+        ? perceptionPartySignature
+        : saveData?.party_members,
+      performancePerceptionCadence
+        ? perceptionInventorySignature
+        : saveData?.inventory,
+      saveData?.flags?.immersive_light_states,
+      performancePerceptionCadence ? null : saveData?.entity_states,
+      perceptionMapDelta?.opened_doors,
+      perceptionMapDelta?.moved_objects,
+      perceptionMapDelta?.carried_objects,
+      perceptionMapDelta?.removed_objects,
+      perceptionMapDelta?.taken_items,
+      perceptionMapDelta?.dropped_items,
+      performancePerceptionCadence
+        ? null
+        : perceptionMapDelta?.environment_fields,
+      performancePerceptionCadence
+        ? null
+        : saveData?.immersive_tile_layers?.[activeMap?.id || ""],
+    ],
+  );
+  const viewerVisibilityInputKey = useMemo(
+    () =>
+      activeMap && saveData
+        ? viewerVisibilityInputKeyForSave(
+            gamePackage,
+            activeMap,
+            saveData,
+            performancePerceptionCadence,
+          )
+        : "",
+    [
+      activeMap,
+      gamePackage,
+      performancePerceptionCadence,
+      performancePerceptionCadence ? null : saveData,
+      performancePerceptionCadence ? playerMacroX : saveData?.player.cell[0],
+      performancePerceptionCadence ? playerMacroZ : saveData?.player.cell[1],
+      perceptionClockCadence,
+      performancePerceptionCadence
+        ? perceptionInventorySignature
+        : saveData?.inventory,
+      saveData?.flags?.immersive_light_states,
+      perceptionMapDelta?.opened_doors,
+      perceptionMapDelta?.moved_objects,
+      perceptionMapDelta?.carried_objects,
+      perceptionMapDelta?.removed_objects,
+      perceptionMapDelta?.taken_items,
+      perceptionMapDelta?.dropped_items,
+      performancePerceptionCadence
+        ? null
+        : perceptionMapDelta?.environment_fields,
+      performancePerceptionCadence ? null : saveData?.entity_states,
+    ],
+  );
+  const pendingExploredCellsRef = useRef<Map<string, Set<string>>>(new Map());
+  const exploredFlushTimerRef = useRef<number | null>(null);
+  const flushExploredCells = useCallback(() => {
+    if (exploredFlushTimerRef.current !== null) {
+      window.clearTimeout(exploredFlushTimerRef.current);
+      exploredFlushTimerRef.current = null;
+    }
+    const pending = pendingExploredCellsRef.current;
+    if (pending.size === 0) return;
+    pendingExploredCellsRef.current = new Map();
+    pending.forEach((keys, mapId) => {
+      usePlayStore.getState().markCellsExplored(mapId, [...keys]);
+    });
+  }, []);
+  const queueExploredCells = useCallback(
+    (mapId: string, keys: string[]) => {
+      if (keys.length === 0) return;
+      const pending = pendingExploredCellsRef.current;
+      const mapKeys = pending.get(mapId) || new Set<string>();
+      keys.forEach((key) => mapKeys.add(key));
+      pending.set(mapId, mapKeys);
+      if (exploredFlushTimerRef.current === null) {
+        exploredFlushTimerRef.current = window.setTimeout(flushExploredCells, 220);
+      }
+    },
+    [flushExploredCells],
+  );
+  useEffect(
+    () => () => {
+      flushExploredCells();
+    },
+    [flushExploredCells],
+  );
+  const [showEngineEvents, setShowEngineEvents] = useState(false);
+  const [showBehaviorIntents, setShowBehaviorIntents] = useState(false);
+  const [showPerceptionDebug, setShowPerceptionDebug] = useState(false);
+  const engineEvents = usePlayStore((state) =>
+    showEngineEvents || Boolean(saveData?.in_combat)
+      ? state.engineEvents
+      : EMPTY_ENGINE_EVENTS,
+  );
   const combatTurnSerial = useMemo(
     () =>
       [...engineEvents]
@@ -1709,8 +2090,6 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         .find((event) => event.type === "combat_turn_advanced")?.id || 0,
     [engineEvents],
   );
-  const [showEngineEvents, setShowEngineEvents] = useState(false);
-  const [showBehaviorIntents, setShowBehaviorIntents] = useState(false);
   const visualConfig = SCREEN_VISUAL_PRESETS[visualPreset];
   const visualDprCap = Math.min(PLAY_DPR_MAX, visualConfig.dprCap);
   const effectivePlayDpr = Math.min(playDpr, visualDprCap);
@@ -1747,15 +2126,29 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   const activeMapDelta = activeMap
     ? saveData?.map_deltas?.[activeMap.id]
     : undefined;
+  const activePlacementDelta = useMemo<MapDelta | undefined>(() => {
+    if (!activeMapDelta) return undefined;
+    return {
+      opened_doors: activeMapDelta.opened_doors,
+      moved_objects: activeMapDelta.moved_objects,
+      removed_objects: activeMapDelta.removed_objects,
+      carried_objects: activeMapDelta.carried_objects,
+    };
+  }, [
+    activeMapDelta?.opened_doors,
+    activeMapDelta?.moved_objects,
+    activeMapDelta?.removed_objects,
+    activeMapDelta?.carried_objects,
+  ]);
   const isDoorOpenForPlay = useCallback(
-    (placement: ObjectPlacementData) => isDoorPlacementOpen(activeMapDelta, placement),
-    [activeMapDelta],
+    (placement: ObjectPlacementData) => isDoorPlacementOpen(activePlacementDelta, placement),
+    [activePlacementDelta],
   );
   // Authored object placements with kernel push/remove deltas applied, so
   // collision/navigation/rendering all see objects at their current cells.
   const effectiveObjectPlacements = useMemo(
-    () => applyPlacementDeltas(activeMap?.custom_object_placements, activeMapDelta),
-    [activeMap?.custom_object_placements, activeMapDelta],
+    () => applyPlacementDeltas(activeMap?.custom_object_placements, activePlacementDelta),
+    [activeMap?.custom_object_placements, activePlacementDelta],
   );
   const blockingPlacementCells = useMemo(() => {
     const blocked = new Set<string>();
@@ -2574,11 +2967,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   );
 
   const presentImmersiveVerbOutcome = useCallback(
-    (result: ImmersiveGlobalVerbResult, itemName?: string) => {
+    (result: ImmersiveGlobalVerbResult, itemName?: string, presentAsThrow = false) => {
       const fx = useFxStore.getState();
       const verb = result.verb.verb;
       const presentation =
-        IMMERSIVE_VERB_PRESENTATION[verb] || {
+        (presentAsThrow ? IMMERSIVE_VERB_PRESENTATION.throw : IMMERSIVE_VERB_PRESENTATION[verb]) || {
           title: titleCaseEffect(verb),
           popup: titleCaseEffect(verb),
           color: "#ddd6fe",
@@ -2590,7 +2983,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       const effectCell = effectCellForVerbResult(result);
       const detail = worldSummaryForVerbResult(result);
       const reactionSummary = reactionSummaryForVerbResult(result);
-      const title = verb === "drop" && itemName ? `Dropped ${itemName}` : presentation.title;
+      const title = presentAsThrow && itemName
+        ? `Threw ${itemName}`
+        : verb === "drop" && itemName
+          ? `Dropped ${itemName}`
+          : presentation.title;
 
       playSfx(presentation.sfx, {
         volume: presentation.volume,
@@ -2628,7 +3025,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         cell: effectCell,
       });
 
-      if (verb === "drop" && itemName) {
+      if (presentAsThrow && itemName) {
+        addLog(`Threw ${itemName} to (${effectCell[0]}, ${effectCell[1]}).`);
+      } else if (verb === "drop" && itemName) {
         addLog(`Dropped ${itemName} at (${effectCell[0]}, ${effectCell[1]}).`);
       } else {
         addLog(`${presentation.title} at (${effectCell[0]}, ${effectCell[1]}).`);
@@ -3177,7 +3576,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         const ez = state?.cell ? state.cell[1] : p.cell[1];
 
         const dist = Math.abs(px - ex) + Math.abs(pz - ez);
-        if (dist <= 2) {
+        if (dist <= 2 && state?.alertness === "combat" && Number(state?.alert_score || 0) >= 0.45) {
           const entityData = useEngineStore
             .getState()
             .gamePackage.entities.find((e) => e.id === p.entity_id);
@@ -3201,12 +3600,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       if (activeCutscene) return;
 
       const save = usePlayStore.getState().saveData;
-      const map = activeMapRef.current;
-      const gp = getRuntimeGamePackage();
       const combatTrack =
-        gp.settings?.music_tracks?.combat || DEFAULT_COMBAT_TRACK;
-      const engaged =
-        getNearbyHostiles(save, map, gp, THREAT_RADIUS).length > 0;
+        getRuntimeGamePackage().settings?.music_tracks?.combat || DEFAULT_COMBAT_TRACK;
+      const engaged = Boolean(save?.in_combat);
       const current = getCurrentMusicUrl();
 
       if (engaged) {
@@ -3226,19 +3622,20 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
 
   useEffect(() => {
     const currentSave = usePlayStore.getState().saveData;
-    if (!currentSave || !activeMap || activeCutscene || currentSave.in_combat) return;
-    if (!mapHasPerceivingActor) return;
-    const playerCell = currentSave.player.cell || [0, 0];
-    const key = [
-      activeMap.id,
-      Math.floor(currentSave.clock_minutes || 0),
-      playerCell[0],
-      playerCell[1],
-    ].join(":");
+    if (!currentSave || !activeMap || activeCutscene) return;
+    if (!mapHasPerceivingActor) {
+      lastExplorationPerceptionRef.current = null;
+      setPerceptionSnapshotState((current) => current === null ? current : null);
+      return;
+    }
+    const key = perceptionInputKey;
+    if (!key) return;
     if (perceptionAdvanceKeyRef.current === key) return;
     perceptionAdvanceKeyRef.current = key;
 
     const result = advanceImmersivePerceptionForSave(gamePackage, currentSave, activeMap.id);
+    lastExplorationPerceptionRef.current = result.snapshot;
+    setPerceptionSnapshotState(result.snapshot);
     presentStealthPerceptionFeedback(result, currentSave);
     const previousFeedback = currentSave.flags?.immersive_stealth_feedback as StealthFeedbackRecord | undefined;
     const nextFeedback = result.save.flags?.immersive_stealth_feedback as StealthFeedbackRecord | undefined;
@@ -3257,12 +3654,8 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     commitRuntimeSave,
     gamePackage,
     mapHasPerceivingActor,
+    perceptionInputKey,
     presentStealthPerceptionFeedback,
-    saveData?.clock_minutes,
-    saveData?.current_map_id,
-    saveData?.in_combat,
-    playerMacroX,
-    playerMacroZ,
   ]);
 
   useEffect(() => {
@@ -3308,6 +3701,45 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   useEffect(() => {
     if (!saveData || !activeMap || activeCutscene) return;
     if (saveData.playerStats.hp <= 0) return;
+
+    // Starting exploration combat requires a live hostile that has already
+    // reached combat alertness. Most save updates (movement energy, footsteps,
+    // exploration, chemistry) cannot possibly change the session. Avoid
+    // cloning/indexing the complete runtime world for those no-op checks.
+    if (!saveData.in_combat) {
+      const party = new Set(saveData.party_members || []);
+      const entityById = new Map(
+        gamePackage.entities.map((entity) => [entity.id, entity]),
+      );
+      const alertChaseRadius = Math.max(
+        THREAT_RADIUS,
+        scaleMacroDistanceToFine(14),
+      );
+      const hasCombatReadyHostile = (activeMap.entity_placements || []).some(
+        (placement, index) => {
+          if (party.has(placement.entity_id)) return false;
+          const definition = entityById.get(placement.entity_id);
+          if (!definition || definition.is_npc) return false;
+          const key = entityPlacementStateKey(activeMap.id, placement, index);
+          const state = saveData.entity_states?.[key] || {};
+          const hp = state.hp ?? definition.max_hp ?? 1;
+          if (state.dead || state.hidden || hp <= 0) return false;
+          if (
+            state.alertness !== "combat" ||
+            Number(state.alert_score || 0) < 0.45
+          ) {
+            return false;
+          }
+          const cell = (state.cell || placement.cell) as [number, number];
+          const distance =
+            Math.abs(saveData.player.cell[0] - cell[0]) +
+            Math.abs(saveData.player.cell[1] - cell[1]);
+          return distance <= alertChaseRadius;
+        },
+      );
+      if (!hasCombatReadyHostile) return;
+    }
+
     const gp = getRuntimeGamePackage();
     const store = usePlayStore.getState();
 
@@ -3317,6 +3749,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       mapId: activeMap.id,
       threatRadius: THREAT_RADIUS,
       chaseRadius: CHASE_RADIUS,
+      requireAlert: true,
       partyFollowers: (latestPartyFollowersRef.current || []).map((follower) => ({
         entityId: follower.entity_id,
         cell: follower.cell,
@@ -3351,7 +3784,15 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       playSfx("ui_back", { volume: 0.2, cooldownMs: 180 });
       logCoreExperience(outcome.experience);
     }
-  }, [saveData, activeMap, activeCutscene, commitRuntimeSave, logCoreExperience, playSfx]);
+  }, [
+    saveData,
+    activeMap,
+    activeCutscene,
+    commitRuntimeSave,
+    gamePackage.entities,
+    logCoreExperience,
+    playSfx,
+  ]);
 
   // Every player fine step advances hostile movement by one fine cell. Full
   // actions additionally tick statuses and pass control to the next living
@@ -4145,12 +4586,12 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
 
         const state = repeatStateRef.current;
         
-        // Input buffer for diagonal targeting (80ms)
+        // Brief chord window for diagonal targeting.
         if (!state.active) {
           if (!state.bufferStart) {
             state.bufferStart = time;
             return;
-          } else if (time - state.bufferStart < 80) {
+          } else if (time - state.bufferStart < MOVEMENT_CHORD_BUFFER_MS) {
             return;
           }
         }
@@ -4292,6 +4733,40 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
 
     const handleKeyUp = (e: KeyboardEvent) => {
       const key = e.key.toLowerCase();
+      const pendingTap =
+        isMovementCommandKey(key) &&
+        keysDownRef.current.has(key) &&
+        !repeatStateRef.current.active &&
+        !inputBlockedRef.current &&
+        !isCombatInputGateActive();
+
+      // The diagonal-input buffer deliberately waits briefly before the first
+      // held step. A quick tap can be pressed and released before the next
+      // animation frame (especially while a costly render is finishing), so
+      // commit it here even when the buffer never got a chance to start.
+      if (pendingTap) {
+        if (key === "z" || key === ".") {
+          waitRef.current?.();
+        } else {
+          let ax = 0;
+          let az = 0;
+          const heldKeys = keysDownRef.current;
+          if (heldKeys.has("arrowup") || heldKeys.has("w")) az -= 1;
+          if (heldKeys.has("arrowdown") || heldKeys.has("s")) az += 1;
+          if (heldKeys.has("arrowleft") || heldKeys.has("a")) ax -= 1;
+          if (heldKeys.has("arrowright") || heldKeys.has("d")) ax += 1;
+          const [rx, rz] = getCameraRelativeGridMove(
+            ax,
+            az,
+            cameraAzimuthRef.current,
+          );
+          if (handleMoveRef.current && (rx !== 0 || rz !== 0)) {
+            handleMoveRef.current(rx, rz);
+          }
+        }
+        resetRepeatInputState();
+      }
+
       keysDownRef.current.delete(key);
       if (isMovementCommandKey(key)) {
         combatInputHeldKeysRef.current.delete(key);
@@ -4299,13 +4774,28 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       }
     };
 
+    const clearHeldInput = () => {
+      keysDownRef.current.clear();
+      combatInputHeldKeysRef.current.clear();
+      resetRepeatInputState();
+      releaseCombatInputGateIfReady();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") clearHeldInput();
+    };
+
     window.addEventListener("keydown", handleKeyDown);
     window.addEventListener("keyup", handleKeyUp);
+    window.addEventListener("blur", clearHeldInput);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
       cancelAnimationFrame(animId);
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("keyup", handleKeyUp);
+      window.removeEventListener("blur", clearHeldInput);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      clearHeldInput();
     };
   }, [
     isCombatInputGateActive,
@@ -4318,9 +4808,10 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   useEffect(() => {
     // Resolve which map to play. Mid-session the save's current_map_id wins so
     // teleport_player and map exits can change maps without wiping the run.
-    // On first entry an explicit editor selection wins, then a resumable save,
-    // then the package's declared start map, then its first map, then the
-    // built-in test map.
+    // A valid resumable save wins on every entry. The Map Editor's explicit
+    // "Play map" action clears that save first, allowing the selected map to
+    // win without risking a kept run. Package start, first map, and the built-in
+    // test map remain the final fallbacks.
     const { map: resolvedMap, versionOk } = resolvePlayModeMap({
       gamePackage,
       selectedMapId: useEngineStore.getState().selectedMapId,
@@ -4484,6 +4975,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
 
     const nowReal = performance.now();
     if (nowReal - lastBarkRealRef.current < BARK_MIN_REAL_INTERVAL_MS) return;
+    // This is a scan throttle, not only a playback cooldown. Without updating
+    // it after an unsuccessful search, a map with authored barks but no
+    // currently eligible pair rescanned every placement and every NPC pair on
+    // every fine movement step.
+    lastBarkRealRef.current = nowReal;
 
     const clockMin = sData.clock_minutes ?? 0;
     const playerCell = sData.player.cell;
@@ -4553,7 +5049,6 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         } else {
           barkCooldownRef.current.set(bark.id, clockMin);
         }
-        lastBarkRealRef.current = nowReal;
         const cellOf = (entityId: string) =>
           entityId === a.id ? a.cell : b.cell;
         const actorOf = (entityId: string) =>
@@ -4573,14 +5068,16 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     }
   };
 
-  const pumpEngine = () => {
-    usePlayStore.setState((state) => {
+  const buildExplorationPumpState = (state: {
+    saveData: PlaySave | null;
+    logMessages: string[];
+  }) => {
       const sData = state.saveData;
       const gp = getRuntimeGamePackage();
-      if (!activeMap || !sData) return state;
+      if (!activeMap || !sData) return null;
       // In combat the explicit turn queue owns all actor scheduling — the
       // energy pump (and the world clock with it) holds its breath.
-      if (sData.in_combat) return state;
+      if (sData.in_combat) return null;
 
       let playerHp = sData.playerStats.hp;
       let playerEnergy = sData.playerStats.energy || 0;
@@ -4759,11 +5256,16 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             : undefined;
           const activeTask = activeReactiveTaskForActor(nextNpcTasks, readyNpc.key, turnTick);
           let reactive = reactiveSignalFromTask(activeTask);
-          if (!readyNpc.def!.is_npc && distToPlayer <= CHASE_RADIUS) {
+          const tracksLivePlayer =
+            !readyNpc.def!.is_npc &&
+            actorState.alertness === "combat" &&
+            actorState.perception_tracks_live_target === true;
+          if (tracksLivePlayer) {
+            const detectedCell = (actorState.investigation_target_cell || playerCell) as [number, number];
             reactive = {
               kind: "hostile_act",
-              reason: "player detected",
-              target_cell: [playerCell[0], playerCell[1]],
+              reason: "player directly detected",
+              target_cell: [detectedCell[0], detectedCell[1]],
               target_actor_id: "player",
               priority: Math.max(10, reactive?.priority || 0),
             };
@@ -4816,7 +5318,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           }
 
           const threat =
-            !readyNpc.def!.is_npc || behavior === "flee" || behavior === "attack"
+            tracksLivePlayer || behavior === "flee" || behavior === "attack"
               ? {
                   actor_id: "player",
                   cell: [playerCell[0], playerCell[1]] as [number, number],
@@ -5105,7 +5607,12 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             ? [...state.logMessages, ...messages].slice(-20)
             : state.logMessages,
       };
-    });
+  };
+
+  const pumpEngine = () => {
+    const state = usePlayStore.getState();
+    const pumped = buildExplorationPumpState(state);
+    if (pumped) usePlayStore.setState(pumped);
     // World has settled for this turn — check for an overheard exchange.
     maybeFireBarks();
   };
@@ -5728,6 +6235,8 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                 setCutsceneActionIndex(0);
                 setCameraFocusOverride(null);
                 perceptionAdvanceKeyRef.current = "";
+                lastExplorationPerceptionRef.current = null;
+                setPerceptionSnapshotState(null);
                 stealthAlertStateRef.current.clear();
                 worldStateAdvanceKeyRef.current = "";
                 worldStateNoticeKeyRef.current = "";
@@ -5752,8 +6261,67 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             }
           }
 
-          commitRuntimeSave(movementCommand.save);
-          usePlayStore.getState().pushEngineEvents(movementCommand.events);
+          // Step triggers resolve against the just-entered cell before NPCs
+          // and the clock advance, matching the original move -> trigger ->
+          // world-settlement order while retaining a single store commit.
+          let settledBaseSave = movementCommand.save;
+          const settledEvents = [...movementCommand.events];
+          let triggeredCutscene: CutsceneData | undefined;
+          if (actor.isPlayer) {
+            const flags = settledBaseSave.flags || {};
+            const triggerConditionCtx = buildConditionContext(settledBaseSave);
+            const enteredNewMacroTile = !sameMacroCoord(
+              [actorCell[0], actorCell[1]],
+              [nx, nz],
+            );
+            const trigger = enteredNewMacroTile
+              ? activeMap.triggers?.find(
+                  (candidate) =>
+                    candidate.type === "step" &&
+                    candidate.cell &&
+                    sameMacroCoord(
+                      [candidate.cell[0], candidate.cell[1]],
+                      [nx, nz],
+                    ) &&
+                    isTriggerEligible(candidate, triggerConditionCtx) &&
+                    !(candidate.once && flags[`trig_run_${candidate.id}`]),
+                )
+              : undefined;
+            if (trigger) {
+              const triggerResult = dispatchV1FireTrigger({
+                gamePackage: gp,
+                save: settledBaseSave,
+                triggerId: trigger.id,
+              });
+              if (triggerResult.ok) {
+                settledBaseSave = triggerResult.save;
+                settledEvents.push(...triggerResult.events);
+                // Fine-expanded package: action cells arrive converted.
+                triggeredCutscene = getRuntimeGamePackage().cutscenes.find(
+                  (candidate) => candidate.id === trigger.cutscene_id,
+                );
+              }
+            }
+          }
+
+          const movementStore = usePlayStore.getState();
+          const pumpedMovementState =
+            actor.isPlayer && !inCombat
+              ? buildExplorationPumpState({
+                  saveData: settledBaseSave,
+                  logMessages: movementStore.logMessages,
+                })
+              : null;
+          // Exploration movement and its energy/NPC settlement are one atomic
+          // store commit. Previously the move rendered once, then the pump
+          // effect rendered the entire Play tree again immediately afterward.
+          if (pumpedMovementState) {
+            usePlayStore.setState(pumpedMovementState);
+          } else {
+            commitRuntimeSave(settledBaseSave);
+          }
+          usePlayStore.getState().pushEngineEvents(settledEvents);
+          if (triggeredCutscene) setActiveCutscene(triggeredCutscene);
           if (actor.isPlayer) {
             playerFootstepFineStepsRef.current += 1;
             if (
@@ -5769,44 +6337,8 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           steppedThisTurn = true;
 
           if (actor.isPlayer) {
-            // Check step triggers (player only). Several triggers may share
-            // a cell with mutually exclusive conditions — take the first
-            // one that is actually eligible right now.
-            const save = usePlayStore.getState().saveData;
-            const flags = save?.flags || {};
-            const triggerConditionCtx = buildConditionContext(save);
-            // Step triggers are macro-tile semantics: they fire when the
-            // player ENTERS the trigger's macro tile (crossing a tile
-            // boundary), never once per fine cell inside it (§3.5).
-            const enteredNewMacroTile = !sameMacroCoord(
-              [actorCell[0], actorCell[1]],
-              [nx, nz],
-            );
-            const trigger = enteredNewMacroTile
-              ? activeMap.triggers?.find(
-                  (t) =>
-                    t.type === "step" &&
-                    t.cell &&
-                    sameMacroCoord([t.cell[0], t.cell[1]], [nx, nz]) &&
-                    isTriggerEligible(t, triggerConditionCtx) &&
-                    !(t.once && flags[`trig_run_${t.id}`]),
-                )
-              : undefined;
-            if (trigger && save) {
-              const triggerResult = dispatchV1FireTrigger({
-                gamePackage: gp,
-                save,
-                triggerId: trigger.id,
-              });
-              if (triggerResult.ok) {
-                commitRuntimeSave(triggerResult.save);
-                usePlayStore.getState().pushEngineEvents(triggerResult.events);
-                // Fine-expanded package: action cells arrive converted.
-                const cutscene = getRuntimeGamePackage().cutscenes.find(
-                  (c) => c.id === trigger.cutscene_id,
-                );
-                if (cutscene) setActiveCutscene(cutscene);
-              }
+            if (pumpedMovementState) {
+              window.setTimeout(maybeFireBarks, 0);
             }
           }
         }
@@ -6147,8 +6679,12 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     const cells: { x: number; z: number }[] = [];
     // Scan radius covers the reachable macro tiles plus the object cells at
     // their edges.
+    const targetedDropItem = isDrop
+      ? gamePackage.items.find((item) => item.id === verbTargeting.itemId)
+      : undefined;
+    const dropRange = targetedDropItem?.light_source?.mobility === "throwable" ? 3 : 1;
     const range =
-      (verbTargeting.verb === "pull" ? 2 : 1) * FINE_PER_MACRO + FINE_HALF_EXTENT;
+      (verbTargeting.verb === "pull" ? 2 : isDrop ? dropRange : 1) * FINE_PER_MACRO + FINE_HALF_EXTENT;
     for (let dz = -range; dz <= range; dz += 1) {
       for (let dx = -range; dx <= range; dx += 1) {
         if ((isDrop || verbTargeting.verb === "climb") && dx === 0 && dz === 0) continue;
@@ -6166,9 +6702,16 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     saveData,
     effectiveObjectPlacements,
     getContainerAtCell,
+    gamePackage.items,
     isBlockedByPlacement,
     objectByIdForPlay,
   ]);
+  const targetedDropItemDefinition =
+    verbTargeting?.verb === "drop"
+      ? gamePackage.items.find((item) => item.id === verbTargeting.itemId)
+      : undefined;
+  const targetedDropIsThrow =
+    targetedDropItemDefinition?.light_source?.mobility === "throwable";
 
   const beginVerb = (kind: string) => {
     setVerbFeedback(null);
@@ -6383,7 +6926,10 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         targeting.verb === "drop"
           ? gp.items.find((i) => i.id === targeting.itemId)?.display_name || "item"
           : undefined;
-      presentImmersiveVerbOutcome(result, itemName);
+      const presentAsThrow =
+        targeting.verb === "drop" &&
+        gp.items.find((item) => item.id === targeting.itemId)?.light_source?.mobility === "throwable";
+      presentImmersiveVerbOutcome(result, itemName, presentAsThrow);
     } else {
       presentImmersiveVerbFailure(
         targeting.verb,
@@ -6826,12 +7372,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       activeMap,
       saveData.map_deltas?.[activeMap.id],
     );
-    const worldItem =
-      worldItems.find((w) => sameMacroCoord([w.cell[0], w.cell[1]], [tx, tz])) ||
-      worldItems.find((w) =>
-        sameMacroCoord([w.cell[0], w.cell[1]], [actorCell[0], actorCell[1]]),
-      );
-    if (worldItem) {
+    const pickupWorldItem = (worldItem: EffectiveWorldItem) => {
       const itemDef = gamePackage.items.find((i) => i.id === worldItem.item_id);
       // Authoritative pickup runs through the engine-core take_item command,
       // which mutates the save (inventory + map delta) and emits item_acquired.
@@ -6860,6 +7401,14 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         `Picked up ${worldItem.count > 1 ? `${worldItem.count}x ` : ""}${itemDef?.display_name || worldItem.item_id}.`,
       );
       playSfx("item_pickup", { volume: 0.38, cooldownMs: 120 });
+    };
+    const worldItem =
+      worldItems.find((w) => sameMacroCoord([w.cell[0], w.cell[1]], [tx, tz])) ||
+      worldItems.find((w) =>
+        sameMacroCoord([w.cell[0], w.cell[1]], [actorCell[0], actorCell[1]]),
+      );
+    if (worldItem) {
+      pickupWorldItem(worldItem);
       return;
     }
 
@@ -6966,6 +7515,16 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     if (placement && placementObject?.tags?.includes("door")) {
       playSfx("door_transition", { volume: 0.28, cooldownMs: 180 });
       addLog(`${placementObject.display_name || "Doorway"} opens onto the threshold.`);
+      return;
+    }
+
+    // With all faced interactions resolved, allow Act to magnetically collect
+    // the nearest loose item inside the wider item-only halo. Keeping this
+    // fallback after doors, dialogue, actors, containers, and pushables means a
+    // nearby item never steals an intentional world interaction.
+    const nearbyWorldItem = selectPlayModePickupCandidate(worldItems, actorCell);
+    if (nearbyWorldItem) {
+      pickupWorldItem(nearbyWorldItem);
       return;
     }
 
@@ -7116,6 +7675,33 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     const effects = itemDef.effects;
     let used = false;
     const fx = useFxStore.getState();
+
+    // Portable lights are tools, not one-shot consumables. Their active state
+    // is keyed by item definition so it follows the same lamp from inventory
+    // to placed/thrown world state and survives save/load.
+    if (itemDef.light_source) {
+      const lightStates = {
+        ...((currentSave.flags?.immersive_light_states || {}) as Record<string, boolean>),
+      };
+      const stateKey = `item:${itemId}`;
+      const active = lightStates[stateKey] ?? itemDef.light_source.active_by_default;
+      if (active && !itemDef.light_source.extinguishable) {
+        playSfx("warning", { volume: 0.24, cooldownMs: 120 });
+        addLog(`${itemDef.display_name} cannot be extinguished.`);
+        return;
+      }
+      lightStates[stateKey] = !active;
+      store.commitRuntimeSave({
+        ...currentSave,
+        flags: {
+          ...(currentSave.flags || {}),
+          immersive_light_states: lightStates,
+        },
+      });
+      playSfx("ui_click", { volume: 0.24, cooldownMs: 120 });
+      addLog(`${!active ? "Lit" : "Extinguished"} ${itemDef.display_name}.`);
+      return;
+    }
 
     if (effects?.heal) {
       if (targetId === "player") {
@@ -7315,24 +7901,121 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     }
   }, [activeMap, gamePackage, saveData]);
 
-  const lastExplorationPerceptionRef = useRef<ImmersiveStage4PerceptionSnapshot | null>(null);
-  const perceptionSnapshot = useMemo((): ImmersiveStage4PerceptionSnapshot | null => {
-    if (!activeMap || !saveData || !mapHasPerceivingActor) return null;
-    // Combat alert state is already persisted on actors. Keep the last
-    // exploration snapshot for HUD/cone presentation instead of rebuilding
-    // full-map stimuli and LOS for every one-cell hostile pulse.
-    if (saveData.in_combat && lastExplorationPerceptionRef.current) {
-      return lastExplorationPerceptionRef.current;
-    }
+  // The perception advance effect owns this snapshot. Rendering merely reads
+  // its latest result, avoiding a second full simulation/LOS pass per step.
+  const perceptionSnapshot =
+    activeMap &&
+    mapHasPerceivingActor &&
+    perceptionSnapshotState?.map_id === activeMap.id
+      ? perceptionSnapshotState
+      : null;
+
+  // Physical visibility is the expensive half. In Performance mode its
+  // observer is anchored to the current macro-tile center, so three fine
+  // walking steps share one simulation. Exploration and sound sensing are
+  // merged below and never invalidate this base snapshot.
+  const viewerVisibilityBase = useMemo((): ImmersiveViewerVisibilitySnapshot | null => {
+    if (!activeMap || !saveData) return null;
     try {
-      const snapshot = createImmersivePerceptionSnapshotFromV1(gamePackage, saveData, activeMap.id);
-      lastExplorationPerceptionRef.current = snapshot;
-      return snapshot;
+      const visibilitySave: PlaySave = visualPreset === "performance"
+        ? {
+            ...saveData,
+            player: {
+              ...saveData.player,
+              cell: [
+                Math.floor(saveData.player.cell[0] / FINE_PER_MACRO) * FINE_PER_MACRO + FINE_HALF_EXTENT,
+                Math.floor(saveData.player.cell[1] / FINE_PER_MACRO) * FINE_PER_MACRO + FINE_HALF_EXTENT,
+              ],
+            },
+          }
+        : saveData;
+      return createImmersiveViewerVisibilityFromV1(
+        gamePackage,
+        visibilitySave,
+        activeMap.id,
+        { sensed_cells: [] },
+      );
     } catch {
       return null;
     }
-  }, [activeMap, gamePackage, saveData, mapHasPerceivingActor]);
+  }, [activeMap, gamePackage, viewerVisibilityInputKey, visualPreset]);
 
+  const viewerVisibility = useMemo((): ImmersiveViewerVisibilitySnapshot | null => {
+    if (!viewerVisibilityBase || !activeMap || !saveData) return viewerVisibilityBase;
+    const discoveredByKey = new Map<string, [number, number]>(
+      viewerVisibilityBase.discovered.map((cell) => [
+        fineCoordKey(cell[0], cell[1]),
+        [cell[0], cell[1]],
+      ]),
+    );
+    (saveData.explored_cells?.[activeMap.id] || []).forEach((key) => {
+      const cell = parseFineCoordKey(key);
+      if (!Number.isFinite(cell[0]) || !Number.isFinite(cell[1])) return;
+      discoveredByKey.set(key, [cell[0], cell[1]]);
+    });
+    const sensedByKey = new Map<string, [number, number]>();
+    (perceptionSnapshot?.stimuli || [])
+      .filter((stimulus) => stimulus.kind === "sound")
+      .forEach((stimulus) => {
+        sensedByKey.set(
+          fineCoordKey(stimulus.cell[0], stimulus.cell[1]),
+          [stimulus.cell[0], stimulus.cell[1]],
+        );
+      });
+    const sortCells = (left: [number, number], right: [number, number]) =>
+      left[0] - right[0] || left[1] - right[1];
+    return {
+      ...viewerVisibilityBase,
+      discovered: [...discoveredByKey.values()].sort(sortCells),
+      sensed: [...sensedByKey.values()].sort(sortCells),
+    };
+  }, [activeMap, perceptionSnapshot, saveData?.explored_cells, viewerVisibilityBase]);
+
+  const playerIllumination = useMemo(
+    () =>
+      viewerVisibility && saveData
+        ? queryImmersiveIlluminationAtCell(
+            viewerVisibility.illumination,
+            saveData.player.cell,
+          )
+        : null,
+    [viewerVisibility, saveData?.player.cell?.[0], saveData?.player.cell?.[1]],
+  );
+
+  const worldStateCell = saveData
+    ? getActiveCell(saveData.player.cell[0], saveData.player.cell[1])
+    : undefined;
+  const worldStateRegionId =
+    worldStateCell?.region_id || worldStateCell?.room_id || "map";
+  const worldStateFactionSignature = Object.entries(saveData?.faction_rep || {})
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([factionId, reputation]) => `${factionId}:${reputation}`)
+    .join("\u001f");
+  const worldStatePassiveFlagSignature = (activeMap?.regions || [])
+    .flatMap((region) =>
+      (region.passive_checks || [])
+        .filter((check) => check.flag_id)
+        .map(
+          (check) =>
+            `${check.flag_id}:${Boolean(saveData?.flags?.[check.flag_id!])}`,
+        ),
+    )
+    .join("\u001f");
+  const worldStateRelevantSignature = [
+    perceptionInventorySignature,
+    worldStateFactionSignature,
+    worldStatePassiveFlagSignature,
+    saveData?.flags?.survival_hunger || 0,
+    saveData?.flags?.survival_thirst || 0,
+    saveData?.flags?.survival_fatigue || 0,
+    saveData?.flags?.survival_exposure || 0,
+    saveData?.level || 1,
+    saveData?.money || 0,
+    saveData?.playerStats.hp || 0,
+    saveData?.playerStats.max_hp || 0,
+    saveData?.playerStats.attack || 0,
+    saveData?.playerStats.defense || 0,
+  ].join("\u001e");
   const worldStateEvaluation = useMemo((): ImmersiveWorldStateEvaluation | null => {
     if (!activeMap || !saveData) return null;
     try {
@@ -7342,7 +8025,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     } catch {
       return null;
     }
-  }, [activeMap, gamePackage, saveData]);
+  }, [activeMap?.id, gamePackage, worldStateRegionId, worldStateRelevantSignature]);
   // The only cells that can be spatially denied are walkable cells inside a
   // region that carries a reputation gate or a denial passive-check. Most maps
   // have none — precompute the candidate set once per map so the per-commit
@@ -7380,7 +8063,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       }
     }
     return denied;
-  }, [activeMap, gamePackage, gatedRegionCells, saveData]);
+  }, [activeMap?.id, gamePackage, gatedRegionCells, worldStateRelevantSignature]);
   const attendTarget = useMemo(
     () => getFacedAttendTarget(saveData, activeMap, gamePackage),
     [saveData, activeMap, gamePackage],
@@ -7912,6 +8595,10 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         alertness: alert.alertness,
         score: alert.score,
         stimulus: titleCaseEffect(alert.stimulus.kind),
+        sense: alert.sense_id || "default",
+        cause: titleCaseEffect(alert.cause || alert.stimulus.kind),
+        target: alert.target_cell,
+        evidenceTick: alert.evidence_tick ?? alert.stimulus.tick,
       })) || [];
   const worldStateGate =
     worldStateEvaluation?.denials[0] ||
@@ -7932,9 +8619,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     !overlayOpen &&
     worldStateEvaluation &&
     (survivalPressureRows.length > 0 || Boolean(worldStateGate) || worldStateEvaluation.inventory.ap_penalty > 0);
-  const activeAlderamonticoCell = activeMap.cells.find(
-    (cell) => cell.x === playerPos[0] && cell.z === playerPos[1],
-  );
+  const activeAlderamonticoCell = getActiveCell(playerPos[0], playerPos[1]);
   const activeAlderamonticoRegionId =
     activeAlderamonticoCell?.region_id || activeAlderamonticoCell?.room_id || "map";
   const activeAlderamonticoGridRegion = activeMap.regions?.find(
@@ -8030,7 +8715,15 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     <div className="flex flex-col h-full bg-neutral-950 relative overflow-hidden pb-16 sm:pb-0" style={{ touchAction: 'none' }}>
       <div className="flex-1 relative min-h-0">
         <Canvas
-          shadows="basic"
+          // Background play tabs should not keep submitting a complete 3D
+          // scene. They render on state demand and resume the normal animation
+          // loop as soon as the tab becomes visible again.
+          frameloop={
+            visualPreset === "performance" || !pageVisible
+              ? "demand"
+              : "always"
+          }
+          shadows={visualPreset === "performance" ? false : "basic"}
           camera={{
             position: initialCameraPosition,
             fov: PLAY_CAMERA_PROFILES[cameraMode].fov,
@@ -8043,6 +8736,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             powerPreference: "high-performance",
           }}
         >
+          <PerformanceFrameDriver
+            enabled={visualPreset === "performance" && pageVisible}
+          />
           <IsometricCameraRig
             playerPos={visualPlayerPos}
             playerFacing={renderedPlayerFacing}
@@ -8053,12 +8749,21 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           />
           <color attach="background" args={["#111735"]} />
           <fog attach="fog" args={["#161D36", 78, 190]} />
-          <BlackStarLightRig playerPos={visualPlayerPos} />
+          <BlackStarLightRig
+            playerPos={visualPlayerPos}
+            ambientLight={activeMap.ambient_light ?? 0.08}
+            shadowsEnabled={visualPreset !== "performance"}
+          />
           <AdaptiveQualityProbe
             dpr={effectivePlayDpr}
-            minDpr={Math.min(1.05, visualDprCap)}
+            minDpr={visualPreset === "performance" ? 0.75 : Math.min(1.05, visualDprCap)}
             maxDpr={visualDprCap}
             setDpr={setPlayDpr}
+            frameBudgetMs={
+              visualPreset === "performance"
+                ? PERFORMANCE_FRAME_INTERVAL_MS
+                : undefined
+            }
           />
           <GameRenderer3D
             map={activeMap}
@@ -8094,16 +8799,17 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             showBehaviorIntents={showBehaviorIntents}
             worldDeniedCells={worldDeniedCells}
             showGrid={false}
-            enableOcclusion
+            enableOcclusion={visualPreset !== "performance"}
             occlusionAzimuth={cameraAzimuth}
             renderCenter={cameraFocusOverride || renderedFocusPos}
             renderRadius={PLAY_RENDER_RADIUS}
             fogOfWar={fogOfWar}
             fogResolution={(gamePackage.settings?.fog_los_resolution as "macro" | "fine" | undefined) ?? "macro"}
+            authoritativeVisibility={viewerVisibility}
+            showPerceptionDebug={showPerceptionDebug}
+            performanceMode={visualPreset === "performance"}
             initialExplored={saveData.explored_cells}
-            onExplore={(mapId, keys) =>
-              usePlayStore.getState().markCellsExplored(mapId, keys)
-            }
+            onExplore={queueExploredCells}
           />
           <ScreenFX inCombat={inCombat} mapId={activeMap.id} />
         </Canvas>
@@ -8365,7 +9071,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           verbTargeting &&
           (() => {
             const presentation =
-              IMMERSIVE_VERB_PRESENTATION[verbTargeting.verb] || {
+              (verbTargeting.verb === "drop" && targetedDropIsThrow
+                ? IMMERSIVE_VERB_PRESENTATION.throw
+                : IMMERSIVE_VERB_PRESENTATION[verbTargeting.verb]) || {
                 title: titleCaseEffect(verbTargeting.verb),
                 tone: "neutral" as VerbFeedbackTone,
               };
@@ -8571,11 +9279,14 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
               {perceptionAlertRows.length > 0 && (
                 <div className="mt-1 space-y-0.5 border-t border-current/25 pt-1">
                   {perceptionAlertRows.map((alert) => (
-                    <div key={alert.key} className="flex justify-between gap-2 text-[8px] font-bold leading-tight sm:text-[9px]">
-                      <span className="truncate">{alert.name.split(" ")[0]}</span>
-                      <span className="shrink-0 opacity-90">
-                        {ALERTNESS_LABELS[alert.alertness]} {Math.round(alert.score * 100)}
-                      </span>
+                    <div key={alert.key} className="text-[8px] font-bold leading-tight sm:text-[9px]" title={`${alert.sense}: ${alert.cause} at ${alert.target[0]},${alert.target[1]}`}>
+                      <div className="flex justify-between gap-2">
+                        <span className="truncate">{alert.name.split(" ")[0]}</span>
+                        <span className="shrink-0 opacity-90">
+                          {ALERTNESS_LABELS[alert.alertness]} {Math.round(alert.score * 100)}
+                        </span>
+                      </div>
+                      <div className="truncate font-normal opacity-75">{alert.cause} · {alert.target[0]},{alert.target[1]}</div>
                     </div>
                   ))}
                 </div>
@@ -8955,6 +9666,18 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                 </select>
                 <button
                   onPointerDown={(event) => { event.stopPropagation(); clearInputState(); }}
+                  onClick={() => { clearInputState(); setShowPerceptionDebug((value) => !value); }}
+                  title="Illumination, sensory causes, and evidence cells"
+                  className={`h-7 shrink-0 rounded-sm px-2 font-[family-name:var(--font-display)] text-[10px] font-bold uppercase tracking-wider transition-colors sm:text-[11px] ${
+                    showPerceptionDebug
+                      ? "bg-cyan-500/25 text-cyan-100"
+                      : "text-neutral-400 hover:text-neutral-100"
+                  }`}
+                >
+                  Senses
+                </button>
+                <button
+                  onPointerDown={(event) => { event.stopPropagation(); clearInputState(); }}
                   onClick={() => {
                     clearInputState();
                     setFogOfWar(!fogOfWar);
@@ -8991,6 +9714,33 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                 </button>
               </div>
             )}
+          {showPerceptionDebug && (
+            <div className="pointer-events-none absolute left-2 top-24 z-30 w-[calc(100vw-1rem)] max-w-80 rounded-sm border border-cyan-800/70 bg-neutral-950/94 p-2 font-mono text-[10px] leading-snug text-cyan-100 shadow-lg backdrop-blur-sm sm:top-80">
+              <div className="mb-1 font-bold uppercase tracking-wider text-cyan-300">Perception evidence</div>
+              {viewerVisibility && (
+                <div className="mb-2 border-b border-cyan-900/80 pb-1 text-cyan-200">
+                  <div>
+                    light {Math.round((playerIllumination?.value || 0) * 100)}% · {viewerVisibility.illumination.totals.sources} source{viewerVisibility.illumination.totals.sources === 1 ? "" : "s"}
+                  </div>
+                  <div className="text-cyan-300/80">
+                    visible {viewerVisibility.currently_visible.length} · discovered {viewerVisibility.discovered.length} · sensed {viewerVisibility.sensed.length}
+                  </div>
+                  <div className="truncate text-neutral-500">
+                    {playerIllumination?.strongest_source_id || "ambient / no direct source"}
+                  </div>
+                </div>
+              )}
+              {!perceptionSnapshot?.alerts.length ? (
+                <div className="text-neutral-500">No observer currently has evidence.</div>
+              ) : perceptionSnapshot.alerts.slice(0, 8).map((alert) => (
+                <div key={`sense:${alert.actor_id}`} className="mb-1 border-b border-cyan-950/80 pb-1 last:border-0">
+                  <div className="text-neutral-200">{gamePackage.entities.find((entity) => entity.id === alert.entity_id)?.display_name || alert.entity_id}</div>
+                  <div>{alert.sensory_profile_id || "default"}/{alert.sense_id || "sense"} · {alert.cause || alert.stimulus.kind}</div>
+                  <div className="text-cyan-300/80">{alert.alertness} {Math.round(alert.score * 100)} · evidence {alert.target_cell[0]},{alert.target_cell[1]} · t{alert.evidence_tick ?? alert.stimulus.tick ?? perceptionSnapshot.generated_at_tick}</div>
+                </div>
+              ))}
+            </div>
+          )}
           {showBehaviorIntents && (
             <div className="pointer-events-none absolute left-2 top-24 z-30 w-[calc(100vw-1rem)] max-w-72 rounded-sm border border-amber-800/70 bg-neutral-950/92 p-2 font-mono text-[10px] leading-snug text-amber-100 shadow-lg backdrop-blur-sm sm:top-80">
               <div className="mb-1 font-bold uppercase tracking-wider text-amber-300">
@@ -9522,7 +10272,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           <span className="text-sm text-cyan-100">
             {verbTargeting.verb === "drop" ? (
               <>
-                Drop{" "}
+                {targetedDropIsThrow ? "Throw" : "Drop"}{" "}
                 <span className="font-semibold text-white">
                   {gamePackage.items.find((i) => i.id === verbTargeting.itemId)?.display_name ||
                     "item"}
@@ -9576,6 +10326,13 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                 onDrop={(itemId) => {
                   playSfx("ui_back", { volume: 0.18, cooldownMs: 120 });
                   handleDropItem(itemId);
+                }}
+                onThrow={(itemId) => {
+                  setShowInventory(false);
+                  setVerbTargeting({ verb: "drop", itemId });
+                  setHoveredCell(null);
+                  playSfx("ui_click", { volume: 0.2, cooldownMs: 120 });
+                  addLog("Choose where to throw it.");
                 }}
                 healingTargets={getHealingItemTargets()}
                 playSfx={playSfx}
@@ -9721,6 +10478,12 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                       <div className="flex gap-2">
                         <button
                           onClick={() => {
+                            if (
+                              data &&
+                              !window.confirm(`Overwrite save slot ${slot}? The existing slot cannot be recovered.`)
+                            ) {
+                              return;
+                            }
                             if (usePlayStore.getState().saveToSlot(slot)) {
                               playSfx("save_chime", {
                                 volume: 0.34,
@@ -9755,6 +10518,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                         <button
                           disabled={!data}
                           onClick={() => {
+                            if (!window.confirm(`Delete save slot ${slot}? This cannot be undone.`)) {
+                              return;
+                            }
                             playSfx("ui_back", { volume: 0.2, cooldownMs: 120 });
                             deleteSaveSlot(slot);
                             setSaveSlotRevision((r) => r + 1);
@@ -10449,6 +11215,14 @@ export function PlayMode() {
           <button
             className="border border-[var(--color-ui-accent-dark)] bg-black/68 px-7 py-4 text-left font-[family-name:var(--font-display)] text-base font-bold uppercase tracking-[0.22em] text-[var(--color-ui-text)] shadow-[0_0_18px_rgba(0,0,0,0.75)] transition-all hover:border-[var(--color-ui-accent)] hover:bg-black/82 hover:text-[var(--color-ui-accent)] active:scale-[0.98] sm:min-w-52 sm:text-center"
             onClick={() => {
+              if (
+                hasSave &&
+                !window.confirm(
+                  "Start a new runtime session? The current autosaved run will be discarded; authored Studio data will not change.",
+                )
+              ) {
+                return;
+              }
               playTitleSfx("ui_click");
               usePlayStore.getState().resetRun();
               usePlayStore.setState({ saveData: null });

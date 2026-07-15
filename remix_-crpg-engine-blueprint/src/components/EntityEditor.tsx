@@ -1,6 +1,10 @@
 import React, { useState } from "react";
 import { useEngineStore } from "../store/engineStore";
-import { EntityData } from "../schema/game";
+import {
+  type EntityData,
+  type SensoryChannelData,
+  type SensoryProfileData,
+} from "../schema/game";
 import { Copy, Plus, Skull, Trash2, ChevronLeft, Sparkles } from "lucide-react";
 import { AIGenerationModal } from "./AIGenerationModal";
 import { SwitchPicker } from "./SwitchPicker";
@@ -15,6 +19,100 @@ const statFields: { key: keyof EntityData; label: string; fallback: number }[] =
 ];
 
 type EmotionalAxisKey = "valence" | "arousal" | "grief" | "reverence" | "attachment";
+
+type SensoryPresetId =
+  | "standard"
+  | "sight-dominant"
+  | "hearing-dominant"
+  | "light-glass-sensitive";
+
+const sensoryChannel = (
+  id: string,
+  stimulusKinds: SensoryChannelData["stimulus_kinds"],
+  overrides: Partial<SensoryChannelData> = {},
+): SensoryChannelData => ({
+  id,
+  stimulus_kinds: stimulusKinds,
+  range: 8,
+  threshold: 0.2,
+  sensitivity: 1,
+  requires_los: false,
+  requires_view_cone: false,
+  requires_illumination: false,
+  tracks_live_target: false,
+  ...overrides,
+});
+
+const SENSORY_PRESETS: Record<SensoryPresetId, SensoryProfileData> = {
+  standard: {
+    id: "standard",
+    memory_ticks: 90,
+    search_ticks: 90,
+    channels: [
+      sensoryChannel("sight", ["visible_player"], {
+        requires_los: true,
+        requires_view_cone: true,
+        requires_illumination: true,
+        tracks_live_target: true,
+      }),
+      sensoryChannel("hearing", ["sound"]),
+    ],
+  },
+  "sight-dominant": {
+    id: "sight-dominant",
+    memory_ticks: 100,
+    search_ticks: 80,
+    channels: [
+      sensoryChannel("sight", ["visible_player"], {
+        range: 10,
+        threshold: 0.15,
+        sensitivity: 1.15,
+        requires_los: true,
+        requires_view_cone: true,
+        requires_illumination: true,
+        tracks_live_target: true,
+      }),
+    ],
+  },
+  "hearing-dominant": {
+    id: "hearing-dominant",
+    memory_ticks: 120,
+    search_ticks: 120,
+    channels: [
+      sensoryChannel("hearing", ["sound"], {
+        range: 12,
+        threshold: 0.12,
+        sensitivity: 1.35,
+      }),
+    ],
+  },
+  "light-glass-sensitive": {
+    id: "light-glass-sensitive",
+    memory_ticks: 110,
+    search_ticks: 100,
+    channels: [
+      sensoryChannel("light-glass", ["light"], {
+        stimulus_tags: ["light", "glass"],
+        range: 10,
+        threshold: 0.1,
+        sensitivity: 1.25,
+        requires_los: true,
+      }),
+    ],
+  },
+};
+
+const sensoryProfileForPreset = (id: SensoryPresetId): SensoryProfileData => {
+  const profile = SENSORY_PRESETS[id];
+  return {
+    ...profile,
+    channels: profile.channels.map((channel) => ({
+      ...channel,
+      stimulus_kinds: [...channel.stimulus_kinds],
+      stimulus_tags: channel.stimulus_tags ? [...channel.stimulus_tags] : undefined,
+    })),
+  };
+};
 
 // Authored starting emotions. Fallbacks mirror defaultAlderamonticoEmotionalAxes
 // so an unset axis shows the value the engine would use anyway.
@@ -289,6 +387,109 @@ export function EntityEditor() {
             </section>
 
             <section className="space-y-4 border-t border-neutral-800 pt-6">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="text-sm font-semibold text-neutral-300">Sensory Profile</h3>
+                  <p className="text-xs text-neutral-500 mt-1">
+                    Choose which evidence this actor can detect. Presets write explicit channels that
+                    remain editable in exported project data.
+                  </p>
+                </div>
+                {activeEntity.sensory_profile && (
+                  <button
+                    type="button"
+                    onClick={() => handleUpdate({ sensory_profile: undefined })}
+                    className="shrink-0 rounded-md border border-neutral-700 px-2 py-1 text-xs text-neutral-400 hover:text-white hover:border-neutral-500 transition-colors"
+                  >
+                    Use default
+                  </button>
+                )}
+              </div>
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                <Field label="Profile preset">
+                  <select
+                    className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500"
+                    value={
+                      activeEntity.sensory_profile
+                        ? Object.prototype.hasOwnProperty.call(SENSORY_PRESETS, activeEntity.sensory_profile.id)
+                          ? activeEntity.sensory_profile.id
+                          : "custom"
+                        : ""
+                    }
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      if (!value) {
+                        handleUpdate({ sensory_profile: undefined });
+                        return;
+                      }
+                      if (value === "custom") return;
+                      handleUpdate({ sensory_profile: sensoryProfileForPreset(value as SensoryPresetId) });
+                    }}
+                  >
+                    <option value="">Engine default</option>
+                    <option value="standard">Standard sight + hearing</option>
+                    <option value="sight-dominant">Sight-dominant</option>
+                    <option value="hearing-dominant">Hearing-dominant</option>
+                    <option value="light-glass-sensitive">Light / Glass-sensitive</option>
+                    {activeEntity.sensory_profile &&
+                      !Object.prototype.hasOwnProperty.call(SENSORY_PRESETS, activeEntity.sensory_profile.id) && (
+                        <option value="custom">Custom: {activeEntity.sensory_profile.id}</option>
+                      )}
+                  </select>
+                </Field>
+                <Field label="Memory ticks">
+                  <input
+                    type="number"
+                    min={0}
+                    className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500"
+                    value={activeEntity.sensory_profile?.memory_ticks ?? 90}
+                    onChange={(event) => {
+                      const base = activeEntity.sensory_profile || sensoryProfileForPreset("standard");
+                      handleUpdate({
+                        sensory_profile: {
+                          ...base,
+                          memory_ticks: Math.max(0, parseInt(event.target.value, 10) || 0),
+                        },
+                      });
+                    }}
+                  />
+                </Field>
+                <Field label="Search ticks">
+                  <input
+                    type="number"
+                    min={0}
+                    className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500"
+                    value={activeEntity.sensory_profile?.search_ticks ?? 90}
+                    onChange={(event) => {
+                      const base = activeEntity.sensory_profile || sensoryProfileForPreset("standard");
+                      handleUpdate({
+                        sensory_profile: {
+                          ...base,
+                          search_ticks: Math.max(0, parseInt(event.target.value, 10) || 0),
+                        },
+                      });
+                    }}
+                  />
+                </Field>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {(activeEntity.sensory_profile?.channels || []).map((channel) => (
+                  <span
+                    key={channel.id}
+                    className="rounded-sm border border-neutral-800 bg-neutral-900 px-2 py-1 text-[11px] text-neutral-300"
+                  >
+                    {channel.id}: {channel.stimulus_kinds.join(" + ")} · r{channel.range}
+                  </span>
+                ))}
+                {!activeEntity.sensory_profile && (
+                  <span className="text-xs text-neutral-500">
+                    No authored override; runtime compatibility defaults apply.
+                  </span>
+                )}
+              </div>
+            </section>
+
+            <section className="space-y-4 border-t border-neutral-800 pt-6">
               <div>
                 <h3 className="text-sm font-semibold text-neutral-300">Skills</h3>
                 <p className="text-xs text-neutral-500 mt-1">
@@ -551,6 +752,32 @@ export function EntityEditor() {
                     grief: { type: "NUMBER" },
                     reverence: { type: "NUMBER" },
                     attachment: { type: "NUMBER" },
+                  },
+                },
+                sensory_profile: {
+                  type: "OBJECT",
+                  properties: {
+                    id: { type: "STRING" },
+                    memory_ticks: { type: "NUMBER" },
+                    search_ticks: { type: "NUMBER" },
+                    channels: {
+                      type: "ARRAY",
+                      items: {
+                        type: "OBJECT",
+                        properties: {
+                          id: { type: "STRING" },
+                          stimulus_kinds: { type: "ARRAY", items: { type: "STRING" } },
+                          stimulus_tags: { type: "ARRAY", items: { type: "STRING" } },
+                          range: { type: "NUMBER" },
+                          threshold: { type: "NUMBER" },
+                          sensitivity: { type: "NUMBER" },
+                          requires_los: { type: "BOOLEAN" },
+                          requires_view_cone: { type: "BOOLEAN" },
+                          requires_illumination: { type: "BOOLEAN" },
+                          tracks_live_target: { type: "BOOLEAN" },
+                        },
+                      },
+                    },
                   },
                 },
               },

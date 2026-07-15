@@ -43,6 +43,32 @@ export const worldPointToLogicalCell = (
   worldCoordToLogical(z, gridSpace, fineRatio),
 ];
 
+// Terrain is authored and rendered once per macro tile, while authoritative
+// visibility is resolved against every fine cell. Convert the rendered macro
+// mesh's world-space center back to the complete fine-cell block it covers.
+// Starting from the center fine cell would shift the sampled block into the
+// next macro tile and can incorrectly cull approach-facing wall edges.
+export const fineCellsCoveredByWorldMacroCell = (
+  x: number,
+  z: number,
+  fineRatio = FINE_PER_MACRO,
+): [number, number][] => {
+  const logicalCenter = worldPointToLogicalCell(x, z, "fine", fineRatio);
+  const macroX = Math.floor(logicalCenter[0] / fineRatio);
+  const macroZ = Math.floor(logicalCenter[1] / fineRatio);
+  const originX = macroX * fineRatio;
+  const originZ = macroZ * fineRatio;
+  const cells: [number, number][] = [];
+
+  for (let dz = 0; dz < fineRatio; dz += 1) {
+    for (let dx = 0; dx < fineRatio; dx += 1) {
+      cells.push([originX + dx, originZ + dz]);
+    }
+  }
+
+  return cells;
+};
+
 export const logicalCellWorldSize = (
   gridSpace: RendererGridSpace,
   fineRatio = FINE_PER_MACRO,

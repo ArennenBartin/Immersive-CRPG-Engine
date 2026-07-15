@@ -6,7 +6,11 @@ import {
   unwrapPlaySaveV1,
   type PlaySaveV2,
 } from "../schema/v2";
-import { persist } from "zustand/middleware";
+import {
+  persist,
+  type PersistStorage,
+  type StorageValue,
+} from "zustand/middleware";
 import {
   applyLevelUpChoiceToSave,
   getCombatXpPool,
@@ -119,6 +123,90 @@ interface PlayState {
   saveToSlot: (slot: number) => boolean;
   // Returns an error message, or null on success.
   loadFromSlot: (slot: number, expectedVersion: string) => string | null;
+}
+
+// Continuous runtime saves can be large (simulation fields, explored cells,
+// actor memory, and so on), and movement may publish several store updates in
+// one frame. Zustand's default JSON storage stringifies and writes on every
+// update, which turns those harmless intermediate states into synchronous main-
+// thread stalls. Keep only the latest payload and serialize it after a short
+// coalescing window. Explicit named save slots below intentionally bypass this
+// storage and remain synchronous.
+type PersistedPlayState = Pick<
+  PlayState,
+  | "saveData"
+  | "logMessages"
+  | "activeDialogueId"
+  | "activeDialogueNodeId"
+  | "activeShopId"
+  | "activeContainerId"
+>;
+
+const AUTOSAVE_WRITE_DELAY_MS = 250;
+
+let queuedAutosave:
+  | {
+      name: string;
+      value: StorageValue<PersistedPlayState>;
+    }
+  | undefined;
+let autosaveTimer: ReturnType<typeof setTimeout> | undefined;
+
+const flushQueuedAutosave = () => {
+  if (autosaveTimer !== undefined) {
+    clearTimeout(autosaveTimer);
+    autosaveTimer = undefined;
+  }
+  const queued = queuedAutosave;
+  queuedAutosave = undefined;
+  if (!queued || typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(queued.name, JSON.stringify(queued.value));
+  } catch (err) {
+    console.error("Failed to write runtime autosave", err);
+  }
+};
+
+const deferredAutosaveStorage: PersistStorage<PersistedPlayState, void> = {
+  getItem: (name) => {
+    // A manual rehydrate in the same page should observe the newest queued
+    // snapshot rather than the previous disk value.
+    if (queuedAutosave?.name === name) flushQueuedAutosave();
+    if (typeof localStorage === "undefined") return null;
+    try {
+      const raw = localStorage.getItem(name);
+      return raw
+        ? (JSON.parse(raw) as StorageValue<PersistedPlayState>)
+        : null;
+    } catch {
+      return null;
+    }
+  },
+  setItem: (name, value) => {
+    queuedAutosave = { name, value };
+    if (autosaveTimer !== undefined) return;
+    autosaveTimer = setTimeout(flushQueuedAutosave, AUTOSAVE_WRITE_DELAY_MS);
+  },
+  removeItem: (name) => {
+    if (queuedAutosave?.name === name) {
+      queuedAutosave = undefined;
+      if (autosaveTimer !== undefined) {
+        clearTimeout(autosaveTimer);
+        autosaveTimer = undefined;
+      }
+    }
+    if (typeof localStorage === "undefined") return;
+    try {
+      localStorage.removeItem(name);
+    } catch {
+      // Match localStorage hydration behavior: unavailable storage simply
+      // leaves the in-memory run intact.
+    }
+  },
+};
+
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", flushQueuedAutosave);
 }
 
 // ── Save slots ──────────────────────────────────────────────────────────────
@@ -859,8 +947,17 @@ export const usePlayStore = create<PlayState>()(
     }),
     {
       name: "crpg-run-save",
+      storage: deferredAutosaveStorage,
+      partialize: (state): PersistedPlayState => ({
+        saveData: state.saveData,
+        logMessages: state.logMessages,
+        activeDialogueId: state.activeDialogueId,
+        activeDialogueNodeId: state.activeDialogueNodeId,
+        activeShopId: state.activeShopId,
+        activeContainerId: state.activeContainerId,
+      }),
       merge: (persisted, current) => {
-        const saved = persisted as Partial<PlayState> | undefined;
+        const saved = persisted as Partial<PersistedPlayState> | undefined;
         return {
           ...current,
           ...(saved || {}),

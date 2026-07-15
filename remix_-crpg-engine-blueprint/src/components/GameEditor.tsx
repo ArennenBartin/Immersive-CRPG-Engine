@@ -43,6 +43,13 @@ const inputCls =
 const smallBtn =
   "rounded-md border border-neutral-700 px-2 py-1 text-xs text-neutral-300 hover:text-white hover:border-neutral-500 transition-colors";
 
+const confirmDelete = (kind: string, name?: string, consequence?: string) =>
+  window.confirm(
+    `Delete ${kind}${name ? ` \"${name}\"` : ""}?\n\n${
+      consequence ? `${consequence}\n\n` : ""
+    }This cannot be undone.`,
+  );
+
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
     <label className="block space-y-1.5">
@@ -450,6 +457,8 @@ function AudioTab({
               <button
                 className="p-1.5 text-neutral-500 hover:text-red-400"
                 onClick={() => {
+                  const kind = key === "music_tracks" ? "music track" : "sound effect";
+                  if (!confirmDelete(kind, id, "Content that references this ID may stop playing audio.")) return;
                   const next = { ...registry };
                   delete next[id];
                   setRegistry(next);
@@ -586,6 +595,7 @@ function PortraitsTab({
             <button
               className="mb-1.5 p-1.5 text-neutral-500 hover:text-red-400"
               onClick={() => {
+                if (!confirmDelete("dialogue portrait", speaker)) return;
                 const next = { ...portraits };
                 delete next[speaker];
                 setPortraits(next);
@@ -694,6 +704,15 @@ function SwitchesTab({
                 className="p-1 text-neutral-600 hover:text-red-400"
                 title={referenced.has(id) ? "Still referenced by content" : "Remove"}
                 onClick={() => {
+                  if (
+                    !confirmDelete(
+                      "switch declaration",
+                      id,
+                      referenced.has(id)
+                        ? "This switch is still referenced by authored content. Deleting its declaration will leave those references unresolved."
+                        : undefined,
+                    )
+                  ) return;
                   const next = { ...switches };
                   delete next[id];
                   setSwitches(next);
@@ -770,7 +789,16 @@ function FactionsTab({
               </label>
               <button
                 className="mb-1.5 self-end p-1.5 text-neutral-500 hover:text-red-400"
-                onClick={() => setFactions(factions.filter((_, i) => i !== index))}
+                onClick={() => {
+                  if (
+                    !confirmDelete(
+                      "faction",
+                      faction.display_name || faction.id,
+                      "Conditions or cutscene actions that reference this faction may become invalid.",
+                    )
+                  ) return;
+                  setFactions(factions.filter((_, i) => i !== index));
+                }}
               >
                 <Trash2 className="h-4 w-4" />
               </button>
@@ -875,7 +903,19 @@ function BarksTab({
               </Field>
               <button
                 className="self-end p-1.5 text-neutral-500 hover:text-red-400"
-                onClick={() => setBarks(barks.filter((_, i) => i !== index))}
+                onClick={() => {
+                  const lineCount = bark.lines?.length || 0;
+                  if (
+                    !confirmDelete(
+                      "ambient bark",
+                      bark.id,
+                      lineCount > 0
+                        ? `This will also delete its ${lineCount} authored line${lineCount === 1 ? "" : "s"}.`
+                        : undefined,
+                    )
+                  ) return;
+                  setBarks(barks.filter((_, i) => i !== index));
+                }}
               >
                 <Trash2 className="h-4 w-4" />
               </button>
@@ -932,7 +972,10 @@ function BarksTab({
                   />
                   <button
                     className="p-1.5 text-neutral-500 hover:text-red-400"
-                    onClick={() => patchBark(index, { lines: bark.lines.filter((_, li) => li !== lineIndex) })}
+                    onClick={() => {
+                      if (!confirmDelete("bark line", undefined, `The line reads: \"${line.text}\"`)) return;
+                      patchBark(index, { lines: bark.lines.filter((_, li) => li !== lineIndex) });
+                    }}
                   >
                     <Trash2 className="h-4 w-4" />
                   </button>
@@ -990,7 +1033,16 @@ function EndingsTab({
             </Field>
             <button
               className="mb-1.5 self-end p-1.5 text-neutral-500 hover:text-red-400"
-              onClick={() => setEndings(endings.filter((_, i) => i !== index))}
+              onClick={() => {
+                if (
+                  !confirmDelete(
+                    "ending",
+                    ending.title || ending.id,
+                    "Game-ending actions that reference this ending may become invalid.",
+                  )
+                ) return;
+                setEndings(endings.filter((_, i) => i !== index));
+              }}
             >
               <Trash2 className="h-4 w-4" />
             </button>
@@ -1089,6 +1141,13 @@ function ChemistryTab({
                   <button
                     className="mb-1.5 self-end p-1.5 text-neutral-500 hover:text-red-400"
                     onClick={() => {
+                      if (
+                        !confirmDelete(
+                          "custom chemistry material",
+                          id,
+                          "Objects bound to this material may lose their intended simulation behavior.",
+                        )
+                      ) return;
                       const next = { ...custom };
                       delete next[id];
                       setCustom(next);

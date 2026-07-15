@@ -15,10 +15,6 @@ import {
   type QaSuiteInstallOptions,
 } from "../data/qaSuiteInstaller";
 import {
-  TEST_SUITE_MAP_IDS,
-  TEST_SUITE_VERSION,
-} from "../data/testingMapSuite";
-import {
   assertUnconfirmedMapPreservation,
   finalizePackageMigration,
   type MigrationChange,
@@ -28,6 +24,7 @@ import {
 import { markMapManuallyModified } from "../generation-facing/mapContract";
 import { assertStudioRuntimeSupport } from "../engine-core/studioRuntimeSupport";
 import type { DungeonPackageBakeResult } from "../dungeonGen/packageBake";
+import { usePlayStore } from "./playStore";
 export type {
   MigrationChange,
   MigrationWarning,
@@ -88,11 +85,10 @@ const ACTIVE_EDITOR_MODES = new Set<EditorMode>([
 const isEditorMode = (value: unknown): value is EditorMode =>
   typeof value === "string" && ACTIVE_EDITOR_MODES.has(value as EditorMode);
 
-// Bumped when the canonical bundled workspace changes incompatibly. IndexedDB
-// is origin-local, so a new namespace keeps localhost, 127.0.0.1, and fresh
-// browser profiles on the same bundled QA baseline instead of reviving an old
-// demo package from one origin.
+// Current writes use v3. Reads fall back to v2 so a namespace bump cannot make
+// an authored browser workspace appear to disappear.
 const ENGINE_PACKAGE_DB = "crpg_engine_package_store_v3";
+const LEGACY_ENGINE_PACKAGE_DBS = ["crpg_engine_package_store_v2"] as const;
 const ENGINE_PACKAGE_STORE = "active";
 const ENGINE_PACKAGE_KEY = "workspace";
 
@@ -122,6 +118,7 @@ interface PersistedEngineStorageState {
 
 interface EditorState {
   // Global Editor State
+  storageHydrated: boolean;
   mode: EditorMode;
   setMode: (mode: EditorMode) => void;
 
@@ -248,20 +245,14 @@ export const normalizePackageImportPayload = (input: unknown): GamePackage =>
 export const createDefaultEnginePackage = (): GamePackage =>
   normalizeImportedPackage(createQaSuitePackage()).package;
 
-const isBundledQaWorkspace = (pkg: GamePackage) => {
-  if (pkg.maps.length !== TEST_SUITE_MAP_IDS.length) return false;
-  const mapIds = new Set(pkg.maps.map((map) => map.id));
-  return TEST_SUITE_MAP_IDS.every((mapId) => mapIds.has(mapId));
-};
-
 /**
- * Refreshes only an older bundled QA workspace. Imported games and custom map
- * collections are never replaced during browser hydration.
+ * Persisted browser workspaces are authored projects, even when they began as
+ * the bundled QA suite. Hydration must therefore be observational and may not
+ * refresh content by recognizing map IDs or package versions. Users can merge
+ * or explicitly replace QA content through the guarded Studio actions.
  */
 export const refreshBundledEnginePackage = (pkg: GamePackage): GamePackage =>
-  isBundledQaWorkspace(pkg) && pkg.metadata.version !== TEST_SUITE_VERSION
-    ? createDefaultEnginePackage()
-    : pkg;
+  pkg;
 
 export const serializePackageForExport = (pkg: GamePackage): string => {
   const result = GamePackageSchema.safeParse(pkg);
@@ -278,13 +269,13 @@ export const serializePackageForExport = (pkg: GamePackage): string => {
 
 const canUseIndexedDb = () => typeof window !== "undefined" && "indexedDB" in window;
 
-const openPackageDb = () =>
+const openPackageDb = (databaseName = ENGINE_PACKAGE_DB) =>
   new Promise<IDBDatabase>((resolve, reject) => {
     if (!canUseIndexedDb()) {
       reject(new Error("IndexedDB is not available."));
       return;
     }
-    const request = window.indexedDB.open(ENGINE_PACKAGE_DB, 1);
+    const request = window.indexedDB.open(databaseName, 1);
     request.onupgradeneeded = () => {
       const db = request.result;
       if (!db.objectStoreNames.contains(ENGINE_PACKAGE_STORE)) {
@@ -295,10 +286,12 @@ const openPackageDb = () =>
     request.onsuccess = () => resolve(request.result);
   });
 
-const readPersistedEngineState = async (): Promise<PersistedEngineState | null> => {
+const readPersistedEngineStateFromDb = async (
+  databaseName: string,
+): Promise<PersistedEngineState | null> => {
   if (!canUseIndexedDb()) return null;
   try {
-    const db = await openPackageDb();
+    const db = await openPackageDb(databaseName);
     return await new Promise((resolve, reject) => {
       const transaction = db.transaction(ENGINE_PACKAGE_STORE, "readonly");
       const store = transaction.objectStore(ENGINE_PACKAGE_STORE);
@@ -336,6 +329,16 @@ const readPersistedEngineState = async (): Promise<PersistedEngineState | null> 
   }
 };
 
+const readPersistedEngineState = async (): Promise<PersistedEngineState | null> => {
+  const current = await readPersistedEngineStateFromDb(ENGINE_PACKAGE_DB);
+  if (current) return current;
+  for (const databaseName of LEGACY_ENGINE_PACKAGE_DBS) {
+    const legacy = await readPersistedEngineStateFromDb(databaseName);
+    if (legacy) return legacy;
+  }
+  return null;
+};
+
 const writePersistedEngineState = async (state: PersistedEngineStorageState) => {
   if (!canUseIndexedDb()) return;
   const db = await openPackageDb();
@@ -356,9 +359,11 @@ const writePersistedEngineState = async (state: PersistedEngineStorageState) => 
 };
 
 let packageStorageHydrated = typeof window === "undefined";
+let packageStorageMutatedBeforeHydration = false;
 let packageStorageTimer: number | undefined;
 
 export const useEngineStore = create<EditorState>((set, get) => ({
+  storageHydrated: packageStorageHydrated,
   mode: "home",
   setMode: (mode) => set({ mode }),
 
@@ -447,6 +452,10 @@ export const useEngineStore = create<EditorState>((set, get) => ({
       }
       const imported = migration.package;
       assertStudioRuntimeSupport(imported);
+      // Runtime saves belong to the previously loaded project. Package version
+      // strings are not globally unique, so retaining the run across import can
+      // apply stale deltas to an unrelated package with overlapping map IDs.
+      usePlayStore.getState().resetRun();
       set((state) => ({
         undoStack: [...state.undoStack, previous].slice(-50),
         redoStack: [],
@@ -481,6 +490,7 @@ export const useEngineStore = create<EditorState>((set, get) => ({
     const migration = applyQaSuiteInstall(previous, options);
     if (!migration.applied) return migration;
     const installed = migration.package;
+    if (options.mode === "replace") usePlayStore.getState().resetRun();
     set((state) => ({
       undoStack: [...state.undoStack, previous].slice(-50),
       redoStack: [],
@@ -532,6 +542,9 @@ export const useEngineStore = create<EditorState>((set, get) => ({
     }));
   },
   addMap: (mapData) => {
+    if (get().gamePackage.maps.some((map) => map.id === mapData.id)) {
+      throw new Error(`A map with ID ${mapData.id} already exists.`);
+    }
     get().pushHistory();
     set((state) => ({
       gamePackage: {
@@ -759,13 +772,19 @@ if (typeof window !== "undefined") {
       state.selectedMapId !== previousState.selectedMapId ||
       state.mode !== previousState.mode
     ) {
+      if (!packageStorageHydrated) packageStorageMutatedBeforeHydration = true;
       schedulePersist(state);
     }
   });
 
   readPersistedEngineState().then((persisted) => {
+    const preserveCurrentWorkspace = packageStorageMutatedBeforeHydration;
     packageStorageHydrated = true;
-    if (!persisted) {
+    // AppShell blocks normal editing while storage loads. This second guard
+    // also protects programmatic imports or edits made during that window:
+    // stale IndexedDB state may never overwrite a newer in-memory mutation.
+    if (!persisted || preserveCurrentWorkspace) {
+      useEngineStore.setState({ storageHydrated: true });
       schedulePersist(useEngineStore.getState());
       return;
     }
@@ -785,6 +804,7 @@ if (typeof window !== "undefined") {
         persisted.mode === "play"
           ? "map_editor"
           : persisted.mode,
+      storageHydrated: true,
     }));
   });
 }

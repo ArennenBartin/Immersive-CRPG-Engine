@@ -15,6 +15,11 @@ This project is a 3D-presented, grid-simulated CRPG engine workspace with a buil
 - [Grid Immersive-Sim Engine Roadmap v1](docs/04_GRID_IMMERSIVE_SIM_ENGINE_ROADMAP_V1.md) — object/Part, scheduler, reactions, perception, verbs, combat, inventory, and world-state roadmap
 - [Alderamontico State System Contract v1](docs/05_ALDERAMONTICO_STATE_SYSTEM_CONTRACT_V1.md) — physical + emotional axis-state target contract
 - [Emotional Layer, Grid Operator & Attend v1](docs/06_EMOTIONAL_LAYER_GRID_ATTEND_SPEC_V1.md) — implementation-grounded completion spec for emotional axes, Grid/lens operation, Condition read-outs, and attend nodes
+- [Overworld Development Plan v2](docs/07_OVERWORLD_DEVELOPMENT_PLAN_V2.md) — phased Threefold March asset, geography, population, wiring, and integration plan
+- [Alderamontico Fracture Crawl — Codex Engine Architecture Build Plan v1](docs/08_ALDERAMONTICO_FRACTURE_CRAWL_CODEX_ENGINE_BUILD_PLAN_V1.md) — phased, acceptance-gated engine delivery plan for the August 1 architecture milestone
+- [Fracture Crawl GDD v0.3 — Jam Production Patch](docs/fracture_crawl/fracture_crawl_game_design_document_v0_3_jam_production_patch.md) — canonical systems, campaign-loop, content-scope, and jam-production reference for Fracture Crawl
+- [Fracture Crawl Phase 0–1 Baseline and Studio/Play Handoff](docs/fracture_crawl/PHASE_0_1_REPOSITORY_TRUTH_AND_STUDIO_PLAY_BASELINE_2026-07-14.md) — repository audit, safety repairs, Studio/Play contract, verification evidence, and user acceptance checklist
+- [Fracture Crawl Phases 2–3 — Illumination and Sensory Perception](docs/fracture_crawl/PHASE_2_3_ILLUMINATION_AND_SENSORY_PERCEPTION_2026-07-14.md) — authoritative darkness/light/fog, typed senses, last-known search, QA chamber, and user acceptance checklist
 - [Alderamontico World Bible v1](docs/canon/alderamontico_world_bible_v1.md) — authoritative world reference for cosmology, the Grid, Glass, peoples, philosophies-as-factions, and the Anchor
 - [The Third Voice Master Build Plan v1](docs/third_voice/the_third_voice_master_build_plan_v1.md) — primary project bible and agent-facing build plan for The Third Voice
 - [The Third Voice Act 2 Attend System](docs/third_voice/the_third_voice_act2_attend_system.md) — authoritative Attend mechanic spec for hidden scoring, side quests, combat Attend, and ending comprehension
@@ -28,13 +33,18 @@ This project is a 3D-presented, grid-simulated CRPG engine workspace with a buil
 1. Install dependencies with `npm install`.
 2. Optional: set `GEMINI_API_KEY` in `.env.local` for AI-assisted authoring endpoints.
 3. Start the dev server with `npm run dev`.
+4. If port 5000 is occupied (macOS AirTunes commonly claims it), use
+   `PORT=5003 HMR_PORT=5004 npm run dev` and open `http://localhost:5003`.
 
 ## Validation
 
 - `npm run verify` — complete release/readiness gate
 - `npm run verify:dungeon-readiness` — descriptive alias for the same gate
+- `npm run test:all` — complete chained automated test suite
+- `npm run audit:all` — complete chained repository audit suite
 - `npm run lint`
 - `npm run test:engine`
+- `npm run test:perception` — focused 27-check illumination, terrain/actor visibility, wall-lighting, sensory-profile, search, and alert-gating contract
 - `npm run test:chemistry`
 - `npm run test:state`
 - `npm run test:dungeon` — focused deterministic dungeon-generator suite

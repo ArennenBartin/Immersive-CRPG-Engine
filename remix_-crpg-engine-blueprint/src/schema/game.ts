@@ -140,6 +140,46 @@ export const SimulationAuthoredProfileSchema = z.object({
   trace_profile: SimulationTraceProfileSchema.optional(),
 });
 
+// A single authorable light contract shared by items and world objects. Runtime
+// placement decides where the source lives; the profile describes how it
+// illuminates, persists, moves, and advertises itself to sensory channels.
+export const LightSourceProfileSchema = z.object({
+  intensity: z.number().finite().min(0).max(1).default(0.8),
+  radius: z.number().finite().min(0).default(10),
+  duration_ticks: z.number().int().positive().optional(),
+  color: z.string().default("#facc15"),
+  active_by_default: z.boolean().default(true),
+  extinguishable: z.boolean().default(true),
+  mobility: z.enum(["fixed", "portable", "throwable"]).default("fixed"),
+  persistent: z.boolean().default(true),
+  stimulus_tags: z.array(z.string()).default(["light"]),
+  exposes_carrier: z.boolean().default(true),
+});
+
+// Sensory channels are intentionally data-driven: adding a future sense means
+// teaching the perception layer about a stimulus kind, not replacing a single
+// universal detection rule on every actor.
+export const SensoryChannelSchema = z.object({
+  id: z.string(),
+  stimulus_kinds: z
+    .array(z.enum(["light", "sound", "fire", "smoke", "danger_gas", "visible_player"])),
+  stimulus_tags: z.array(z.string()).optional(),
+  range: z.number().finite().min(0).default(8),
+  threshold: z.number().finite().min(0).max(1).default(0.2),
+  sensitivity: z.number().finite().min(0).default(1),
+  requires_los: z.boolean().default(false),
+  requires_view_cone: z.boolean().default(false),
+  requires_illumination: z.boolean().default(false),
+  tracks_live_target: z.boolean().default(false),
+});
+
+export const SensoryProfileSchema = z.object({
+  id: z.string().default("standard"),
+  channels: z.array(SensoryChannelSchema).default([]),
+  memory_ticks: z.number().int().min(0).default(90),
+  search_ticks: z.number().int().min(0).default(90),
+});
+
 export const SimulationProcessItemStackSchema = z.object({
   item_id: z.string(),
   count: z.number().default(1),
@@ -404,6 +444,7 @@ export const EntitySchema = z.object({
   defense: z.number().default(1),
   speed: z.number().default(10),
   xp_reward: z.number().optional(),
+  sensory_profile: SensoryProfileSchema.optional(),
   // Ability ids this entity can use. Party members cast these on their
   // combat turns (the player picks the target).
   skills: z.array(z.string()).optional(),
@@ -538,6 +579,7 @@ export const ItemSchema = z.object({
     .optional(),
   simulation: SimulationAuthoredProfileSchema.optional(),
   spatial: ItemSpatialProfileSchema.optional(),
+  light_source: LightSourceProfileSchema.optional(),
 });
 
 export const EventActionSchema = z.object({
@@ -687,6 +729,7 @@ export const MapDataSchema = z.object({
   display_name: z.string(),
   width: z.number(),
   height: z.number(),
+  ambient_light: z.number().finite().min(0).max(1).optional(),
   spawns: z.array(
     z.object({
       id: z.string(),
@@ -900,6 +943,7 @@ export const ObjectSchema = z.object({
     footprint: z.array(z.tuple([z.number(), z.number()])).default([[0, 0]]),
   }),
   simulation: SimulationAuthoredProfileSchema.optional(),
+  light_source: LightSourceProfileSchema.optional(),
 });
 
 export const SpriteSchema = z.preprocess(
@@ -1182,6 +1226,10 @@ export type SimulationConditionData = z.infer<typeof SimulationConditionSchema>;
 export type SimulationMaterialProfileData = z.infer<typeof SimulationMaterialProfileSchema>;
 export type SimulationTraceProfileData = z.infer<typeof SimulationTraceProfileSchema>;
 export type SimulationAuthoredProfileData = z.infer<typeof SimulationAuthoredProfileSchema>;
+export type LightSourceProfileData = z.infer<typeof LightSourceProfileSchema>;
+export type LightSourceProfile = LightSourceProfileData;
+export type SensoryChannelData = z.infer<typeof SensoryChannelSchema>;
+export type SensoryProfileData = z.infer<typeof SensoryProfileSchema>;
 export type GameObjectPartCascadeData = z.infer<typeof GameObjectPartCascadeSchema>;
 export type GameObjectPartData = z.infer<typeof GameObjectPartSchema>;
 export type GameObjectBlueprintData = z.infer<typeof GameObjectBlueprintSchema>;

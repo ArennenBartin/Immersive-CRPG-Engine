@@ -6,6 +6,65 @@ import { getPlacementFootprint, placementHasCollision } from "./objectFootprint"
 
 export const fogCellKey = fineCoordKey;
 
+export type FogRenderState = "visible" | "explored" | "unseen";
+
+export interface StructureFogCompositePolicy {
+  render: boolean;
+  postFog: boolean;
+  cameraFaded: boolean;
+}
+
+// Static structure geometry has a different compositing contract from actors.
+// Only a currently visible wall may enter the post-fog transparent pass; an
+// explored wall stays beneath memory haze and an unseen wall is omitted. A
+// camera fade is likewise forbidden for explored memory because raising that
+// copy would disclose geometry through the secrecy mask.
+export const resolveStructureFogCompositePolicy = (
+  state: FogRenderState,
+  cameraOccluded: boolean,
+): StructureFogCompositePolicy => ({
+  render: state !== "unseen",
+  postFog: state === "visible",
+  cameraFaded: state === "visible" && cameraOccluded,
+});
+
+// Rendering consumes the authoritative visibility layers as a strict
+// three-state mask. Turning Fog off reveals static world geometry, while live
+// actors/items may still use current visibility for darkness and stealth.
+export const classifyFogRenderState = (
+  key: string,
+  fogEnabled: boolean,
+  currentlyVisible: ReadonlySet<string>,
+  discovered: ReadonlySet<string>,
+): FogRenderState => {
+  if (!fogEnabled || currentlyVisible.has(key)) return "visible";
+  if (discovered.has(key)) return "explored";
+  return "unseen";
+};
+
+// A single macro terrain mesh represents multiple authoritative fine cells.
+// Preserve the mesh when any covered cell is currently visible; otherwise it
+// remains explored memory when at least one covered cell was discovered.
+export const classifyFogRenderStateForCells = (
+  cells: readonly (readonly [number, number])[],
+  fogEnabled: boolean,
+  currentlyVisible: ReadonlySet<string>,
+  discovered: ReadonlySet<string>,
+): FogRenderState => {
+  let sawExplored = false;
+  for (const cell of cells) {
+    const state = classifyFogRenderState(
+      fogCellKey(cell[0], cell[1]),
+      fogEnabled,
+      currentlyVisible,
+      discovered,
+    );
+    if (state === "visible") return "visible";
+    if (state === "explored") sawExplored = true;
+  }
+  return sawExplored ? "explored" : "unseen";
+};
+
 const isDoorObject = (placement: ObjectPlacementData, objectDef?: ObjectData) =>
   isBuildingDoorPlacement(placement) || Boolean(objectDef?.tags?.includes("door"));
 

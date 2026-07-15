@@ -480,6 +480,26 @@ export type {
   SimulationSurfaceState,
 } from "./simulation";
 export {
+  createImmersiveIlluminationSnapshotFromV1,
+  createImmersiveViewerVisibilityFromV1,
+  queryImmersiveIlluminationAtCell,
+  queryImmersiveVisualAcquisition,
+  resolveImmersiveLightSources,
+} from "./visibility";
+export type {
+  ImmersiveIlluminationCell,
+  ImmersiveIlluminationContribution,
+  ImmersiveIlluminationSnapshot,
+  ImmersiveLightMobility,
+  ImmersiveLightSourceKind,
+  ImmersiveResolvedLightSource,
+  ImmersiveViewerVisibilityOptions,
+  ImmersiveViewerVisibilitySnapshot,
+  ImmersiveVisualAcquisitionCause,
+  ImmersiveVisualAcquisitionQuery,
+  ImmersiveVisualAcquisitionResult,
+} from "./visibility";
+export {
   CHEM_SPILL_LIQUIDS,
   applyChemistrySpillToSave,
   applyChemistryVerbToSave,
@@ -549,6 +569,7 @@ export type {
   ImmersiveCombatOverwatchTrigger,
   ImmersiveCombatOverwatchZone,
   ImmersiveCombatTeam,
+  ImmersiveDetectionCause,
   ImmersiveGlobalVerbKind,
   ImmersiveGlobalVerbOptions,
   ImmersiveGlobalVerbResult,

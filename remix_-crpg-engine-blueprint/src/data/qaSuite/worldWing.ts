@@ -67,6 +67,9 @@ const worldMap = {
     entityPlacement("qa_bark_b", [-3, 5], [-1, 0]),
   ],
   item_placements: [
+    // Keep this lab's keyed-container proof self-contained for ordinary-map
+    // progression validation instead of relying on inventory from another map.
+    { id: "qa_world_keycard", item_id: "qa_keycard", cell: [-3, -3] as [number, number], count: 1 },
     { id: "qa_world_heat_vial", item_id: "qa_heat_vial", cell: [-1, -3] as [number, number], count: 1 },
     { id: "qa_world_sample", item_id: "qa_sample", cell: [1, -3] as [number, number], count: 1 },
   ],

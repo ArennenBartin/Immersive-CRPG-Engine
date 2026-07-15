@@ -22,6 +22,7 @@ interface Props {
   onCommitLayout: (layout: InventoryLayoutEntry[]) => void;
   onUse: (itemDef: ItemDef, itemId: string, targetId?: string) => void;
   onDrop: (itemId: string) => void;
+  onThrow?: (itemId: string) => void;
   healingTargets: HealTarget[];
   playSfx?: (id: string, opts?: { volume?: number; cooldownMs?: number }) => void;
 }
@@ -54,6 +55,7 @@ export function SpatialInventoryGrid({
   onCommitLayout,
   onUse,
   onDrop,
+  onThrow,
   healingTargets,
   playSfx,
 }: Props) {
@@ -358,7 +360,7 @@ export function SpatialInventoryGrid({
               <p className="text-xs leading-relaxed text-neutral-400">{selectedItem.description}</p>
             )}
             <div className="flex flex-wrap gap-2">
-              {selectedItem.category === "consumable" &&
+              {(selectedItem.category === "consumable" || Boolean(selectedItem.light_source)) &&
                 (selectedItem.effects?.heal ? (
                   healingTargets.map((target) => (
                     <button
@@ -381,6 +383,14 @@ export function SpatialInventoryGrid({
                     Use
                   </button>
                 ))}
+              {selectedItem.light_source?.mobility === "throwable" && onThrow && (
+                <button
+                  className="inline-flex items-center gap-1.5 rounded bg-amber-700 px-2.5 py-1 text-xs text-amber-50 transition-colors hover:bg-amber-600"
+                  onClick={() => onThrow(selectedItem.id)}
+                >
+                  Throw
+                </button>
+              )}
               <button
                 className="inline-flex items-center gap-1.5 rounded bg-neutral-700 px-2.5 py-1 text-xs text-neutral-100 transition-colors hover:bg-neutral-600"
                 onClick={rotateSelected}

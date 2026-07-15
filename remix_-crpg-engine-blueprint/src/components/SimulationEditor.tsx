@@ -310,7 +310,7 @@ export function SimulationEditor() {
               <div className="flex flex-wrap gap-2">
                 {(stage4Snapshot?.alerts || []).slice(0, 24).map((alert) => (
                   <span key={`alert:${alert.actor_id}:${alert.stimulus.kind}`} className="text-[11px] rounded-sm border border-neutral-800 bg-neutral-950 px-2 py-1 text-neutral-300">
-                    {alert.entity_id} · {alert.alertness} · {alert.stimulus.kind} {alert.score.toFixed(2)}
+                    {alert.entity_id} · {alert.sensory_profile_id || "default"}/{alert.sense_id || "sense"} · {alert.alertness} · {alert.cause || alert.stimulus.kind} {alert.score.toFixed(2)} · evidence {alert.target_cell[0]},{alert.target_cell[1]}
                   </span>
                 ))}
                 {!!stage4Snapshot && stage4Snapshot.alerts.length === 0 && (

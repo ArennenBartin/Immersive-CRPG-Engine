@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useEngineStore, EditorMode } from "../store/engineStore";
-import { Home, Play, Map, Box, MessageSquare, BookOpen, Swords, FileJson, Upload, Menu, X, Image as ImageIcon, Undo2, Redo2, Sparkles, Briefcase, FileText, Activity, Settings2, Layers3 } from "lucide-react";
+import { usePlayStore } from "../store/playStore";
+import { Home, Play, Map, Box, MessageSquare, BookOpen, Swords, FileJson, Upload, Menu, X, Image as ImageIcon, Undo2, Redo2, Sparkles, Briefcase, FileText, Activity, Settings2, Layers3, ArrowLeft, RotateCcw, ShieldCheck, AlertTriangle } from "lucide-react";
 import { PlayMode } from "./PlayMode";
 import { GameEditor } from "./GameEditor";
 import { MapEditor } from "./MapEditor";
@@ -17,9 +18,13 @@ import { SkillEditor } from "./SkillEditor";
 import { SimulationEditor } from "./SimulationEditor";
 import { Store } from "lucide-react";
 import { DungeonGeneratorPanel } from "./DungeonGeneratorPanel";
+import {
+  validateStudioProject,
+  type StudioValidationReport,
+} from "../utils/studioValidation";
 
 export function AppShell() {
-  const { mode, setMode, undo, redo, undoStack, redoStack } = useEngineStore();
+  const { storageHydrated, mode, setMode, undo, redo, undoStack, redoStack } = useEngineStore();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   // Group nav items by primary and secondary for mobile
@@ -46,6 +51,19 @@ export function AppShell() {
   ];
 
   const allNavItems = [...mainNavItems, ...secondaryNavItems];
+
+  if (!storageHydrated) {
+    return (
+      <main className="flex h-screen items-center justify-center bg-neutral-950 p-6 text-neutral-100">
+        <div className="max-w-md rounded-xl border border-neutral-800 bg-neutral-900/70 px-6 py-5 text-center shadow-xl">
+          <h1 className="text-lg font-semibold">Loading Studio workspace…</h1>
+          <p className="mt-2 text-sm text-neutral-400">
+            Restoring authored project data before editing is enabled.
+          </p>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <div className="flex flex-col sm:flex-row h-screen bg-neutral-900 text-neutral-100 font-sans overflow-hidden overscroll-none">
@@ -85,7 +103,7 @@ export function AppShell() {
           </button>
           <h1 className="text-lg font-bold tracking-tight">CRPG Engine</h1>
         </div>
-        <div className="flex items-center gap-2 z-30">
+        {mode !== "play" && <div className="flex items-center gap-2 z-30">
           <button
             onClick={undo}
             disabled={undoStack.length === 0}
@@ -100,7 +118,7 @@ export function AppShell() {
           >
             <Redo2 className="w-5 h-5" />
           </button>
-        </div>
+        </div>}
       </header>
 
       {/* Mobile Menu Overlay */}
@@ -135,7 +153,7 @@ export function AppShell() {
           <h2 className="text-sm font-medium text-neutral-400 capitalize">
             {allNavItems.find((n) => n.id === mode)?.label}
           </h2>
-          <div className="flex items-center gap-2">
+          {mode !== "play" && <div className="flex items-center gap-2">
             <button
               onClick={undo}
               disabled={undoStack.length === 0}
@@ -152,12 +170,13 @@ export function AppShell() {
             >
               <Redo2 className="w-4 h-4" />
             </button>
-          </div>
+          </div>}
         </header>
         
-        <div className={`flex-1 min-h-0 w-full ${mode === 'play' ? 'overflow-hidden' : 'overflow-auto'}`}>
+        <div className={`flex-1 min-h-0 w-full ${mode === 'play' ? 'overflow-hidden flex flex-col' : 'overflow-auto'}`}>
+          {mode === "play" && <PlaySessionBar />}
           {mode === "home" && <HomePanel />}
-          {mode === "play" && <PlayMode />}
+          {mode === "play" && <div className="flex-1 min-h-0"><PlayMode /></div>}
           {mode === "map_editor" && <MapEditor />}
           {mode === "game_editor" && <GameEditor />}
           {mode === "dungeon_generator" && <DungeonGeneratorPanel />}
@@ -197,6 +216,52 @@ export function AppShell() {
   );
 }
 
+function PlaySessionBar() {
+  const setMode = useEngineStore((state) => state.setMode);
+  const saveData = usePlayStore((state) => state.saveData);
+  const resetRun = usePlayStore((state) => state.resetRun);
+
+  const discardRunAndReturn = () => {
+    if (
+      saveData &&
+      !window.confirm(
+        "Discard the current runtime session and return to Studio? Authored project data will not be changed.",
+      )
+    ) {
+      return;
+    }
+    resetRun();
+    setMode("map_editor");
+  };
+
+  return (
+    <div className="shrink-0 border-b border-sky-900/60 bg-sky-950/45 px-3 py-2 text-xs text-sky-100 sm:px-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p>
+          Play uses separate runtime state. Returning to Studio keeps this run; authored maps are never updated from play automatically.
+        </p>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setMode("map_editor")}
+            className="flex items-center gap-1.5 rounded-md border border-sky-500/40 bg-sky-500/10 px-2.5 py-1.5 font-medium text-sky-100 hover:bg-sky-500/20"
+          >
+            <ArrowLeft className="h-3.5 w-3.5" />
+            Studio — keep run
+          </button>
+          <button
+            onClick={discardRunAndReturn}
+            disabled={!saveData}
+            className="flex items-center gap-1.5 rounded-md border border-rose-500/40 bg-rose-500/10 px-2.5 py-1.5 font-medium text-rose-100 hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+            Discard run
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function HomePanel() {
   const {
     gamePackage,
@@ -205,6 +270,8 @@ function HomePanel() {
     installQaSuite: installQaSuiteIntoStore,
     setGamePackage,
     updateSettings,
+    setMode,
+    setSelectedMapId,
   } = useEngineStore();
   const importFileRef = useRef<HTMLInputElement | null>(null);
   const [musicTracksText, setMusicTracksText] = useState(
@@ -218,10 +285,33 @@ function HomePanel() {
     detail?: string;
   } | null>(null);
   const [isImportingPackage, setIsImportingPackage] = useState(false);
+  const [isValidatingProject, setIsValidatingProject] = useState(false);
+  const [validationReport, setValidationReport] = useState<StudioValidationReport | null>(null);
+  const [validationError, setValidationError] = useState<string | null>(null);
 
   useEffect(() => {
     setMusicTracksText(JSON.stringify(gamePackage.settings?.music_tracks || {}, null, 2));
   }, [gamePackage.settings?.music_tracks]);
+
+  useEffect(() => {
+    setValidationReport(null);
+    setValidationError(null);
+  }, [gamePackage]);
+
+  const runProjectValidation = () => {
+    setIsValidatingProject(true);
+    setValidationError(null);
+    window.setTimeout(() => {
+      try {
+        setValidationReport(validateStudioProject(gamePackage));
+      } catch (error) {
+        setValidationReport(null);
+        setValidationError(error instanceof Error ? error.message : "Project validation failed.");
+      } finally {
+        setIsValidatingProject(false);
+      }
+    }, 0);
+  };
 
   const updateMetadata = (updates: Partial<typeof gamePackage.metadata>) => {
     setGamePackage({
@@ -250,6 +340,14 @@ function HomePanel() {
   };
 
   const applyPackageImport = (json: string) => {
+    if (
+      usePlayStore.getState().saveData &&
+      !window.confirm(
+        "Import this project and discard the current runtime session? Authored data in the imported package will become the active Studio project.",
+      )
+    ) {
+      return;
+    }
     const result = importPackage(json);
     if (result.ok) {
       setPackageJsonText("");
@@ -338,7 +436,7 @@ function HomePanel() {
     const confirmed =
       mode !== "replace" ||
       window.confirm(
-        "Replace this entire project with the QA suite? A JSON backup will be downloaded first.",
+        "Replace this entire project with the QA suite and discard the current runtime session? A JSON backup will be downloaded first.",
       );
     if (!confirmed) return;
     const result = installQaSuiteIntoStore({
@@ -470,6 +568,109 @@ function HomePanel() {
               </div>
             )}
           </div>
+        </div>
+        <div className="md:col-span-2 rounded-xl border border-neutral-700/50 bg-neutral-800/50 p-5 sm:p-6">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h3 className="flex items-center gap-2 text-lg font-medium">
+                <ShieldCheck className="h-5 w-5 text-emerald-300" />
+                Project Validation
+              </h3>
+              <p className="mt-1 text-sm text-neutral-400">
+                Check package references and every ordinary map using the same validators as the command-line audits.
+              </p>
+            </div>
+            <button
+              onClick={runProjectValidation}
+              disabled={isValidatingProject}
+              className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-2 text-sm font-medium text-emerald-100 hover:bg-emerald-500/20 disabled:cursor-wait disabled:opacity-60"
+            >
+              {isValidatingProject ? "Validating…" : "Validate Project"}
+            </button>
+          </div>
+
+          {validationError && (
+            <div className="mt-4 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+              {validationError}
+            </div>
+          )}
+
+          {validationReport && (
+            <div className="mt-4 space-y-3" aria-live="polite">
+              <div
+                className={`flex flex-wrap items-center gap-3 rounded-md border px-3 py-2 text-sm ${
+                  validationReport.valid
+                    ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-100"
+                    : "border-red-500/40 bg-red-500/10 text-red-100"
+                }`}
+              >
+                <strong>{validationReport.valid ? "Ready for Play" : "Blocking issues found"}</strong>
+                <span>{validationReport.validatedMapCount} maps checked</span>
+                <span>{validationReport.counts.errors} errors</span>
+                <span>{validationReport.counts.warnings} warnings</span>
+                <span>{validationReport.counts.info} info</span>
+              </div>
+
+              {validationReport.issues.length > 0 ? (
+                <div className="max-h-80 space-y-2 overflow-y-auto pr-1">
+                  {validationReport.issues.slice(0, 100).map((issue, index) => (
+                    <div
+                      key={`${issue.code}:${issue.path}:${issue.mapId || "package"}:${index}`}
+                      className="rounded-md border border-neutral-700 bg-neutral-950/55 p-3 text-sm"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span
+                          className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ${
+                            issue.severity === "error"
+                              ? "bg-red-500/20 text-red-200"
+                              : issue.severity === "warning"
+                                ? "bg-amber-500/20 text-amber-200"
+                                : "bg-sky-500/20 text-sky-200"
+                          }`}
+                        >
+                          {issue.severity}
+                        </span>
+                        <code className="text-xs text-neutral-300">{issue.code}</code>
+                        {issue.blocking && (
+                          <span className="flex items-center gap-1 text-xs text-red-300">
+                            <AlertTriangle className="h-3 w-3" /> Blocking
+                          </span>
+                        )}
+                        {issue.mapId && (
+                          <button
+                            onClick={() => {
+                              setSelectedMapId(issue.mapId || null);
+                              setMode("map_editor");
+                            }}
+                            className="ml-auto rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 hover:bg-neutral-800 hover:text-white"
+                          >
+                            Open {issue.mapId}
+                          </button>
+                        )}
+                      </div>
+                      <p className="mt-2 text-neutral-200">{issue.message}</p>
+                      <p className="mt-1 break-all font-mono text-[11px] text-neutral-500">{issue.path}</p>
+                      {issue.cells?.length ? (
+                        <p className="mt-1 text-xs text-neutral-500">
+                          Cell {issue.cells[0][0]}, {issue.cells[0][1]}
+                        </p>
+                      ) : null}
+                      {issue.suggestedFix && (
+                        <p className="mt-1 text-xs text-neutral-400">Suggested fix: {issue.suggestedFix}</p>
+                      )}
+                    </div>
+                  ))}
+                  {validationReport.issues.length > 100 && (
+                    <p className="text-xs text-neutral-500">
+                      Showing the first 100 of {validationReport.issues.length} diagnostics.
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <p className="text-sm text-neutral-400">No project or map diagnostics were reported.</p>
+              )}
+            </div>
+          )}
         </div>
         <div className="bg-neutral-800/50 rounded-xl border border-neutral-700/50 p-5 sm:p-6 space-y-4">
           <h3 className="text-lg font-medium">Global Settings</h3>

@@ -17,6 +17,7 @@ export const resolvePlayModeMap = ({
   saveData?: Pick<PlaySave, "current_map_id" | "package_version"> | null;
   didInitialMapLoad: boolean;
 }): PlayModeMapResolution => {
+  void didInitialMapLoad;
   const findMap = (id?: string | null) =>
     id ? gamePackage.maps.find((map) => map.id === id) || null : null;
 
@@ -26,7 +27,8 @@ export const resolvePlayModeMap = ({
 
   return {
     map:
-      (didInitialMapLoad ? saveMap || selectedMap : selectedMap || saveMap) ||
+      saveMap ||
+      selectedMap ||
       findMap(gamePackage.metadata.start_map_id) ||
       gamePackage.maps[0] ||
       null,

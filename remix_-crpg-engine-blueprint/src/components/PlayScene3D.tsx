@@ -49,6 +49,7 @@ export const PLAY_CAMERA_PROFILES: Record<PlayCameraMode, PlayCameraProfile> = {
 
 const CAMERA_ROTATION_DAMPING = 7.5;
 const CAMERA_FOLLOW_SNAP_DISTANCE = 6;
+const CAMERA_FOV_UPDATE_EPSILON = 0.001;
 const TWO_PI = Math.PI * 2;
 const targetVec = new THREE.Vector3();
 const lookAtVec = new THREE.Vector3();
@@ -201,81 +202,44 @@ export function IsometricCameraRig({
     camera.position.set(...position);
     camera.lookAt(focus.x, focus.y, focus.z);
     if (camera instanceof THREE.PerspectiveCamera) {
-      camera.fov = THREE.MathUtils.damp(camera.fov, profile.fov, 8, delta);
-      camera.updateProjectionMatrix();
+      const nextFov = THREE.MathUtils.damp(camera.fov, profile.fov, 8, delta);
+      if (Math.abs(nextFov - camera.fov) >= CAMERA_FOV_UPDATE_EPSILON) {
+        camera.fov = nextFov;
+        camera.updateProjectionMatrix();
+      }
     }
   });
 
   return null;
 }
 
-export function BlackStarLightRig({ playerPos }: { playerPos: [number, number] }) {
-  const lightRigRef = useRef<THREE.Group>(null);
-  const chromaRef = useRef<THREE.PointLight>(null);
-  const moonRef = useRef<THREE.DirectionalLight>(null);
-  const counterRef = useRef<THREE.DirectionalLight>(null);
-  const lastLightUpdateRef = useRef(0);
-
-  useFrame((state, frameDelta) => {
-    const rig = lightRigRef.current;
-    if (!rig) return;
-    const delta = Math.min(frameDelta, 0.05);
-    const t = state.clock.elapsedTime;
-    const targetX = playerStateRef.ready ? playerStateRef.px : playerPos[0];
-    const targetZ = playerStateRef.ready ? playerStateRef.pz : playerPos[1];
-    rig.position.x = THREE.MathUtils.damp(rig.position.x, targetX, 7, delta);
-    rig.position.z = THREE.MathUtils.damp(rig.position.z, targetZ, 7, delta);
-
-    if (t - lastLightUpdateRef.current <= 0.12) return;
-    lastLightUpdateRef.current = t;
-    if (chromaRef.current) {
-      chromaRef.current.color.setHSL((t * 0.075 + 0.03) % 1, 0.92, 0.6);
-      chromaRef.current.intensity = 3.15 + Math.sin(t * 1.05) * 0.45;
-      chromaRef.current.position.set(
-        Math.sin(t * 0.45) * 1.25,
-        5.1 + Math.sin(t * 0.65) * 0.75,
-        Math.cos(t * 0.38) * 1.25,
-      );
-    }
-    moonRef.current?.color.setHSL(
-      (0.62 + Math.sin(t * 0.07) * 0.16 + 1) % 1,
-      0.45,
-      0.74,
-    );
-    counterRef.current?.color.setHSL(
-      (0.95 + Math.sin(t * 0.05) * 0.2 + 1) % 1,
-      0.6,
-      0.5,
-    );
-  });
-
+export function BlackStarLightRig({
+  ambientLight = 0.08,
+  shadowsEnabled = true,
+}: {
+  playerPos: [number, number];
+  ambientLight?: number;
+  shadowsEnabled?: boolean;
+}) {
+  // This is a deliberately weak readability fill. Mechanical sources are
+  // rendered by the world layer; the old player-following point light made
+  // authored darkness visually impossible and contradicted perception.
+  const ambient = THREE.MathUtils.clamp(ambientLight, 0, 1);
   return (
     <>
-      <hemisphereLight color="#8FA5F2" groundColor="#34304A" intensity={0.78} />
-      <ambientLight color="#665F91" intensity={0.48} />
+      <hemisphereLight color="#8FA5F2" groundColor="#171522" intensity={0.04 + ambient * 0.62} />
+      <ambientLight color="#665F91" intensity={0.015 + ambient * 0.42} />
       <directionalLight
-        ref={moonRef}
         position={[-9, 20, -7]}
         color="#C2CCFF"
-        intensity={1.18}
-        castShadow
+        intensity={0.08 + ambient * 0.9}
+        castShadow={shadowsEnabled}
       />
       <directionalLight
-        ref={counterRef}
         position={[10, 10, 8]}
         color="#A05E9C"
-        intensity={0.56}
+        intensity={0.02 + ambient * 0.34}
       />
-      <group ref={lightRigRef} position={[playerPos[0], 0, playerPos[1]]}>
-        <pointLight
-          ref={chromaRef}
-          position={[0, 5.1, 0]}
-          color="#ff2fb3"
-          intensity={2.35}
-          distance={16}
-          decay={2}
-        />
-      </group>
     </>
   );
 }
@@ -285,11 +249,13 @@ export function AdaptiveQualityProbe({
   minDpr,
   maxDpr,
   setDpr,
+  frameBudgetMs = 1000 / 60,
 }: {
   dpr: number;
   minDpr: number;
   maxDpr: number;
   setDpr: React.Dispatch<React.SetStateAction<number>>;
+  frameBudgetMs?: number;
 }) {
   const samplesRef = useRef<number[]>([]);
   const lastFrameMsRef = useRef<number | null>(null);
@@ -310,10 +276,26 @@ export function AdaptiveQualityProbe({
     const sorted = [...samples].sort((a, b) => a - b);
     const p95 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))];
     const max = sorted[sorted.length - 1];
-    if ((avg > 20.5 || p95 > 24 || max > 95) && dpr > minDpr) {
+    // Compare against the renderer's intended cadence. Performance mode is
+    // deliberately capped below 60 fps; treating its ~22 ms interval as a
+    // missed 16.7 ms frame caused a DPR change and a full play-tree render
+    // every 1.5 seconds until the minimum was reached.
+    const overloadAverageMs = frameBudgetMs * 1.23;
+    const overloadP95Ms = frameBudgetMs * 1.44;
+    const recoveryAverageMs = frameBudgetMs * 1.12;
+    const recoveryP95Ms = frameBudgetMs * 1.2;
+    if (
+      (avg > overloadAverageMs || p95 > overloadP95Ms || max > 95) &&
+      dpr > minDpr
+    ) {
       stableChecksRef.current = 0;
       setDpr((current) => Math.max(minDpr, Number((current - 0.08).toFixed(2))));
-    } else if (avg < 18.7 && p95 < 20 && max < 48 && dpr < maxDpr) {
+    } else if (
+      avg < recoveryAverageMs &&
+      p95 < recoveryP95Ms &&
+      max < 48 &&
+      dpr < maxDpr
+    ) {
       stableChecksRef.current += 1;
       if (stableChecksRef.current >= 4) {
         stableChecksRef.current = 0;
@@ -328,4 +310,3 @@ export function AdaptiveQualityProbe({
 
   return null;
 }
-

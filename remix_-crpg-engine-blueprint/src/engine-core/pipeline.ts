@@ -347,6 +347,10 @@ export interface CombatSessionUpdateOptions {
   chaseRadius?: number;
   partyFollowers?: CombatPartyFollowerRef[];
   forceEnd?: boolean;
+  /** Require a hostile to hold a perception-backed combat alert before it can
+   * start or reinforce a session. Legacy callers omit this for proximity
+   * compatibility; Play enables it so darkness and distractions stay real. */
+  requireAlert?: boolean;
 }
 
 export interface CombatSessionUpdateOutcome {
@@ -2184,12 +2188,13 @@ export const UpdateCombatSessionHandler: CommandHandler = {
     const chaseRadius = readPositiveIntegerParam(cmd.params?.chaseRadius);
     const partyFollowers = readPartyFollowersParam(cmd.params?.partyFollowers);
     const forceEnd = cmd.params?.forceEnd === true;
+    const requireAlert = cmd.params?.requireAlert === true;
     return [
       {
         type: "update_combat_session",
         apply(target) {
           const tw = target as InteractiveGridWorld;
-          const outcome = tw.updateCombatSession!({ threatRadius, chaseRadius, partyFollowers, forceEnd });
+          const outcome = tw.updateCombatSession!({ threatRadius, chaseRadius, partyFollowers, forceEnd, requireAlert });
           if (outcome.status !== "unchanged") {
             const eventType =
               outcome.status === "started"

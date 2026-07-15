@@ -470,13 +470,30 @@ const createEnvironmentStates = (
           source: "authored" as const,
           tag: "authored_light",
           origin_cell: [cell.x, cell.z] as [number, number],
-          radius: 3,
+          radius: 6,
           color: "#facc15",
         }]
       : [];
+  const authoredSmokeTerms = [cell.terrain || "", cell.tag || "", cell.hazard || "", cell.surface_tag || ""]
+    .join(" ")
+    .toLowerCase();
+  const authoredSmoke = /smoke|mist|fog|miasma|obscur/.test(authoredSmokeTerms)
+    ? [{
+        kind: "smoke",
+        intensity: 0.8,
+        age_ticks: 0,
+        source: "authored" as const,
+        tag: cell.tag || cell.hazard || "authored_smoke",
+        origin_cell: [cell.x, cell.z] as [number, number],
+        radius: 0,
+        occlusion: 0.65,
+        visibility_modifier: -0.75,
+      }]
+    : [];
   const fields = delta?.environment_fields?.[environmentFieldKey([cell.x, cell.z])] || [];
   return [
     ...authoredLight,
+    ...authoredSmoke,
     ...fields
     .filter((field) => field.intensity > 0 && (!field.expires_at_tick || field.expires_at_tick > tick))
     .map((field) => normalizeEnvironmentField(field, tick)),

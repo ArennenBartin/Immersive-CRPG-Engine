@@ -5,14 +5,17 @@ import type { MapDelta } from "../schema/save";
 import type {
   ImmersiveCombatIntentRecord,
   ImmersiveCombatOverwatchZone,
+  ImmersiveViewerVisibilitySnapshot,
 } from "../engine-core";
 import { useEngineStore } from "../store/engineStore";
 import {
+  classifyFogRenderStateForCells,
   createFogLineOfSightBlockers,
   fogCellKey,
   hasFogLineOfSight,
 } from "../utils/fogOfWar";
 import {
+  fineCellsCoveredByWorldMacroCell,
   logicalCellToMacro,
   logicalCellToWorld,
   logicalCellWorldSize,
@@ -32,6 +35,16 @@ type OverlayStyle = {
   opacity: number;
   emissive?: string;
   emissiveIntensity?: number;
+};
+
+type FogCurtain = {
+  key: string;
+  x: number;
+  y: number;
+  z: number;
+  width: number;
+  height: number;
+  rotationY: number;
 };
 
 const SURFACE_STYLE: Record<string, OverlayStyle> = {
@@ -72,12 +85,14 @@ function InstancedPlaneField({
   renderOrder = 10,
   coverage = 0.94,
   depthTest = true,
+  unlit = false,
 }: {
   cells: OverlayCell[];
   style: OverlayStyle;
   renderOrder?: number;
   coverage?: number;
   depthTest?: boolean;
+  unlit?: boolean;
 }) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
 
@@ -107,15 +122,105 @@ function InstancedPlaneField({
       renderOrder={renderOrder}
     >
       <planeGeometry args={[1, 1]} />
-      <meshStandardMaterial
-        color={style.color}
-        emissive={style.emissive || "#000000"}
-        emissiveIntensity={style.emissiveIntensity || 0}
+      {unlit ? (
+        <meshBasicMaterial
+          color={style.color}
+          transparent
+          opacity={style.opacity}
+          depthTest={depthTest}
+          depthWrite={false}
+          side={THREE.DoubleSide}
+        />
+      ) : (
+        <meshStandardMaterial
+          color={style.color}
+          emissive={style.emissive || "#000000"}
+          emissiveIntensity={style.emissiveIntensity || 0}
+          transparent
+          opacity={style.opacity}
+          depthTest={depthTest}
+          depthWrite={false}
+          side={THREE.DoubleSide}
+        />
+      )}
+    </instancedMesh>
+  );
+}
+
+const FOG_CURTAIN_VERTEX_SHADER = `
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+  }
+`;
+
+const FOG_CURTAIN_FRAGMENT_SHADER = `
+  uniform vec3 fogColor;
+  uniform float fogOpacity;
+  varying vec2 vUv;
+  void main() {
+    float verticalMist = 0.22 + 0.78 * (1.0 - smoothstep(0.08, 1.0, vUv.y));
+    float feather = smoothstep(0.0, 0.06, vUv.x) * (1.0 - smoothstep(0.94, 1.0, vUv.x));
+    gl_FragColor = vec4(fogColor, fogOpacity * verticalMist * feather);
+  }
+`;
+
+function InstancedFogCurtainField({
+  curtains,
+  color,
+  opacity,
+  renderOrder,
+}: {
+  curtains: FogCurtain[];
+  color: string;
+  opacity: number;
+  renderOrder: number;
+}) {
+  const meshRef = useRef<THREE.InstancedMesh>(null);
+  const uniforms = useMemo(
+    () => ({
+      fogColor: { value: new THREE.Color(color) },
+      fogOpacity: { value: opacity },
+    }),
+    [color, opacity],
+  );
+
+  useLayoutEffect(() => {
+    const mesh = meshRef.current;
+    if (!mesh) return;
+    const dummy = new THREE.Object3D();
+    curtains.forEach((curtain, index) => {
+      dummy.position.set(curtain.x, curtain.y, curtain.z);
+      dummy.rotation.set(0, curtain.rotationY, 0);
+      dummy.scale.set(curtain.width, curtain.height, 1);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(index, dummy.matrix);
+    });
+    mesh.count = curtains.length;
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.computeBoundingSphere();
+  }, [curtains]);
+
+  if (curtains.length === 0) return null;
+  return (
+    <instancedMesh
+      ref={meshRef}
+      args={[undefined as any, undefined as any, curtains.length]}
+      frustumCulled
+      raycast={() => null}
+      renderOrder={renderOrder}
+    >
+      <planeGeometry args={[1, 1]} />
+      <shaderMaterial
+        uniforms={uniforms}
+        vertexShader={FOG_CURTAIN_VERTEX_SHADER}
+        fragmentShader={FOG_CURTAIN_FRAGMENT_SHADER}
         transparent
-        opacity={style.opacity}
-        depthTest={depthTest}
+        depthTest
         depthWrite={false}
         side={THREE.DoubleSide}
+        toneMapped={false}
       />
     </instancedMesh>
   );
@@ -150,6 +255,9 @@ export interface WorldOverlays3DProps {
   fogResolution?: "macro" | "fine";
   initialExplored?: Record<string, string[]>;
   onExplore?: (mapId: string, cellKeys: string[]) => void;
+  authoritativeVisibility?: ImmersiveViewerVisibilitySnapshot | null;
+  showPerceptionDebug?: boolean;
+  performanceMode?: boolean;
 }
 
 export function WorldOverlays3D({
@@ -171,14 +279,30 @@ export function WorldOverlays3D({
   fogResolution = "macro",
   initialExplored,
   onExplore,
+  authoritativeVisibility,
+  showPerceptionDebug,
+  performanceMode = false,
 }: WorldOverlays3DProps) {
   const gamePackage = useEngineStore((state) => state.gamePackage);
   const cellTopY = useMemo(() => topY(map), [map]);
   const cellSize = logicalCellWorldSize(gridSpace, fineRatio);
+  // Overlay render windows shift at macro cadence. The camera and actor still
+  // move every fine step, but thousands of fog instance matrices can remain
+  // untouched until the player actually crosses a macro boundary.
+  const windowCenterX = renderCenter
+    ? gridSpace === "fine"
+      ? Math.floor(renderCenter[0] / fineRatio) * fineRatio + Math.floor(fineRatio / 2)
+      : renderCenter[0]
+    : undefined;
+  const windowCenterZ = renderCenter
+    ? gridSpace === "fine"
+      ? Math.floor(renderCenter[1] / fineRatio) * fineRatio + Math.floor(fineRatio / 2)
+      : renderCenter[1]
+    : undefined;
   const inWindow = (x: number, z: number, padding = 0) => {
-    if (!renderCenter || renderRadius === undefined) return true;
-    const dx = x - renderCenter[0];
-    const dz = z - renderCenter[1];
+    if (windowCenterX === undefined || windowCenterZ === undefined || renderRadius === undefined) return true;
+    const dx = x - windowCenterX;
+    const dz = z - windowCenterZ;
     const radius = renderRadius + padding;
     return dx * dx + dz * dz <= radius * radius;
   };
@@ -199,6 +323,53 @@ export function WorldOverlays3D({
     };
   };
 
+  // Fine-grid visibility changes every step, but the map coordinates, world
+  // positions, heights, and cell sizes do not. Reuse these templates instead
+  // of rebuilding/parsing thousands of coordinate objects for every snapshot.
+  const visibilityCellTemplates = useMemo(() => {
+    const coordinates = new Map<ReturnType<typeof fogCellKey>, [number, number]>();
+    map.cells.forEach((cell) => {
+      const key = fogCellKey(cell.x, cell.z);
+      if (!coordinates.has(key)) coordinates.set(key, [cell.x, cell.z]);
+    });
+    return Array.from(coordinates.entries()).map(([key, [x, z]]) => ({
+      key,
+      x,
+      z,
+      cell: makeCell(x, z, `visibility:${key}`, 0.11),
+    }));
+  }, [map.cells, cellTopY, gridSpace, fineRatio, cellSize]);
+
+  // The runtime delta also contains invisible footstep sound propagation and
+  // trace layers. Those records change every movement step; key the visible
+  // overlay geometry only to records that can actually draw a plane.
+  const showWorldSimulationOverlays = !performanceMode || Boolean(showPerceptionDebug);
+  const visibleMapOverlaySignature = useMemo(() => {
+    if (!showWorldSimulationOverlays) return "simulation-overlays-suppressed";
+    return JSON.stringify({
+      surfaces: Object.entries(mapDelta?.surface_layers || {}).flatMap(
+        ([key, layers]) =>
+          layers
+            .filter((layer) => layer.source !== "trace")
+            .map((layer) => [key, layer.id, layer.kind]),
+      ),
+      conditions: Object.values(mapDelta?.simulation_conditions || {}).map(
+        (condition) => [condition.target_id, condition.state, condition.cell],
+      ),
+      fields: Object.entries(mapDelta?.environment_fields || {}).flatMap(
+        ([key, fields]) =>
+          fields
+            .filter((field) => field.kind !== "sound")
+            .map((field) => [key, field.id, field.kind]),
+      ),
+    });
+  }, [
+    showWorldSimulationOverlays,
+    mapDelta?.surface_layers,
+    mapDelta?.simulation_conditions,
+    mapDelta?.environment_fields,
+  ]);
+
   const overlayGroups = useMemo(() => {
     const groups = new Map<string, OverlayCell[]>();
     const add = (styleKey: string, x: number, z: number, key: string, offset = 0.025) => {
@@ -208,25 +379,27 @@ export function WorldOverlays3D({
       groups.set(styleKey, cells);
     };
 
-    Object.entries(mapDelta?.surface_layers || {}).forEach(([key, layers]) => {
-      const coord = coordFromKey(key);
-      if (!coord) return;
-      layers
-        .filter((layer) => layer.source !== "trace")
-        .forEach((layer, index) => add(`surface:${layer.kind}`, coord[0], coord[1], `${key}:${index}`));
-    });
-    Object.values(mapDelta?.simulation_conditions || {}).forEach((condition) => {
-      if (condition.cell) add(`surface:${condition.state}`, condition.cell[0], condition.cell[1], condition.target_id, 0.035);
-    });
-    Object.entries(mapDelta?.environment_fields || {}).forEach(([key, fields]) => {
-      const coord = coordFromKey(key);
-      if (!coord) return;
-      fields
-        // Sound is simulation/perception data, not a visible world surface.
-        // Rendering every propagated footstep cell produced a purple wake.
-        .filter((field) => field.kind !== "sound")
-        .forEach((field, index) => add(`field:${field.kind}`, coord[0], coord[1], `${key}:${index}`, 0.045));
-    });
+    if (showWorldSimulationOverlays) {
+      Object.entries(mapDelta?.surface_layers || {}).forEach(([key, layers]) => {
+        const coord = coordFromKey(key);
+        if (!coord) return;
+        layers
+          .filter((layer) => layer.source !== "trace")
+          .forEach((layer, index) => add(`surface:${layer.kind}`, coord[0], coord[1], `${key}:${index}`));
+      });
+      Object.values(mapDelta?.simulation_conditions || {}).forEach((condition) => {
+        if (condition.cell) add(`surface:${condition.state}`, condition.cell[0], condition.cell[1], condition.target_id, 0.035);
+      });
+      Object.entries(mapDelta?.environment_fields || {}).forEach(([key, fields]) => {
+        const coord = coordFromKey(key);
+        if (!coord) return;
+        fields
+          // Sound is simulation/perception data, not a visible world surface.
+          // Rendering every propagated footstep cell produced a purple wake.
+          .filter((field) => field.kind !== "sound")
+          .forEach((field, index) => add(`field:${field.kind}`, coord[0], coord[1], `${key}:${index}`, 0.045));
+      });
+    }
     (rangeCells || []).forEach((cell, index) => add("range", cell.x, cell.z, `range:${index}`, 0.055));
     (targetPattern || []).forEach((cell, index) => add("target", cell.x, cell.z, `target:${index}`, 0.065));
     if (hoveredCell) add("hover", hoveredCell[0], hoveredCell[1], "hover", 0.075);
@@ -239,14 +412,16 @@ export function WorldOverlays3D({
     (worldDeniedCells || []).forEach((cell, index) => add("denied", cell.x, cell.z, `denied:${index}`, 0.08));
     return groups;
   }, [
-    mapDelta,
+    visibleMapOverlaySignature,
+    showWorldSimulationOverlays,
     rangeCells,
     targetPattern,
     hoveredCell,
     combatOverwatchZones,
     combatIntents,
     worldDeniedCells,
-    renderCenter,
+    windowCenterX,
+    windowCenterZ,
     renderRadius,
     cellTopY,
     gridSpace,
@@ -262,8 +437,119 @@ export function WorldOverlays3D({
   }, [map.id, initialExplored]);
 
   const fogResult = useMemo(() => {
+    const empty = {
+      unseen: [] as OverlayCell[],
+      explored: [] as OverlayCell[],
+      darkness: [] as OverlayCell[],
+      newlyExplored: [] as string[],
+    };
+
+    if (authoritativeVisibility) {
+      const visible = new Set(
+        authoritativeVisibility.terrain_visible.map((cell) =>
+          fogCellKey(cell[0], cell[1]),
+        ),
+      );
+      const discovered = new Set(
+        authoritativeVisibility.discovered.map((cell) =>
+          fogCellKey(cell[0], cell[1]),
+        ),
+      );
+      const explored = exploredRef.current.get(map.id) || new Set<string>();
+      exploredRef.current.set(map.id, explored);
+      const newlyExplored: string[] = [];
+      visible.forEach((key) => {
+        if (!explored.has(key)) {
+          explored.add(key);
+          newlyExplored.push(key);
+        }
+      });
+      discovered.forEach((key) => explored.add(key));
+
+      const unseenCells: OverlayCell[] = [];
+      const exploredCells: OverlayCell[] = [];
+      const darknessCells: OverlayCell[] = [];
+      if (gridSpace === "fine") {
+        // Static terrain and walls render once per macro tile. Aggregate their
+        // visual fog to that same footprint so unseen fine subcells cannot
+        // paint darkness over a macro wall whose approach-facing edge is
+        // mechanically visible. Actors, items, and perception stay exact-fine.
+        const visualMacros = new Map<string, [number, number]>();
+        map.cells.forEach((mapCell) => {
+          const macro = logicalCellToMacro(
+            [mapCell.x, mapCell.z],
+            gridSpace,
+          );
+          visualMacros.set(fogCellKey(macro[0], macro[1]), macro);
+        });
+
+        visualMacros.forEach((macro, macroKey) => {
+          const coveredFineCells = fineCellsCoveredByWorldMacroCell(
+            macro[0],
+            macro[1],
+            fineRatio,
+          );
+          const state = classifyFogRenderStateForCells(
+            coveredFineCells,
+            true,
+            visible,
+            explored,
+          );
+          if (state === "visible") return;
+
+          const center: [number, number] = [
+            macro[0] * fineRatio + Math.floor(fineRatio / 2),
+            macro[1] * fineRatio + Math.floor(fineRatio / 2),
+          ];
+          if (!inWindow(center[0], center[1])) return;
+          const world = logicalCellToWorld(center, gridSpace, fineRatio);
+          const top = coveredFineCells.reduce(
+            (highest, fineCell) =>
+              Math.max(
+                highest,
+                cellTopY.get(fogCellKey(fineCell[0], fineCell[1])) || 0.01,
+              ),
+            0.01,
+          );
+          const cell: OverlayCell = {
+            key: `visibility:macro:${macroKey}`,
+            x: world[0],
+            z: world[1],
+            y: top + 0.11,
+            size: 1,
+          };
+
+          if (!fogOfWar) {
+            darknessCells.push(cell);
+          } else if (state === "explored") {
+            exploredCells.push(cell);
+          } else {
+            unseenCells.push(cell);
+          }
+        });
+      } else {
+        visibilityCellTemplates.forEach(({ key, x, z, cell }) => {
+          if (visible.has(key)) return;
+          if (!inWindow(x, z)) return;
+          if (!fogOfWar) {
+            darknessCells.push(cell);
+          } else if (explored.has(key)) {
+            exploredCells.push(cell);
+          } else {
+            unseenCells.push(cell);
+          }
+        });
+      }
+      return {
+        unseen: unseenCells,
+        explored: exploredCells,
+        darkness: darknessCells,
+        newlyExplored,
+      };
+    }
+
     if (!fogOfWar || !playerPos) {
-      return { unseen: [] as OverlayCell[], explored: [] as OverlayCell[], newlyExplored: [] as string[] };
+      return empty;
     }
     const objectIndex = new Map(gamePackage.object_library.map((object) => [object.id, object]));
     const doorBlockers = createFogLineOfSightBlockers(
@@ -362,28 +648,139 @@ export function WorldOverlays3D({
         (explored.has(key) ? exploredCells : unseenCells).push(cell);
       });
     }
-    return { unseen: unseenCells, explored: exploredCells, newlyExplored };
+    return { unseen: unseenCells, explored: exploredCells, darkness: [], newlyExplored };
   }, [
+    authoritativeVisibility,
     fogOfWar,
     fogResolution,
     fogRadius,
-    playerPos,
+    authoritativeVisibility ? null : playerPos?.[0],
+    authoritativeVisibility ? null : playerPos?.[1],
     map,
-    mapDelta,
+    authoritativeVisibility ? null : mapDelta,
     gamePackage.object_library,
     initialExplored,
     gridSpace,
     fineRatio,
-    renderCenter,
+    windowCenterX,
+    windowCenterZ,
     renderRadius,
     cellTopY,
+    visibilityCellTemplates,
   ]);
+
+  const fogCurtains = useMemo(() => {
+    const spatialKey = (x: number, z: number) =>
+      `${x.toFixed(4)}:${z.toFixed(4)}`;
+    const unseenKeys = new Set(
+      fogResult.unseen.map((cell) => spatialKey(cell.x, cell.z)),
+    );
+    const exploredKeys = new Set(
+      fogResult.explored.map((cell) => spatialKey(cell.x, cell.z)),
+    );
+    const edges = [
+      { dx: 1, dz: 0, offsetX: 0.5, offsetZ: 0, rotationY: Math.PI / 2 },
+      { dx: -1, dz: 0, offsetX: -0.5, offsetZ: 0, rotationY: Math.PI / 2 },
+      { dx: 0, dz: 1, offsetX: 0, offsetZ: 0.5, rotationY: 0 },
+      { dx: 0, dz: -1, offsetX: 0, offsetZ: -0.5, rotationY: 0 },
+    ] as const;
+    const build = (
+      cells: OverlayCell[],
+      height: number,
+      neighborIsCovered: (key: string) => boolean,
+      prefix: string,
+    ) =>
+      cells.flatMap((cell) =>
+        edges.flatMap((edge, edgeIndex): FogCurtain[] => {
+          const neighborKey = spatialKey(
+            cell.x + edge.dx * cell.size,
+            cell.z + edge.dz * cell.size,
+          );
+          if (neighborIsCovered(neighborKey)) return [];
+          const baseY = cell.y - 0.1;
+          return [{
+            key: `${prefix}:${cell.key}:${edgeIndex}`,
+            x: cell.x + edge.offsetX * cell.size,
+            y: baseY + height * 0.5,
+            z: cell.z + edge.offsetZ * cell.size,
+            width: cell.size * 1.08,
+            height,
+            rotationY: edge.rotationY,
+          }];
+        }),
+      );
+
+    return {
+      explored: build(
+        fogResult.explored,
+        1.65,
+        (key) => exploredKeys.has(key) || unseenKeys.has(key),
+        "explored",
+      ),
+      unseen: build(
+        fogResult.unseen,
+        2.8,
+        (key) => unseenKeys.has(key),
+        "unseen",
+      ),
+    };
+  }, [fogResult.explored, fogResult.unseen]);
 
   useEffect(() => {
     if (fogResult.newlyExplored.length > 0) {
       onExplore?.(map.id, fogResult.newlyExplored);
     }
   }, [fogResult.newlyExplored, map.id, onExplore]);
+
+  const perceptionDebugGroups = useMemo(() => {
+    if (!showPerceptionDebug || !authoritativeVisibility) {
+      return [] as { key: string; cells: OverlayCell[]; style: OverlayStyle }[];
+    }
+    const buckets = Array.from({ length: 5 }, () => [] as OverlayCell[]);
+    authoritativeVisibility.illumination.cells.forEach((entry) => {
+      if (entry.value <= 0) return;
+      if (!inWindow(entry.cell[0], entry.cell[1])) return;
+      const bucket = Math.min(4, Math.max(0, Math.floor(entry.value * 5)));
+      buckets[bucket].push(
+        makeCell(
+          entry.cell[0],
+          entry.cell[1],
+          `illumination:${entry.cell[0]}:${entry.cell[1]}`,
+          0.145,
+        ),
+      );
+    });
+    const palette: OverlayStyle[] = [
+      { color: "#172554", opacity: 0.34, emissive: "#1e3a8a", emissiveIntensity: 0.12 },
+      { color: "#2563eb", opacity: 0.34, emissive: "#1d4ed8", emissiveIntensity: 0.2 },
+      { color: "#06b6d4", opacity: 0.38, emissive: "#0891b2", emissiveIntensity: 0.28 },
+      { color: "#facc15", opacity: 0.42, emissive: "#eab308", emissiveIntensity: 0.36 },
+      { color: "#fef3c7", opacity: 0.48, emissive: "#fde68a", emissiveIntensity: 0.5 },
+    ];
+    const groups = buckets.map((cells, index) => ({
+      key: `illumination:${index}`,
+      cells,
+      style: palette[index],
+    }));
+    const sensed = authoritativeVisibility.sensed
+      .filter((cell) => inWindow(cell[0], cell[1]))
+      .map((cell) => makeCell(cell[0], cell[1], `sensed:${cell[0]}:${cell[1]}`, 0.17));
+    groups.push({
+      key: "sensed",
+      cells: sensed,
+      style: { color: "#e879f9", opacity: 0.58, emissive: "#d946ef", emissiveIntensity: 0.52 },
+    });
+    return groups;
+  }, [
+    showPerceptionDebug,
+    authoritativeVisibility,
+    windowCenterX,
+    windowCenterZ,
+    renderRadius,
+    cellTopY,
+    gridSpace,
+    fineRatio,
+  ]);
 
   const styleForGroup = (key: string): OverlayStyle => {
     if (key.startsWith("surface:")) {
@@ -405,12 +802,25 @@ export function WorldOverlays3D({
       {Array.from(overlayGroups.entries()).map(([key, cells]) => (
         <InstancedPlaneField key={key} cells={cells} style={styleForGroup(key)} />
       ))}
+      <InstancedFogCurtainField
+        curtains={fogCurtains.explored}
+        color="#111827"
+        opacity={0.42}
+        renderOrder={78}
+      />
+      <InstancedFogCurtainField
+        curtains={fogCurtains.unseen}
+        color="#020306"
+        opacity={0.92}
+        renderOrder={79}
+      />
       <InstancedPlaneField
         cells={fogResult.explored}
         style={{ color: "#060912", opacity: 0.62 }}
         renderOrder={80}
         coverage={1.02}
         depthTest={false}
+        unlit
       />
       <InstancedPlaneField
         cells={fogResult.unseen}
@@ -418,7 +828,27 @@ export function WorldOverlays3D({
         renderOrder={81}
         coverage={1.02}
         depthTest={false}
+        unlit
       />
+      <InstancedPlaneField
+        cells={fogResult.darkness}
+        style={{ color: "#03050a", opacity: 0.86 }}
+        renderOrder={82}
+        coverage={1.02}
+        depthTest={false}
+        unlit
+      />
+      {perceptionDebugGroups.map((group) => (
+        <InstancedPlaneField
+          key={group.key}
+          cells={group.cells}
+          style={group.style}
+          renderOrder={90}
+          coverage={0.72}
+          depthTest={false}
+          unlit
+        />
+      ))}
     </group>
   );
 }

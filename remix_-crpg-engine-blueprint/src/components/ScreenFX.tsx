@@ -467,6 +467,12 @@ export function ScreenFX({ inCombat, mapId }: ScreenFXProps) {
   const visualPreset = useVisualSettingsStore((s) => s.preset);
   const visual = SCREEN_VISUAL_PRESETS[visualPreset];
 
+  // Performance is the reliable gameplay/debug preset. The old version only
+  // reduced effect amplitudes while still paying for N8AO and the full
+  // multi-sample warp pass every frame, which made dense QA maps needlessly
+  // GPU-bound in embedded browsers.
+  if (visualPreset === "performance") return null;
+
   const underground =
     (mapId?.includes("network") || mapId?.includes("cave") || mapId?.includes("depth")) ?? false;
 

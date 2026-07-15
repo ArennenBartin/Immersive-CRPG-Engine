@@ -27,6 +27,13 @@ import {
   parseFineCoordKey,
 } from "./gridCoordinates";
 import { isFineExpandedPackage } from "./fineWorld";
+import {
+  createImmersiveIlluminationSnapshotFromV1,
+  queryImmersiveIlluminationAtCell,
+  queryImmersiveVisualAcquisition,
+  type ImmersiveIlluminationSnapshot,
+  type ImmersiveVisualAcquisitionResult,
+} from "./visibility";
 
 export const IMMERSIVE_STANDARD_ACTION_ENERGY = 1000;
 export const IMMERSIVE_SEGMENTS_PER_TURN = 10;
@@ -231,14 +238,28 @@ export interface ImmersiveReactionSaveResult extends ImmersiveReactionResolveRes
 
 export type ImmersiveAlertnessState = "oblivious" | "suspicious" | "searching" | "combat";
 
+export type ImmersiveDetectionCause =
+  | "direct_sight"
+  | "carried_light_exposure"
+  | "heard"
+  | "light_sensitivity"
+  | "glass_sensitivity"
+  | "environmental_danger"
+  | "ally_alert";
+
 export interface ImmersivePerceptionStimulus {
   kind: "light" | "sound" | "fire" | "smoke" | "danger_gas" | "visible_player";
   cell: [number, number];
   intensity: number;
   radius: number;
   tag?: string;
+  tags?: string[];
+  tick?: number;
+  source_id?: string;
   source_actor_id?: string;
   source_action?: string;
+  owner_id?: string;
+  mobility?: "fixed" | "carried" | "placed" | "thrown" | "environmental";
 }
 
 export interface ImmersivePerceptionAlertRecord {
@@ -249,6 +270,12 @@ export interface ImmersivePerceptionAlertRecord {
   score: number;
   stimulus: ImmersivePerceptionStimulus;
   target_cell: [number, number];
+  sensory_profile_id?: string;
+  sense_id?: string;
+  cause?: ImmersiveDetectionCause;
+  evidence_tick?: number;
+  tracks_live_target?: boolean;
+  target_actor_id?: string;
 }
 
 export interface ImmersiveStage4PerceptionSnapshot {
@@ -1532,7 +1559,7 @@ const conditionForReaction = (
   return undefined;
 };
 
-const sameCell = (a: [number, number] | undefined, b: [number, number]) =>
+const sameCell = (a: readonly [number, number] | undefined, b: readonly [number, number]) =>
   !!a && a[0] === b[0] && a[1] === b[1];
 
 const packageSpatialRatio = (gamePackage: GamePackage): number =>
@@ -1993,6 +2020,7 @@ const perceptionStimuliFromStage2Snapshot = (
   gamePackage: GamePackage,
   snapshot: ImmersiveStage2Snapshot,
   save: PlaySave,
+  illumination: ImmersiveIlluminationSnapshot,
 ): ImmersivePerceptionStimulus[] => {
   const stimuli: ImmersivePerceptionStimulus[] = [];
   const soundFieldCellKeys = new Set<string>();
@@ -2003,6 +2031,9 @@ const perceptionStimuliFromStage2Snapshot = (
       intensity: number;
       radius: number;
       tag: string;
+      tags: string[];
+      tick: number;
+      source_id?: string;
       source_actor_id?: string;
       source_action?: string;
     }
@@ -2023,6 +2054,9 @@ const perceptionStimuliFromStage2Snapshot = (
           intensity: Math.max(existing?.intensity || 0, field.intensity),
           radius: Math.max(existing?.radius || 0, field.radius || 1),
           tag,
+          tags: [...new Set([...(existing?.tags || []), field.tag || "sound", field.frequency_tag || "sound", field.material_tag || ""])].filter(Boolean),
+          tick: Math.max(existing?.tick || 0, field.created_at_tick || snapshot.generated_at_tick),
+          source_id: existing?.source_id || field.id,
           source_actor_id: field.actor_id,
           source_action: field.action,
         });
@@ -2036,20 +2070,36 @@ const perceptionStimuliFromStage2Snapshot = (
       intensity: Number(clamp(sound.intensity, 0, 1).toFixed(4)),
       radius: Math.max(1, Math.ceil(sound.radius)),
       tag: sound.tag,
+      tags: sound.tags,
+      tick: sound.tick,
+      source_id: sound.source_id,
       source_actor_id: sound.source_actor_id,
       source_action: sound.source_action,
     });
   });
+  illumination.sources.forEach((source) => {
+    stimuli.push({
+      kind: "light",
+      cell: cloneCell(source.cell),
+      intensity: source.intensity,
+      radius: Math.max(0, Math.ceil(source.radius)),
+      tag: source.stimulus_tags[0] || "light",
+      tags: [...source.stimulus_tags],
+      tick: source.created_at_tick ?? snapshot.generated_at_tick,
+      source_id: source.id,
+      source_actor_id: source.carrier_actor_id,
+      owner_id: source.owner_actor_id,
+      mobility:
+        source.source_kind === "carried_item" || source.source_kind === "carried_object"
+          ? "carried"
+          : source.source_kind === "dropped_item"
+            ? source.mobility === "throwable" ? "thrown" : "placed"
+            : source.source_kind === "environment_field" || source.source_kind === "fire_field"
+              ? "environmental"
+              : "fixed",
+    });
+  });
   snapshot.tile_layers.cells.forEach((cell) => {
-    if (cell.light > 0.35) {
-      stimuli.push({
-        kind: "light",
-        cell: cloneCell(cell.cell),
-        intensity: Number(cell.light.toFixed(4)),
-        radius: scaleMacroDistanceForPackage(gamePackage, Math.max(2, Math.ceil(cell.light * 5))),
-        tag: "tile_light",
-      });
-    }
     if (cell.sound > 0.15 && !soundFieldCellKeys.has(cellKey(cell.cell))) {
       stimuli.push({
         kind: "sound",
@@ -2057,6 +2107,8 @@ const perceptionStimuliFromStage2Snapshot = (
         intensity: Number(cell.sound.toFixed(4)),
         radius: scaleMacroDistanceForPackage(gamePackage, Math.max(2, Math.ceil(cell.sound * 7))),
         tag: "tile_sound",
+        tags: ["sound", "tile_sound"],
+        tick: snapshot.generated_at_tick,
       });
     }
     if (hasFire(cell)) {
@@ -2066,6 +2118,8 @@ const perceptionStimuliFromStage2Snapshot = (
         intensity: clamp(cell.temperature / 600, 0.45, 1),
         radius: scaleMacroDistanceForPackage(gamePackage, 5),
         tag: "active_fire",
+        tags: ["fire", "light", "active_fire"],
+        tick: snapshot.generated_at_tick,
       });
     }
     if (cell.gas && cell.gas.density > 0.2) {
@@ -2076,21 +2130,31 @@ const perceptionStimuliFromStage2Snapshot = (
         intensity: clamp(cell.gas.density, 0, 1),
         radius: scaleMacroDistanceForPackage(gamePackage, danger ? 4 : 3),
         tag: cell.gas.kind,
+        tags: [danger ? "danger_gas" : "smoke", cell.gas.kind],
+        tick: snapshot.generated_at_tick,
       });
     }
   });
 
   const playerCell = save.current_map_id === snapshot.map_id ? save.player.cell : undefined;
   if (playerCell) {
-    const playerTile = snapshot.tile_layers.cells.find((cell) => sameCell(cell.cell, playerCell));
-    const visibility = clamp(0.62 + (playerTile?.light || 0) * 0.38 - (playerTile?.occlusion || 0) * 0.65, 0, 1);
-    if (visibility > 0.15) {
+    const playerLight = queryImmersiveIlluminationAtCell(illumination, playerCell);
+    if (playerLight.value > 0.001) {
+      const sourceById = new Map(illumination.sources.map((source) => [source.id, source]));
+      const sourceTags = playerLight.source_ids.flatMap((sourceId) => sourceById.get(sourceId)?.stimulus_tags || []);
       stimuli.push({
         kind: "visible_player",
         cell: cloneCell(playerCell),
-        intensity: visibility,
-        radius: scaleMacroDistanceForPackage(gamePackage, Math.max(3, Math.ceil(visibility * 8))),
+        intensity: playerLight.value,
+        radius: scaleMacroDistanceForPackage(gamePackage, 8),
         tag: "player_visibility",
+        tags: [...new Set(["player", "visible_player", ...sourceTags])],
+        tick: snapshot.generated_at_tick,
+        source_id: playerLight.strongest_source_id,
+        source_actor_id: "player",
+        mobility: playerLight.source_ids.some((sourceId) => sourceById.get(sourceId)?.carrier_actor_id === "player")
+          ? "carried"
+          : undefined,
       });
     }
   }
@@ -2134,8 +2198,6 @@ const hasTileLineOfSight = (
     return tile && !tile.blocks_vision && tile.occlusion < 0.85;
   });
 
-const visualStimulusKinds = new Set<ImmersivePerceptionStimulus["kind"]>(["light", "fire", "smoke", "visible_player"]);
-
 const isInViewCone = (
   actorCell: [number, number],
   facing: [number, number],
@@ -2153,25 +2215,175 @@ const isInViewCone = (
   return normalizedFacing[0] === dominant[0] && normalizedFacing[1] === dominant[1];
 };
 
-const scoreStimulusAtActor = (
+interface RuntimeSensoryChannel {
+  id: string;
+  stimulus_kinds: ImmersivePerceptionStimulus["kind"][];
+  stimulus_tags?: string[];
+  range: number;
+  threshold: number;
+  sensitivity: number;
+  requires_los: boolean;
+  requires_view_cone: boolean;
+  requires_illumination: boolean;
+  tracks_live_target: boolean;
+}
+
+interface RuntimeSensoryProfile {
+  id: string;
+  channels: RuntimeSensoryChannel[];
+  memory_ticks: number;
+  search_ticks: number;
+}
+
+const DEFAULT_SENSORY_PROFILE: RuntimeSensoryProfile = {
+  id: "standard",
+  memory_ticks: 90,
+  search_ticks: 90,
+  channels: [
+    {
+      id: "ordinary_sight",
+      stimulus_kinds: ["visible_player"],
+      range: 8,
+      threshold: 0.04,
+      sensitivity: 1,
+      requires_los: true,
+      requires_view_cone: true,
+      requires_illumination: true,
+      tracks_live_target: true,
+    },
+    {
+      id: "ordinary_hearing",
+      stimulus_kinds: ["sound"],
+      range: 8,
+      threshold: 0.15,
+      sensitivity: 1,
+      requires_los: false,
+      requires_view_cone: false,
+      requires_illumination: false,
+      tracks_live_target: false,
+    },
+    {
+      id: "environmental_danger",
+      stimulus_kinds: ["fire", "smoke", "danger_gas"],
+      range: 6,
+      threshold: 0.18,
+      sensitivity: 1,
+      requires_los: false,
+      requires_view_cone: false,
+      requires_illumination: false,
+      tracks_live_target: false,
+    },
+  ],
+};
+
+const sensoryProfileForEntity = (
+  entity: GamePackage["entities"][number] | undefined,
+): RuntimeSensoryProfile => {
+  const authored = entity?.sensory_profile;
+  if (!authored?.channels?.length) {
+    return {
+      ...DEFAULT_SENSORY_PROFILE,
+      channels: DEFAULT_SENSORY_PROFILE.channels.map((channel) => ({ ...channel, stimulus_kinds: [...channel.stimulus_kinds] })),
+    };
+  }
+  return {
+    id: authored.id || "custom",
+    memory_ticks: Math.max(0, authored.memory_ticks ?? 90),
+    search_ticks: Math.max(0, authored.search_ticks ?? 90),
+    channels: authored.channels.map((channel) => ({
+      id: channel.id,
+      stimulus_kinds: [...channel.stimulus_kinds],
+      stimulus_tags: channel.stimulus_tags ? [...channel.stimulus_tags] : undefined,
+      range: Math.max(0, channel.range),
+      threshold: clamp(channel.threshold, 0, 1),
+      sensitivity: Math.max(0, channel.sensitivity),
+      requires_los: channel.requires_los,
+      requires_view_cone: channel.requires_view_cone,
+      requires_illumination: channel.requires_illumination,
+      tracks_live_target: channel.tracks_live_target,
+    })),
+  };
+};
+
+const stimulusTags = (stimulus: ImmersivePerceptionStimulus) =>
+  new Set([stimulus.kind, stimulus.tag, ...(stimulus.tags || [])].filter((tag): tag is string => Boolean(tag)));
+
+const channelAcceptsStimulus = (
+  channel: RuntimeSensoryChannel,
   stimulus: ImmersivePerceptionStimulus,
+) => {
+  if (!channel.stimulus_kinds.includes(stimulus.kind)) return false;
+  if (!channel.stimulus_tags?.length) return true;
+  const tags = stimulusTags(stimulus);
+  return channel.stimulus_tags.some((tag) => tags.has(tag));
+};
+
+const propagatedSoundIntensityAtActor = (
+  save: PlaySave,
+  mapId: string,
+  stimulus: ImmersivePerceptionStimulus,
+  actorCell: [number, number],
+): number | undefined => {
+  let result: number | undefined;
+  Object.entries(save.map_deltas?.[mapId]?.environment_fields || {}).forEach(([key, fields]) => {
+    if (!sameCell(parseFineCoordKey(key), actorCell)) return;
+    fields.forEach((field) => {
+      if (field.kind !== "sound") return;
+      const origin = (field.origin_cell || parseFineCoordKey(key)) as [number, number];
+      const tag = field.frequency_tag || field.tag || "sound";
+      if (!sameCell(origin, stimulus.cell) || (stimulus.tag && tag !== stimulus.tag)) return;
+      result = Math.max(result || 0, field.intensity);
+    });
+  });
+  return result;
+};
+
+const scoreStimulusAtActor = (
+  gamePackage: GamePackage,
+  save: PlaySave,
+  mapId: string,
+  stimulus: ImmersivePerceptionStimulus,
+  channel: RuntimeSensoryChannel,
   actorCell: [number, number],
   actorFacing: [number, number],
   cellsByKey: Map<string, ImmersiveTileLayerCellState>,
-): number => {
+): { score: number; acquisition?: ImmersiveVisualAcquisitionResult } => {
+  if (!channelAcceptsStimulus(channel, stimulus)) return { score: 0 };
   const dist = manhattan(stimulus.cell, actorCell);
-  if (dist > stimulus.radius) return 0;
-  if (visualStimulusKinds.has(stimulus.kind)) {
-    if (!isInViewCone(actorCell, actorFacing, stimulus.cell)) return 0;
-    if (!hasTileLineOfSight(cellsByKey, actorCell, stimulus.cell)) return 0;
+  const channelRange = scaleMacroDistanceForPackage(gamePackage, channel.range);
+  const effectiveRange = Math.min(channelRange, stimulus.radius || channelRange);
+  if (dist > effectiveRange) return { score: 0 };
+  if (channel.requires_view_cone && !isInViewCone(actorCell, actorFacing, stimulus.cell)) {
+    return { score: 0 };
   }
-  const falloff = 1 - dist / (stimulus.radius + 1);
+  let acquisition: ImmersiveVisualAcquisitionResult | undefined;
+  if (channel.requires_los || channel.requires_illumination) {
+    acquisition = queryImmersiveVisualAcquisition(gamePackage, save, {
+      map_id: mapId,
+      observer_cell: actorCell,
+      target_cell: stimulus.cell,
+      target_actor_id: stimulus.kind === "visible_player" ? "player" : undefined,
+      max_range: channelRange,
+      minimum_light: channel.requires_illumination ? 0.001 : 0,
+    });
+    if (!acquisition.acquired) return { score: 0, acquisition };
+  } else if (channel.requires_los && !hasTileLineOfSight(cellsByKey, actorCell, stimulus.cell)) {
+    return { score: 0 };
+  }
+  const falloff = 1 - dist / (effectiveRange + 1);
   const kindWeight =
     stimulus.kind === "sound" ? 0.9 :
     stimulus.kind === "visible_player" ? 1.1 :
     stimulus.kind === "fire" || stimulus.kind === "danger_gas" ? 1 :
     0.6;
-  return Number(clamp(stimulus.intensity * falloff * kindWeight, 0, 1).toFixed(4));
+  const propagatedSound = stimulus.kind === "sound"
+    ? propagatedSoundIntensityAtActor(save, mapId, stimulus, actorCell)
+    : undefined;
+  const base = stimulus.kind === "visible_player" && acquisition
+    ? acquisition.score
+    : propagatedSound ?? stimulus.intensity * falloff;
+  const score = Number(clamp(base * kindWeight * channel.sensitivity, 0, 1).toFixed(4));
+  return { score: score >= channel.threshold ? score : 0, acquisition };
 };
 
 const alertnessFromScore = (
@@ -2189,10 +2401,26 @@ const alertnessFromScore = (
     if (score >= 0.28) return "suspicious";
     return "oblivious";
   }
-  if (stimulus.kind === "visible_player" && score >= 0.45) return "combat";
-  if (score >= 0.72 || stimulus.kind === "fire" || stimulus.kind === "danger_gas") return "searching";
+  if (stimulus.kind === "visible_player") return "combat";
+  if (score >= 0.55 || stimulus.kind === "fire" || stimulus.kind === "danger_gas") return "searching";
   if (score >= 0.28) return "suspicious";
   return "oblivious";
+};
+
+const detectionCause = (
+  stimulus: ImmersivePerceptionStimulus,
+  acquisition: ImmersiveVisualAcquisitionResult | undefined,
+): ImmersiveDetectionCause => {
+  if (stimulus.kind === "sound") return "heard";
+  if (stimulus.kind === "visible_player") {
+    return acquisition?.cause === "carried_light_exposure"
+      ? "carried_light_exposure"
+      : "direct_sight";
+  }
+  if (stimulus.kind === "light") {
+    return stimulusTags(stimulus).has("glass") ? "glass_sensitivity" : "light_sensitivity";
+  }
+  return "environmental_danger";
 };
 
 export const createImmersivePerceptionSnapshotFromV1 = (
@@ -2201,7 +2429,8 @@ export const createImmersivePerceptionSnapshotFromV1 = (
   mapId = save.current_map_id || gamePackage.metadata.start_map_id,
 ): ImmersiveStage4PerceptionSnapshot => {
   const stage2 = createImmersiveStage2SnapshotFromV1(gamePackage, save, mapId);
-  const stimuli = perceptionStimuliFromStage2Snapshot(gamePackage, stage2, save);
+  const illumination = createImmersiveIlluminationSnapshotFromV1(gamePackage, save, mapId);
+  const stimuli = perceptionStimuliFromStage2Snapshot(gamePackage, stage2, save, illumination);
   const map = gamePackage.maps.find((candidate) => candidate.id === mapId);
   const entityById = new Map(gamePackage.entities.map((entity) => [entity.id, entity]));
   const cellsByKey = new Map(stage2.tile_layers.cells.map((cell) => [cellKey(cell.cell), cell]));
@@ -2215,6 +2444,7 @@ export const createImmersivePerceptionSnapshotFromV1 = (
     const actorCell = (state.cell || placement.cell) as [number, number];
     const actorFacing = normalizeFacing((state.facing || placement.facing) as [number, number] | undefined);
     const hostile = !entity?.is_npc;
+    const profile = sensoryProfileForEntity(entity);
     const scored = stimuli
       .filter(
         (stimulus) =>
@@ -2227,7 +2457,21 @@ export const createImmersivePerceptionSnapshotFromV1 = (
               stimulus.tag === "footstep"
             )),
       )
-      .map((stimulus) => ({ stimulus, score: scoreStimulusAtActor(stimulus, actorCell, actorFacing, cellsByKey) }))
+      .flatMap((stimulus) =>
+        profile.channels.map((channel) => {
+          const result = scoreStimulusAtActor(
+            gamePackage,
+            save,
+            mapId,
+            stimulus,
+            channel,
+            actorCell,
+            actorFacing,
+            cellsByKey,
+          );
+          return { stimulus, channel, score: result.score, acquisition: result.acquisition };
+        }),
+      )
       .filter((entry) => entry.score > 0)
       .sort((a, b) => b.score - a.score || a.stimulus.cell[0] - b.stimulus.cell[0] || a.stimulus.cell[1] - b.stimulus.cell[1]);
     const best = scored[0];
@@ -2242,6 +2486,12 @@ export const createImmersivePerceptionSnapshotFromV1 = (
       score: best.score,
       stimulus: { ...best.stimulus, cell: cloneCell(best.stimulus.cell) },
       target_cell: cloneCell(best.stimulus.cell),
+      sensory_profile_id: profile.id,
+      sense_id: best.channel.id,
+      cause: detectionCause(best.stimulus, best.acquisition),
+      evidence_tick: best.stimulus.tick ?? stage2.generated_at_tick,
+      tracks_live_target: best.stimulus.kind === "visible_player" && best.channel.tracks_live_target,
+      target_actor_id: best.stimulus.kind === "visible_player" ? "player" : undefined,
     });
   });
   return {
@@ -2265,6 +2515,7 @@ const nextPerceptionFactId = (save: PlaySave, offset: number) =>
 const taskForPerceptionAlert = (
   alert: ImmersivePerceptionAlertRecord,
   tick: number,
+  searchTicks = 90,
 ): SimulationNpcTaskRecord => ({
   id: `task_perception_${tick}_${alert.actor_id}_${alert.stimulus.kind}`,
   actor_id: alert.actor_id,
@@ -2281,7 +2532,7 @@ const taskForPerceptionAlert = (
   state: "queued",
   created_at_tick: tick,
   updated_at_tick: tick,
-  expires_at_tick: tick + 90,
+  expires_at_tick: tick + Math.max(1, searchTicks),
 });
 
 export const advanceImmersivePerceptionForSave = (
@@ -2302,20 +2553,17 @@ export const advanceImmersivePerceptionForSave = (
   }
   const snapshot = createImmersivePerceptionSnapshotFromV1(gamePackage, workingSave, mapId);
   const delta = workingSave.map_deltas?.[mapId] || {};
-  const npcTasks = snapshot.alerts
-    .map((alert) => taskForPerceptionAlert(alert, snapshot.generated_at_tick))
-    .filter(
-      (candidate) =>
-        !(delta.npc_tasks || []).some(
-          (existing) =>
-            existing.actor_id === candidate.actor_id &&
-            existing.task_type === candidate.task_type &&
-            existing.source_kind === candidate.source_kind &&
-            existing.state !== "done" &&
-            existing.state !== "failed" &&
-            sameCell(existing.target_cell, candidate.target_cell),
-        ),
-    );
+  const map = gamePackage.maps.find((candidate) => candidate.id === mapId);
+  const entityById = new Map(gamePackage.entities.map((entity) => [entity.id, entity]));
+  const profileForAlert = (alert: ImmersivePerceptionAlertRecord) =>
+    sensoryProfileForEntity(entityById.get(alert.entity_id));
+  const freshNpcTaskCandidates = snapshot.alerts.map((alert) =>
+    taskForPerceptionAlert(
+      alert,
+      snapshot.generated_at_tick,
+      profileForAlert(alert).search_ticks,
+    ),
+  );
   const worldFacts: PlaySaveWorldFact[] = snapshot.alerts.map((alert, index) => ({
     id: nextPerceptionFactId(workingSave, index),
     tick: snapshot.generated_at_tick,
@@ -2329,11 +2577,16 @@ export const advanceImmersivePerceptionForSave = (
       score: alert.score,
       stimulus_kind: alert.stimulus.kind,
       stimulus_cell: cloneCell(alert.stimulus.cell),
+      sensory_profile_id: alert.sensory_profile_id,
+      sense_id: alert.sense_id,
+      detection_cause: alert.cause,
+      evidence_tick: alert.evidence_tick,
+      tracks_live_target: alert.tracks_live_target === true,
     },
   }));
   const alertedActorIds = new Set(snapshot.alerts.map((alert) => alert.actor_id));
-  const map = gamePackage.maps.find((candidate) => candidate.id === mapId);
   const decayedAlerts: ImmersivePerceptionAlertRecord[] = [];
+  const lostContactAlerts: ImmersivePerceptionAlertRecord[] = [];
   const decayStep = Math.max(0.12, segments * 0.08);
   const decayedEntityStates = Object.fromEntries(
     (map?.entity_placements || []).flatMap((placement, index) => {
@@ -2342,14 +2595,31 @@ export const advanceImmersivePerceptionForSave = (
       const state = workingSave.entity_states?.[key] || {};
       const previousAlertness = state.alertness as ImmersiveAlertnessState | undefined;
       const previousScore = Number(state.alert_score || 0);
-      if (!previousAlertness || previousAlertness === "oblivious" || previousScore <= 0) return [];
-      const nextScore = Number(Math.max(0, previousScore - decayStep).toFixed(4));
+      const memoryExpired = Number.isFinite(Number(state.perception_memory_expires_at_tick)) &&
+        Number(state.perception_memory_expires_at_tick) <= snapshot.generated_at_tick;
+      if (!previousAlertness || previousAlertness === "oblivious" || previousScore <= 0) {
+        if (!state.perception_tracks_live_target && (!memoryExpired || !state.last_known_position)) return [];
+        return [[key, {
+          ...state,
+          perception_tracks_live_target: false,
+          target_actor_id: undefined,
+          last_known_position: memoryExpired ? undefined : state.last_known_position,
+          investigation_target_cell: memoryExpired ? undefined : state.investigation_target_cell,
+        }]];
+      }
+      const profile = sensoryProfileForEntity(entityById.get(placement.entity_id));
+      const searchExpired = Number.isFinite(Number(state.perception_search_expires_at_tick)) &&
+        Number(state.perception_search_expires_at_tick) <= snapshot.generated_at_tick;
+      const nextScore = searchExpired
+        ? 0
+        : Number(Math.max(0, previousScore - decayStep).toFixed(4));
       const nextAlertness: ImmersiveAlertnessState =
         nextScore >= 0.72 ? "searching" :
         nextScore >= 0.28 ? "suspicious" :
         "oblivious";
       const fallbackCell = (state.cell || placement.cell) as [number, number];
-      decayedAlerts.push({
+      const targetCell = (state.last_known_position || state.investigation_target_cell || state.last_stimulus?.cell || fallbackCell) as [number, number];
+      const decayedAlert: ImmersivePerceptionAlertRecord = {
         actor_id: key,
         entity_id: placement.entity_id,
         cell: cloneCell(fallbackCell),
@@ -2357,19 +2627,32 @@ export const advanceImmersivePerceptionForSave = (
         score: nextScore,
         stimulus: {
           kind: "sound",
-          cell: cloneCell((state.last_stimulus?.cell || state.investigation_target_cell || fallbackCell) as [number, number]),
+          cell: cloneCell(targetCell),
           intensity: nextScore,
           radius: 0,
           tag: "alert_decay",
+          tick: Number(state.last_evidence_tick || state.last_stimulus?.tick || snapshot.generated_at_tick),
         },
-        target_cell: cloneCell((state.investigation_target_cell || fallbackCell) as [number, number]),
-      });
+        target_cell: cloneCell(targetCell),
+        sensory_profile_id: state.sensory_profile_id || profile.id,
+        sense_id: state.last_sense_id,
+        cause: state.last_detection_cause as ImmersiveDetectionCause | undefined,
+        evidence_tick: Number(state.last_evidence_tick || state.last_stimulus?.tick || snapshot.generated_at_tick),
+        tracks_live_target: false,
+      };
+      decayedAlerts.push(decayedAlert);
+      if (state.perception_tracks_live_target && nextAlertness !== "oblivious") {
+        lostContactAlerts.push(decayedAlert);
+      }
       return [[key, {
         ...state,
         alertness: nextAlertness,
         alert_score: nextScore,
         alert_decay_tick: snapshot.generated_at_tick,
-        investigation_target_cell: nextAlertness === "oblivious" ? undefined : state.investigation_target_cell,
+        perception_tracks_live_target: false,
+        target_actor_id: undefined,
+        last_known_position: memoryExpired ? undefined : cloneCell(targetCell),
+        investigation_target_cell: nextAlertness === "oblivious" || memoryExpired ? undefined : cloneCell(targetCell),
       }]];
     }),
   );
@@ -2388,6 +2671,53 @@ export const advanceImmersivePerceptionForSave = (
         score: alert.score,
       },
     }));
+  const lostContactTaskCandidates = lostContactAlerts.map((alert) =>
+    taskForPerceptionAlert(
+      alert,
+      snapshot.generated_at_tick,
+      profileForAlert(alert).search_ticks,
+    ),
+  );
+  const taskCandidates = [...freshNpcTaskCandidates, ...lostContactTaskCandidates];
+  const candidateByActor = new Map(taskCandidates.map((candidate) => [candidate.actor_id, candidate]));
+  const reconciledExistingTasks = (delta.npc_tasks || []).map((existing) => {
+    if (!existing.id.startsWith("task_perception_")) return existing;
+    if (existing.state === "done" || existing.state === "failed") return existing;
+    const candidate = candidateByActor.get(existing.actor_id);
+    if (!candidate) {
+      if (existing.expires_at_tick !== undefined && existing.expires_at_tick <= snapshot.generated_at_tick) {
+        return {
+          ...existing,
+          state: "failed" as const,
+          result: "search_expired",
+          updated_at_tick: snapshot.generated_at_tick,
+          completed_at_tick: snapshot.generated_at_tick,
+        };
+      }
+      return existing;
+    }
+    if (
+      existing.task_type === candidate.task_type &&
+      existing.source_kind === candidate.source_kind &&
+      sameCell(existing.target_cell, candidate.target_cell)
+    ) {
+      candidateByActor.delete(existing.actor_id);
+      return {
+        ...existing,
+        priority: Math.max(existing.priority, candidate.priority),
+        expires_at_tick: candidate.expires_at_tick,
+        updated_at_tick: snapshot.generated_at_tick,
+      };
+    }
+    return {
+      ...existing,
+      state: "failed" as const,
+      result: "superseded_by_new_evidence",
+      updated_at_tick: snapshot.generated_at_tick,
+      completed_at_tick: snapshot.generated_at_tick,
+    };
+  });
+  const npcTasks = taskCandidates.filter((candidate) => candidateByActor.get(candidate.actor_id) === candidate);
   const hostileEntityIds = new Set(
     gamePackage.entities.filter((entity) => !entity.is_npc).map((entity) => entity.id),
   );
@@ -2400,20 +2730,32 @@ export const advanceImmersivePerceptionForSave = (
     entity_states: {
       ...(workingSave.entity_states || {}),
       ...decayedEntityStates,
-      ...Object.fromEntries(snapshot.alerts.map((alert) => [
-        alert.actor_id,
-        {
+      ...Object.fromEntries(snapshot.alerts.map((alert) => {
+        const profile = profileForAlert(alert);
+        const evidenceTick = alert.evidence_tick ?? alert.stimulus.tick ?? snapshot.generated_at_tick;
+        return [alert.actor_id, {
           ...(workingSave.entity_states?.[alert.actor_id] || {}),
           alertness: alert.alertness,
           alert_score: alert.score,
+          sensory_profile_id: alert.sensory_profile_id || profile.id,
+          last_sense_id: alert.sense_id,
+          last_detection_cause: alert.cause,
+          last_evidence_tick: evidenceTick,
+          perception_tracks_live_target: alert.tracks_live_target === true,
+          target_actor_id: alert.tracks_live_target ? alert.target_actor_id : undefined,
           last_stimulus: {
             kind: alert.stimulus.kind,
             cell: cloneCell(alert.stimulus.cell),
-            tick: snapshot.generated_at_tick,
+            tick: evidenceTick,
+            source_id: alert.stimulus.source_id,
+            tags: alert.stimulus.tags ? [...alert.stimulus.tags] : undefined,
           },
+          last_known_position: cloneCell(alert.target_cell),
           investigation_target_cell: cloneCell(alert.target_cell),
-        },
-      ])),
+          perception_search_expires_at_tick: snapshot.generated_at_tick + Math.max(1, profile.search_ticks),
+          perception_memory_expires_at_tick: snapshot.generated_at_tick + Math.max(1, profile.memory_ticks),
+        }];
+      })),
     },
     flags: {
       ...(workingSave.flags || {}),
@@ -2423,13 +2765,17 @@ export const advanceImmersivePerceptionForSave = (
         visible_to_count: hostileAlerts.filter((alert) => alert.stimulus.kind === "visible_player").length,
         alerted_count: hostileAlerts.length,
         strongest_score: highestAlert?.score || 0,
+        strongest_cause: highestAlert?.cause,
+        strongest_sense_id: highestAlert?.sense_id,
+        strongest_profile_id: highestAlert?.sensory_profile_id,
+        strongest_evidence_cell: highestAlert ? cloneCell(highestAlert.target_cell) : undefined,
       },
     },
     map_deltas: {
       ...(workingSave.map_deltas || {}),
       [mapId]: {
         ...delta,
-        npc_tasks: [...(delta.npc_tasks || []), ...npcTasks],
+        npc_tasks: [...reconciledExistingTasks, ...npcTasks],
       },
     },
     world_facts: [...(workingSave.world_facts || []), ...worldFacts, ...decayFacts].slice(-250),
@@ -2869,7 +3215,7 @@ const environmentFieldsForVerb = (
         kind: "light",
         intensity: Math.max(0.35, intensity * 0.8),
         tag: "global_verb_firelight",
-        radius: 3,
+        radius: 6,
         color: "#f59e0b",
         decay_per_tick: 0.08,
         expires_at_tick: tick + 24,
