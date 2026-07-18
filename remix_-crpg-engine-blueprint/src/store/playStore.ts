@@ -35,6 +35,14 @@ interface PlayState {
   pushEngineEvents: (events: EngineEvent[]) => void;
   activeDialogueId: string | null;
   activeDialogueNodeId: string | null;
+  activeConversationResponseId: string | null;
+  activeConversationParticipantKey: string | null;
+  activeConversationEntityId: string | null;
+  activeConversationLocalTopicIds: string[];
+  activeConversationLocalDynamicTopicIds: string[];
+  activeConversationRecentTopicKeys: string[];
+  activeConversationShownItemId: string | null;
+  activeConversationEnding: boolean;
   activeShopId: string | null;
   activeContainerId: string | null;
   initSave: (
@@ -48,6 +56,7 @@ interface PlayState {
       playerSpriteId?: string;
       initialKnownSkills?: string[];
       startingPartyMembers?: string[];
+      initialFlags?: Record<string, boolean>;
     },
   ) => void;
   // ── Turn-queue combat ──
@@ -75,8 +84,22 @@ interface PlayState {
   openShop: (shopId: string) => void;
   closeShop: () => void;
   resetRun: () => void;
-  startDialogue: (dialogueId: string, startNodeId: string) => void;
+  startDialogue: (
+    dialogueId: string,
+    startNodeId: string,
+    context?: { participantKey?: string; participantEntityId?: string },
+  ) => void;
   advanceDialogue: (nextNodeId?: string) => void;
+  updateKeywordConversation: (updates: Partial<{
+    responseId: string | null;
+    participantKey: string | null;
+    participantEntityId: string | null;
+    localTopicIds: string[];
+    localDynamicTopicIds: string[];
+    recentTopicKeys: string[];
+    shownItemId: string | null;
+    ending: boolean;
+  }>) => void;
   endDialogue: () => void;
   setQuestState: (questId: string, state: string) => void;
   setFlag: (flagId: string, value: boolean) => void;
@@ -138,11 +161,19 @@ type PersistedPlayState = Pick<
   | "logMessages"
   | "activeDialogueId"
   | "activeDialogueNodeId"
+  | "activeConversationResponseId"
+  | "activeConversationParticipantKey"
+  | "activeConversationEntityId"
+  | "activeConversationLocalTopicIds"
+  | "activeConversationLocalDynamicTopicIds"
+  | "activeConversationRecentTopicKeys"
+  | "activeConversationShownItemId"
+  | "activeConversationEnding"
   | "activeShopId"
   | "activeContainerId"
 >;
 
-const AUTOSAVE_WRITE_DELAY_MS = 250;
+const AUTOSAVE_WRITE_DELAY_MS = 850;
 
 let queuedAutosave:
   | {
@@ -184,7 +215,10 @@ const deferredAutosaveStorage: PersistStorage<PersistedPlayState, void> = {
   },
   setItem: (name, value) => {
     queuedAutosave = { name, value };
-    if (autosaveTimer !== undefined) return;
+    // True debounce: continuous fine-grid movement should not synchronously
+    // stringify and write the complete run four times per second. Pagehide
+    // still flushes the newest queued state before refresh/navigation.
+    if (autosaveTimer !== undefined) clearTimeout(autosaveTimer);
     autosaveTimer = setTimeout(flushQueuedAutosave, AUTOSAVE_WRITE_DELAY_MS);
   },
   removeItem: (name) => {
@@ -348,6 +382,14 @@ export const usePlayStore = create<PlayState>()(
       engineEvents: [],
       activeDialogueId: null,
       activeDialogueNodeId: null,
+      activeConversationResponseId: null,
+      activeConversationParticipantKey: null,
+      activeConversationEntityId: null,
+      activeConversationLocalTopicIds: [],
+      activeConversationLocalDynamicTopicIds: [],
+      activeConversationRecentTopicKeys: [],
+      activeConversationShownItemId: null,
+      activeConversationEnding: false,
       activeShopId: null,
       activeContainerId: null,
       initSave: (
@@ -384,12 +426,18 @@ export const usePlayStore = create<PlayState>()(
             fine_ratio: FINE_PER_MACRO,
             current_map_id,
             player: { cell, facing, sprite_id: options?.playerSpriteId },
+            player_stealth: { active: false, changed_at_tick: clockStartMinutes ?? 8 * 60 },
             playerStats,
             level: 1,
             experience: 0,
             pending_level_ups: 0,
             known_skills: [...(options?.initialKnownSkills || [])],
-            flags: {},
+            // Studio switch values are the authored baseline for a genuinely
+            // new campaign. Expedition resets use the separate lifecycle
+            // operator and never reapply this baseline over campaign facts.
+            flags: { ...(options?.initialFlags || {}) },
+            variables: {},
+            relationships: {},
             quests: {},
             inventory: [],
             money: 0,
@@ -399,6 +447,15 @@ export const usePlayStore = create<PlayState>()(
             clock_minutes: clockStartMinutes ?? 8 * 60,
             faction_rep: {},
             read_documents: [],
+            dialogue_memory: {
+              current_expedition_id: "expedition:1",
+              prior_intercessor_ids: [],
+              campaign_topics: {},
+              expedition_topics: {},
+              dynamic_topics: {},
+              npc_topics: {},
+            },
+            explored_cells: {},
             in_combat: false,
             combat_queue: [],
             active_turn_id: "player",
@@ -407,6 +464,14 @@ export const usePlayStore = create<PlayState>()(
           logMessages: [`Entered map: ${current_map_id}`],
           activeDialogueId: null,
           activeDialogueNodeId: null,
+          activeConversationResponseId: null,
+          activeConversationParticipantKey: null,
+          activeConversationEntityId: null,
+          activeConversationLocalTopicIds: [],
+          activeConversationLocalDynamicTopicIds: [],
+          activeConversationRecentTopicKeys: [],
+          activeConversationShownItemId: null,
+          activeConversationEnding: false,
           activeShopId: null,
           activeContainerId: null,
           };
@@ -516,23 +581,80 @@ export const usePlayStore = create<PlayState>()(
           logMessages: [],
           activeDialogueId: null,
           activeDialogueNodeId: null,
+          activeConversationResponseId: null,
+          activeConversationParticipantKey: null,
+          activeConversationEntityId: null,
+          activeConversationLocalTopicIds: [],
+          activeConversationLocalDynamicTopicIds: [],
+          activeConversationRecentTopicKeys: [],
+          activeConversationShownItemId: null,
+          activeConversationEnding: false,
           activeShopId: null,
           activeContainerId: null,
         }),
-      startDialogue: (dialogueId, startNodeId) =>
+      startDialogue: (dialogueId, startNodeId, context) =>
         set({
           activeDialogueId: dialogueId,
           activeDialogueNodeId: startNodeId,
+          activeConversationResponseId: null,
+          activeConversationParticipantKey: context?.participantKey || dialogueId,
+          activeConversationEntityId: context?.participantEntityId || null,
+          activeConversationLocalTopicIds: [],
+          activeConversationLocalDynamicTopicIds: [],
+          activeConversationRecentTopicKeys: [],
+          activeConversationShownItemId: null,
+          activeConversationEnding: false,
         }),
       advanceDialogue: (nextNodeId) =>
         set((state) => {
           if (!nextNodeId) {
-            return { activeDialogueId: null, activeDialogueNodeId: null };
+            return {
+              activeDialogueId: null,
+              activeDialogueNodeId: null,
+              activeConversationResponseId: null,
+              activeConversationParticipantKey: null,
+              activeConversationEntityId: null,
+              activeConversationLocalTopicIds: [],
+              activeConversationLocalDynamicTopicIds: [],
+              activeConversationRecentTopicKeys: [],
+              activeConversationShownItemId: null,
+              activeConversationEnding: false,
+            };
           }
           return { activeDialogueNodeId: nextNodeId };
         }),
+      updateKeywordConversation: (updates) =>
+        set((state) => ({
+          activeConversationResponseId:
+            updates.responseId !== undefined ? updates.responseId : state.activeConversationResponseId,
+          activeConversationParticipantKey:
+            updates.participantKey !== undefined ? updates.participantKey : state.activeConversationParticipantKey,
+          activeConversationEntityId:
+            updates.participantEntityId !== undefined ? updates.participantEntityId : state.activeConversationEntityId,
+          activeConversationLocalTopicIds:
+            updates.localTopicIds !== undefined ? updates.localTopicIds : state.activeConversationLocalTopicIds,
+          activeConversationLocalDynamicTopicIds:
+            updates.localDynamicTopicIds !== undefined ? updates.localDynamicTopicIds : state.activeConversationLocalDynamicTopicIds,
+          activeConversationRecentTopicKeys:
+            updates.recentTopicKeys !== undefined ? updates.recentTopicKeys : state.activeConversationRecentTopicKeys,
+          activeConversationShownItemId:
+            updates.shownItemId !== undefined ? updates.shownItemId : state.activeConversationShownItemId,
+          activeConversationEnding:
+            updates.ending !== undefined ? updates.ending : state.activeConversationEnding,
+        })),
       endDialogue: () =>
-        set({ activeDialogueId: null, activeDialogueNodeId: null }),
+        set({
+          activeDialogueId: null,
+          activeDialogueNodeId: null,
+          activeConversationResponseId: null,
+          activeConversationParticipantKey: null,
+          activeConversationEntityId: null,
+          activeConversationLocalTopicIds: [],
+          activeConversationLocalDynamicTopicIds: [],
+          activeConversationRecentTopicKeys: [],
+          activeConversationShownItemId: null,
+          activeConversationEnding: false,
+        }),
       setQuestState: (questId, questState) =>
         set((state) => {
           if (!state.saveData) return state;
@@ -938,6 +1060,14 @@ export const usePlayStore = create<PlayState>()(
           saveData: normalizeProgression(data.saveData),
           activeDialogueId: null,
           activeDialogueNodeId: null,
+          activeConversationResponseId: null,
+          activeConversationParticipantKey: null,
+          activeConversationEntityId: null,
+          activeConversationLocalTopicIds: [],
+          activeConversationLocalDynamicTopicIds: [],
+          activeConversationRecentTopicKeys: [],
+          activeConversationShownItemId: null,
+          activeConversationEnding: false,
           activeShopId: null,
           activeContainerId: null,
           logMessages: ["Save restored."],
@@ -953,6 +1083,14 @@ export const usePlayStore = create<PlayState>()(
         logMessages: state.logMessages,
         activeDialogueId: state.activeDialogueId,
         activeDialogueNodeId: state.activeDialogueNodeId,
+        activeConversationResponseId: state.activeConversationResponseId,
+        activeConversationParticipantKey: state.activeConversationParticipantKey,
+        activeConversationEntityId: state.activeConversationEntityId,
+        activeConversationLocalTopicIds: state.activeConversationLocalTopicIds,
+        activeConversationLocalDynamicTopicIds: state.activeConversationLocalDynamicTopicIds,
+        activeConversationRecentTopicKeys: state.activeConversationRecentTopicKeys,
+        activeConversationShownItemId: state.activeConversationShownItemId,
+        activeConversationEnding: state.activeConversationEnding,
         activeShopId: state.activeShopId,
         activeContainerId: state.activeContainerId,
       }),

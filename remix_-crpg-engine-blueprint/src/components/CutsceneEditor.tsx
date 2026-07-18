@@ -12,6 +12,7 @@ const supportedActionTypes = [
   "move_player",
   "move_entity",
   "set_switch",
+  "unlock_topic",
   "teleport_player",
   "give_item",
   "remove_item",
@@ -35,6 +36,7 @@ const supportedActionTypes = [
   "learn_skill",
   "set_entity_hidden",
   "play_sound",
+  "emit_sound",
   "restore_party",
   "chem_spill",
   "game_end",
@@ -48,6 +50,7 @@ const actionLabels: Record<string, string> = {
   move_player: "Move Player",
   move_entity: "Move Entity",
   set_switch: "Set Switch",
+  unlock_topic: "Unlock Conversation Topic",
   teleport_player: "Teleport Player",
   give_item: "Give Item",
   remove_item: "Remove Item",
@@ -71,6 +74,7 @@ const actionLabels: Record<string, string> = {
   learn_skill: "Learn Skill",
   set_entity_hidden: "Set Entity Hidden",
   play_sound: "Play Sound",
+  emit_sound: "Emit Mechanical Sound",
   restore_party: "Restore Party",
   chem_spill: "Chemistry Spill",
   game_end: "End Game",
@@ -487,6 +491,72 @@ function ActionFields({ action, index, labelIds, musicTrackIds, updateAction }: 
         </>
       )}
 
+      {action.type === "emit_sound" && (
+        <>
+          <SelectField
+            label="Source entity (optional)"
+            value={action.entity_id || ""}
+            onChange={(entity_id) => updateAction(index, { entity_id: entity_id || undefined })}
+          >
+            <option value="">Environment / unknown source</option>
+            {gamePackage.entities.map((entity) => (
+              <option key={entity.id} value={entity.id}>{entity.display_name || entity.id}</option>
+            ))}
+          </SelectField>
+          <div className="grid grid-cols-2 gap-2">
+            <NumberField label="Cell X" value={action.cell?.[0] ?? 0} onChange={(value) => setCellPart(0, value)} />
+            <NumberField label="Cell Z" value={action.cell?.[1] ?? 0} onChange={(value) => setCellPart(1, value)} />
+          </div>
+          <NumberField
+            label="Loudness / radius (macro cells)"
+            value={action.sound_loudness ?? 3}
+            step={0.25}
+            onChange={(sound_loudness) => updateAction(index, { sound_loudness: Math.max(0.05, sound_loudness) })}
+          />
+          <TextField
+            label="Sound tag"
+            value={action.sound_tag || "scripted_sound"}
+            onChange={(sound_tag) => updateAction(index, { sound_tag: sound_tag || undefined })}
+          />
+          <TextField
+            label="Category"
+            value={action.sound_category || "scripted_event"}
+            onChange={(sound_category) => updateAction(index, { sound_category: sound_category || undefined })}
+          />
+          <TextField
+            label="Material tag (optional)"
+            value={action.sound_material_tag || ""}
+            onChange={(sound_material_tag) => updateAction(index, { sound_material_tag: sound_material_tag || undefined })}
+          />
+          <NumberField
+            label="Duration ticks"
+            value={action.sound_duration_ticks ?? 8}
+            onChange={(sound_duration_ticks) => updateAction(index, { sound_duration_ticks: Math.max(1, Math.floor(sound_duration_ticks)) })}
+          />
+          <TextField
+            label="Stimulus tags (comma separated)"
+            value={(action.stimulus_tags || []).join(", ")}
+            onChange={(value) => updateAction(index, {
+              stimulus_tags: value
+                .split(",")
+                .map((tag) => tag.trim())
+                .filter(Boolean),
+            })}
+          />
+          <SelectField
+            label="Reveal source identity"
+            value={String(action.reveals_identity ?? false)}
+            onChange={(value) => updateAction(index, { reveals_identity: value === "true" })}
+          >
+            <option value="false">No — location evidence only</option>
+            <option value="true">Yes — identify authored source</option>
+          </SelectField>
+          <p className="text-xs text-neutral-500">
+            Emits hearing evidence without playing an audio asset. Use Play Sound separately for audible presentation.
+          </p>
+        </>
+      )}
+
       {action.type === "game_end" && (
         <>
           <SelectField label="Ending" value={action.ending_id || ""} onChange={(ending_id) => updateAction(index, { ending_id: ending_id || undefined })}>
@@ -519,6 +589,19 @@ function ActionFields({ action, index, labelIds, musicTrackIds, updateAction }: 
           <option value="">Select Document...</option>
           {gamePackage.documents?.map((document) => <option key={document.id} value={document.id}>{document.display_name || document.id}</option>)}
         </SelectField>
+      )}
+
+      {action.type === "unlock_topic" && (
+        <>
+          <SelectField label="Static Topic" value={action.topic_id || ""} onChange={(topic_id) => updateAction(index, { topic_id: topic_id || undefined })}>
+            <option value="">No static topic</option>
+            {gamePackage.keywords?.map((topic) => <option key={topic.id} value={topic.id}>{topic.display_label}</option>)}
+          </SelectField>
+          <SelectField label="Dynamic Topic" value={action.dynamic_topic_id || ""} onChange={(dynamic_topic_id) => updateAction(index, { dynamic_topic_id: dynamic_topic_id || undefined })}>
+            <option value="">No dynamic topic</option>
+            {gamePackage.dynamic_topics?.map((topic) => <option key={topic.id} value={topic.id}>{topic.display_name}</option>)}
+          </SelectField>
+        </>
       )}
 
       {action.type === "open_shop" && (

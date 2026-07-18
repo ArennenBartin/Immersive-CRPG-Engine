@@ -39,6 +39,24 @@ export {
 } from "./gridCoordinates";
 export type { FineCoord, GridCoord, GridCoordKey, MacroCoord } from "./gridCoordinates";
 export {
+  DEFAULT_MOVEMENT_HEARING_SETTINGS,
+  isActorUsingStealthStance,
+  isPlayerStealthActive,
+  movementNoiseLoudness,
+  movementSurfaceNoiseMultiplier,
+  resolveMovementHearingSettings,
+  setPlayerStealthActive,
+  stealthBlockedActionMessage,
+  togglePlayerStealth,
+  validateHearingStealthAuthoring,
+} from "./hearingStealth";
+export type {
+  MovementHearingSettings,
+  PlayerStealthState,
+  StealthBlockedAction,
+  HearingStealthAuthoringIssue,
+} from "./hearingStealth";
+export {
   expandGamePackageToFine,
   expandMapToFine,
   getFineGamePackage,
@@ -130,6 +148,7 @@ export {
   RecordBarkHandler,
   GameEndHandler,
   ChooseDialogueOptionHandler,
+  SelectDialogueTopicHandler,
   BuyShopItemHandler,
   SellInventoryItemHandler,
   moveEntityEffect,
@@ -158,6 +177,7 @@ export type {
   DoorRef,
   DialogueChoiceEffectOutcome,
   DialogueChoiceOutcome,
+  KeywordDialogueOutcome,
   EnemyTurnOutcome,
   MapTransitionRef,
   QuestObjectiveCompletion,
@@ -288,6 +308,7 @@ export {
   dispatchV1GameEnd,
   dispatchV1AttendNode,
   dispatchV1ChooseDialogueOption,
+  dispatchV1SelectDialogueTopic,
   dispatchV1BuyShopItem,
   dispatchV1SellInventoryItem,
   dispatchV1MeleeAttack,
@@ -348,6 +369,7 @@ export type {
   V1AttendNodeDispatchOptions,
   V1AttendNodeDispatchResult,
   V1ChooseDialogueOptionDispatchOptions,
+  V1SelectDialogueTopicDispatchOptions,
   V1ShopBuyDispatchOptions,
   V1ShopSellDispatchOptions,
   V1MeleeAttackDispatchOptions,
@@ -455,6 +477,38 @@ export {
   selectEligibleBark,
   shouldRunCutsceneBranch,
 } from "./story";
+export {
+  BUILTIN_DIALOGUE_KEYWORDS,
+  beginKeywordConversation,
+  beginNewDialogueExpedition,
+  createDialogueMemory,
+  createRuntimeDynamicDialogueTopic,
+  discoverDialogueTopic,
+  discoverDocumentDialogueTopics,
+  discoverDynamicDialogueTopic,
+  discoverItemDialogueTopics,
+  discoverMapDialogueTopics,
+  ensureBuiltinDialogueKeywords,
+  formatLegacyDialogueMigrationReport,
+  getDialogueTopicHistory,
+  getKnownDialogueTopics,
+  initializeDialogueMemory,
+  isDialogueTopicChanged,
+  migrateLegacyDialoguePackage,
+  resolveKeywordDialogueResponse,
+  selectKeywordDialogueTopic,
+  shouldCloseKeywordConversationImmediately,
+  topicRefKey,
+  validateKeywordDialoguePackage,
+} from "./keywordDialogue";
+export type {
+  DialogueTopicRef,
+  DialogueValidationIssue,
+  KeywordResponseResolution,
+  KeywordSelectionOutcome,
+  KnownDialogueTopic,
+  LegacyDialogueMigrationResult,
+} from "./keywordDialogue";
 export type {
   BarkSelectionOptions,
   ClockPhaseId,
@@ -556,6 +610,41 @@ export {
   resolveImmersiveReactions,
   writeImmersiveTileLayerSnapshotToSave,
 } from "./immersiveSim";
+export {
+  WORLD_STATE_LAYERS_VERSION,
+  beginNewExpedition,
+  normalizeWorldStateLayers,
+  parseWorldStatePolicy,
+  projectWorldStateLayers,
+  resolveWorldStatePolicy,
+} from "./worldStateLayers";
+export type {
+  BeginNewExpeditionOptions,
+  BeginNewExpeditionResult,
+  WorldStateLayerProjection,
+  WorldStateMapPolicy,
+  WorldStatePolicy,
+  WorldStateResetReport,
+} from "./worldStateLayers";
+export {
+  acknowledgeSuccessionTransition,
+  generateIntercessorDisplayName,
+  generateIntercessorName,
+  getIntercessorHistory,
+  normalizeIntercessorCampaign,
+  previewIntercessorNames,
+  queryIntercessorHistory,
+  resolveIntercessorNamePools,
+  transitionIntercessorOnDeath,
+} from "./intercessorSuccession";
+export type {
+  GenerateIntercessorNameOptions,
+  IntercessorDeathTransitionOptions,
+  IntercessorDeathTransitionResult,
+  IntercessorNameCollisionPolicy,
+  IntercessorNamePools,
+  PreviewIntercessorNamesOptions,
+} from "./intercessorSuccession";
 export type {
   ImmersiveGasLayerState,
   ImmersiveCombatActorSnapshot,

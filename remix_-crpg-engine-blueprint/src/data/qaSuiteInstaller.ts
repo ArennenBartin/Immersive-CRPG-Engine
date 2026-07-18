@@ -8,6 +8,7 @@ import {
   type PackageMigrationResult,
 } from "../store/packageMigration";
 import { withTestingMapSuite } from "./testingMapSuite";
+import { migrateLegacyDialoguePackage } from "../engine-core/keywordDialogue";
 
 export type QaSuiteInstallMode = "empty" | "merge" | "replace";
 
@@ -21,7 +22,7 @@ export interface QaSuiteInstallOptions {
 
 /** Builds the canonical QA package without consulting or mutating the Studio workspace. */
 export const createQaSuitePackage = (): GamePackage =>
-  withTestingMapSuite(createEmptyGamePackage());
+  migrateLegacyDialoguePackage(withTestingMapSuite(createEmptyGamePackage())).package;
 
 const appendMissingById = <T extends { id: string }>(current: T[], additions: T[]): T[] => {
   const currentIds = new Set(current.map((entry) => entry.id));
@@ -49,7 +50,7 @@ type IdCollection = { label: string; current: Array<{ id: string }>; qa: Array<{
 export const installQaSuiteIntoEmptyPackage = (
   source: GamePackage,
 ): PackageMigrationResult => {
-  const candidate = withTestingMapSuite(source);
+  const candidate = migrateLegacyDialoguePackage(withTestingMapSuite(source)).package;
   if (source.maps.length) {
     return finalizePackageMigration(source, candidate, {
       warnings: [
@@ -91,6 +92,8 @@ export const mergeQaSuiteIntoPackage = (source: GamePackage): PackageMigrationRe
     { label: "object", current: source.object_library, qa: qa.object_library },
     { label: "sprite", current: source.sprite_library, qa: qa.sprite_library },
     { label: "entity", current: source.entities, qa: qa.entities },
+    { label: "keyword", current: source.keywords, qa: qa.keywords },
+    { label: "dynamic topic", current: source.dynamic_topics, qa: qa.dynamic_topics },
     { label: "dialogue", current: source.dialogue, qa: qa.dialogue },
     { label: "document", current: source.documents, qa: qa.documents },
     { label: "quest", current: source.quests, qa: qa.quests },
@@ -136,6 +139,8 @@ export const mergeQaSuiteIntoPackage = (source: GamePackage): PackageMigrationRe
     object_library: appendMissingById(source.object_library, qa.object_library),
     sprite_library: appendMissingById(source.sprite_library, qa.sprite_library),
     entities: appendMissingById(source.entities, qa.entities),
+    keywords: appendMissingById(source.keywords, qa.keywords),
+    dynamic_topics: appendMissingById(source.dynamic_topics, qa.dynamic_topics),
     dialogue: appendMissingById(source.dialogue, qa.dialogue),
     documents: appendMissingById(source.documents, qa.documents),
     quests: appendMissingById(source.quests, qa.quests),

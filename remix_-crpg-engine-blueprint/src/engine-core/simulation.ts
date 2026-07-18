@@ -17,8 +17,14 @@ import type {
 } from "../schema/save";
 import { doorPlacementKey, isBuildingDoorPlacement, isDoorPlacementOpen } from "../utils/doorPlacement";
 import { entityPlacementStateKey } from "../utils/entityState";
-import { placementHasCollision, placementOriginKey } from "../utils/objectFootprint";
-import { FINE_PER_MACRO, coordKey } from "./gridCoordinates";
+import {
+  getMacroPlacementFootprint,
+  getPlacementFootprint,
+  placementHasCollision,
+  placementOriginKey,
+} from "../utils/objectFootprint";
+import { placementBlocksFogLineOfSight } from "../utils/fogOfWar";
+import { coordKey } from "./gridCoordinates";
 import { isFineExpandedPackage } from "./fineWorld";
 
 export type SimulationSurfaceKind = Exclude<CellData["surface_tag"], "none">;
@@ -186,29 +192,14 @@ export interface SimulationMapSnapshot {
 
 const cellKey = coordKey;
 
-const packageSpatialRatio = (gamePackage: GamePackage): number =>
-  isFineExpandedPackage(gamePackage) ? FINE_PER_MACRO : 1;
-
 const placementFootprintForPackage = (
   gamePackage: GamePackage,
-  placement: Pick<ObjectPlacementData, "cell">,
+  placement: ObjectPlacementData,
   object: ObjectData | undefined,
-): [number, number][] => {
-  const ratio = packageSpatialRatio(gamePackage);
-  const half = Math.floor((ratio - 1) / 2);
-  const authoredFootprint = object?.collision?.footprint?.length
-    ? object.collision.footprint
-    : ([[0, 0]] as [number, number][]);
-  const cells: [number, number][] = [];
-  for (const [rx, rz] of authoredFootprint) {
-    const centerX = placement.cell[0] + rx * ratio;
-    const centerZ = placement.cell[1] + rz * ratio;
-    for (let dx = -half; dx <= half; dx += 1) {
-      for (let dz = -half; dz <= half; dz += 1) cells.push([centerX + dx, centerZ + dz]);
-    }
-  }
-  return cells;
-};
+): [number, number][] =>
+  isFineExpandedPackage(gamePackage)
+    ? getPlacementFootprint(placement, object)
+    : getMacroPlacementFootprint(placement, object);
 
 const asCell = (cell: readonly unknown[]): [number, number] => [
   Number(cell[0] || 0),
@@ -896,6 +887,11 @@ export const createSimulationSnapshotFromV1 = (
     const isDoor = isBuildingDoorPlacement(placement);
     const openDoor = isDoorPlacementOpen(delta, placement);
     const blocks = placementHasCollision(placement, object) && !(isDoor && openDoor);
+    const blocksLineOfSight = placementBlocksFogLineOfSight(
+      placement,
+      object,
+      delta,
+    );
     const targetId = isDoor ? doorPlacementKey(authored) : key;
     const material_id = inferObjectMaterialId(object);
     const manipulation = resolveObjectManipulationAffordance(object);
@@ -914,7 +910,7 @@ export const createSimulationSnapshotFromV1 = (
         id: targetId,
         label: object?.display_name || placement.object_id,
         blocks_movement: blocks,
-        blocks_los: blocks,
+        blocks_los: blocksLineOfSight,
         material_id,
         condition,
         manipulation,

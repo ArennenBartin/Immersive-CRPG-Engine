@@ -40,6 +40,7 @@ import {
   dispatchV1RecordBark,
   dispatchV1GameEnd,
   dispatchV1ChooseDialogueOption,
+  dispatchV1SelectDialogueTopic,
   dispatchV1AttendNode,
   dispatchV1BuyShopItem,
   dispatchV1SellInventoryItem,
@@ -127,6 +128,21 @@ import {
   selectEligibleBark,
   shouldRunCutsceneBranch,
   findCutsceneLabelIndex,
+  beginKeywordConversation,
+  discoverDialogueTopic,
+  discoverDynamicDialogueTopic,
+  discoverMapDialogueTopics,
+  getKnownDialogueTopics,
+  initializeDialogueMemory,
+  isActorUsingStealthStance,
+  isPlayerStealthActive,
+  movementNoiseLoudness,
+  resolveMovementHearingSettings,
+  stealthBlockedActionMessage,
+  togglePlayerStealth,
+  shouldCloseKeywordConversationImmediately,
+  topicRefKey,
+  type DialogueTopicRef,
   type CombatAttackOutcome,
   type CombatSessionUpdateOutcome,
   type EnemyTurnOutcome,
@@ -146,6 +162,7 @@ import {
   type ImmersiveWorldStateEvaluation,
   type ImmersiveWorldStateGateResult,
   type EntityBehaviorIntentRecord,
+  type StealthBlockedAction,
 } from "../engine-core";
 import {
   usePlayStore,
@@ -171,6 +188,12 @@ import {
   type PlayModeWheelVerbKind,
 } from "../utils/playModeCommands";
 import {
+  getNormalizedMovementRepeatIntervalMs,
+  resolveHeldMovementIntent,
+  shouldDriveDemandFrames,
+} from "../utils/playInput";
+import { hasAuthoritativePresentLight } from "../utils/lightRendering";
+import {
   ABILITY_BAR_PAGE_SIZE,
   ABILITY_PAGE_LABELS,
   ABILITY_PAGE_ORDER,
@@ -187,8 +210,16 @@ import {
   CutsceneData,
   SkillData,
   SimulationWorkstationData,
+  type DialogueKeywordCategory,
 } from "../schema/game";
 import { ActorPhysicalStateRecord, InventoryLayoutEntry, MapDelta, PlaySave, SimulationProcessRecord } from "../schema/save";
+import {
+  acknowledgeSuccessionTransition,
+  getIntercessorHistory,
+  normalizeIntercessorCampaign,
+  transitionIntercessorOnDeath,
+} from "../engine-core/intercessorSuccession";
+import { beginNewExpedition } from "../engine-core/worldStateLayers";
 import {
   playMusic,
   playSound,
@@ -232,6 +263,7 @@ import {
 import { entityPlacementStateKey } from "../utils/entityState";
 import { resolvePlayModeMap } from "../utils/playModeMap";
 import { logicalCellToWorld } from "../utils/renderSpace";
+import { isStableMemoryStructureObject } from "../utils/fogOfWar";
 import {
   Briefcase,
   BookOpen,
@@ -268,6 +300,31 @@ import {
 const arrayOrEmpty = <T,>(value: T[] | undefined): T[] =>
   Array.isArray(value) ? value : [];
 
+const DIALOGUE_ARCHIVE_CATEGORIES: Array<{
+  id: DialogueKeywordCategory;
+  label: string;
+}> = [
+  { id: "people", label: "People" },
+  { id: "intercessors", label: "Intercessors" },
+  { id: "places", label: "Places" },
+  { id: "objects", label: "Objects" },
+  { id: "events", label: "Events" },
+  { id: "beliefs", label: "Beliefs" },
+  { id: "subjects", label: "Subjects" },
+  { id: "actions", label: "Actions" },
+];
+
+const dialogueCanStart = (dialogue: GamePackage["dialogue"][number] | undefined) =>
+  Boolean(
+    dialogue &&
+      (dialogue.format === "keyword_v1"
+        ? (dialogue.responses?.length || 0) > 0
+        : dialogue.nodes.length > 0),
+  );
+
+const dialogueEntryNodeId = (dialogue: GamePackage["dialogue"][number]) =>
+  dialogue.nodes[0]?.id || "start";
+
 const withRuntimeMapArrays = (map: MapData): MapData => {
   const partial = map as Partial<MapData>;
   return {
@@ -300,6 +357,8 @@ const withRuntimePackageArrays = (pkg: GamePackage): GamePackage => {
     object_library: arrayOrEmpty(partial.object_library),
     sprite_library: arrayOrEmpty(partial.sprite_library),
     entities: arrayOrEmpty(partial.entities),
+    keywords: arrayOrEmpty(partial.keywords),
+    dynamic_topics: arrayOrEmpty(partial.dynamic_topics),
     dialogue: arrayOrEmpty(partial.dialogue),
     documents: arrayOrEmpty(partial.documents),
     quests: arrayOrEmpty(partial.quests),
@@ -345,24 +404,44 @@ const registerRuntimeMapWindow = (map: MapData) => {
   };
 };
 
-const MOVEMENT_REPEAT_START_MS = 105;
+const MOVEMENT_REPEAT_START_MS = 115;
 // Allow a near-simultaneous second key to form a diagonal without making every
 // ordinary cardinal press feel delayed. The previous 80 ms window was longer
 // than a full responsive input budget before any game work even began.
 const MOVEMENT_CHORD_BUFFER_MS = 24;
-// Held-to-move cadence: three fine steps should take roughly one legacy macro
-// step. Use 100/ratio instead of 105/ratio so the repeat lands cleanly on a
-// 60fps frame cadence instead of aliasing into visible 50ms chunks.
-const MOVEMENT_REPEAT_INTERVAL_MS = 100 / FINE_PER_MACRO;
+// Held movement must stay below the visual slide speed. The old 33 ms cadence
+// advanced the simulation faster than the rendered actor could catch up and
+// could dispatch thirty full exploration updates per second.
+const MOVEMENT_REPEAT_INTERVAL_MS = 240 / FINE_PER_MACRO;
 const PLAYER_FOOTSTEP_FINE_STEP_INTERVAL = FINE_PER_MACRO;
-// Three held-movement fine steps take about 100 ms. Keep the audio cooldown
-// below that cadence so it does not silently turn every third step into every
-// sixth step while movement is repeating quickly.
+// Keep the audio cooldown below the normalized held cadence so footsteps do
+// not silently collapse multiple macro distances into one sound.
 const PLAYER_FOOTSTEP_COOLDOWN_MS = 70;
 const COMBAT_ACTOR_SWITCH_INPUT_DELAY_MS = 180;
 const EMPTY_ENGINE_EVENTS: ReturnType<typeof usePlayStore.getState>["engineEvents"] = [];
-const PLAY_RENDER_RADIUS = scaleMacroDistanceToFine(20);
-const PERFORMANCE_FRAME_INTERVAL_MS = 1000 / 45;
+const EMPTY_EXPLORED_CELL_KEYS: string[] = [];
+const PLAY_RENDER_RADIUS_MACRO: Record<VisualScalePreset, number> = {
+  performance: 14,
+  balanced: 16,
+  high: 18,
+  ultra: 20,
+};
+const PLAY_FRAME_INTERVAL_MS: Record<VisualScalePreset, number> = {
+  performance: 1000 / 30,
+  balanced: 1000 / 30,
+  high: 1000 / 45,
+  ultra: 1000 / 60,
+};
+
+// These cap only the cosmetic Three.js point-light accents. The authoritative
+// per-cell ground-light field, fog presentation, and Senses illumination keep
+// rendering every mechanically illuminated cell at every visual preset.
+const PLAY_AUTHORITATIVE_POINT_LIGHT_BUDGET: Record<VisualScalePreset, number> = {
+  performance: 2,
+  balanced: 3,
+  high: 5,
+  ultra: 8,
+};
 // Moving observers already refresh perception at each macro-tile boundary.
 // While stationary, Performance mode uses a coarser clock bucket so the same
 // large sensory snapshot is not rebuilt again between those boundaries.
@@ -378,17 +457,23 @@ const PLAY_DPR_MAX = Math.max(
   Math.min(PLAY_NATIVE_DPR + 0.25, 2.25),
 );
 
-function PerformanceFrameDriver({ enabled }: { enabled: boolean }) {
+function DemandFrameDriver({
+  enabled,
+  intervalMs,
+}: {
+  enabled: boolean;
+  intervalMs: number;
+}) {
   const invalidate = useThree((state) => state.invalidate);
   useEffect(() => {
     if (!enabled) return undefined;
     invalidate();
     const interval = window.setInterval(
       invalidate,
-      PERFORMANCE_FRAME_INTERVAL_MS,
+      intervalMs,
     );
     return () => window.clearInterval(interval);
-  }, [enabled, invalidate]);
+  }, [enabled, intervalMs, invalidate]);
   return null;
 }
 const NPC_SIMULATION_RADIUS = scaleMacroDistanceToFine(16);
@@ -645,6 +730,9 @@ type AbilityBarEntry = {
   disabled: boolean;
   disabledReason?: string;
   costLabel?: string;
+  // Stealth-blocked entries stay clickable so the player receives the authored
+  // explanation instead of a silently inert disabled button.
+  stealthBlocked?: boolean;
 };
 
 function AbilityIcon({ ability }: { ability: SkillData }) {
@@ -1056,6 +1144,73 @@ const sensoryEnvironmentSignature = (
       ]),
   );
 
+// Sound fields are mechanical evidence, not world geometry. They have a
+// dedicated debug layer and must not invalidate the complete 3D map/fog tree
+// every time an actor takes a fine-grid step. Keep a content signature for the
+// non-sound fields so the visual MapDelta can retain object identity while
+// footsteps continue to update hearing state.
+const visualEnvironmentFieldsSignature = (delta: MapDelta | undefined) =>
+  JSON.stringify(
+    Object.entries(delta?.environment_fields || {}).flatMap(([cellKey, fields]) =>
+      fields
+        .filter((field) => field.kind !== "sound")
+        .map((field) => [cellKey, field]),
+    ),
+  );
+
+// Movement sound is stored as a compact origin pulse. Perception keys only on
+// a macro-cadence stimulus-sequence bucket: every accepted fine step still
+// writes a mechanical hearing stimulus, while Stage 4 avoids a full solve on
+// every fine-grid pulse (or on each follower origin within the same bucket).
+const newestCompactMovementSoundSignature = (delta: MapDelta | undefined) => {
+  let newest:
+    | {
+        id: string;
+        tick: number;
+        sequence: number;
+        actor?: string;
+        category?: string;
+        action?: string;
+        origin?: [number, number];
+      }
+    | undefined;
+
+  Object.values(delta?.environment_fields || {}).forEach((fields) => {
+    fields.forEach((field) => {
+      const isMovementSound =
+        field.kind === "sound" &&
+        (field.tag === "footstep" ||
+          field.frequency_tag === "footstep" ||
+          field.source_category === "movement_normal" ||
+          field.source_category === "movement_stealth");
+      if (!isMovementSound || field.propagation_mode !== "compact") return;
+      const candidate = {
+        id: field.id,
+        tick: Number(field.created_at_tick || 0),
+        sequence: Number(field.stimulus_sequence || 0),
+        actor: field.actor_id,
+        category: field.source_category || field.tag,
+        action: field.action,
+        origin: field.origin_cell,
+      };
+      if (
+        !newest ||
+        candidate.sequence > newest.sequence ||
+        (candidate.sequence === newest.sequence && candidate.tick > newest.tick) ||
+        (candidate.sequence === newest.sequence &&
+          candidate.tick === newest.tick &&
+          candidate.id > newest.id)
+      ) {
+        newest = candidate;
+      }
+    });
+  });
+
+  return newest
+    ? Math.floor(Math.max(0, newest.sequence - 1) / FINE_PER_MACRO)
+    : null;
+};
+
 const perceptionInputKeyForSave = (
   gamePackage: GamePackage,
   map: MapData,
@@ -1097,6 +1252,7 @@ const perceptionInputKeyForSave = (
     inventory: (save.inventory || []).map((entry) => [entry.id, entry.count]),
     light_states: save.flags?.immersive_light_states || {},
     environment: sensoryEnvironmentSignature(delta, true),
+    movement_sound: newestCompactMovementSoundSignature(delta),
     opened_doors: delta?.opened_doors || [],
     moved_objects: delta?.moved_objects || {},
     carried_objects: delta?.carried_objects || {},
@@ -1434,6 +1590,8 @@ const getDialoguePortraits = (
   speaker: string,
   gamePackage: GamePackage,
   dialogueId?: string | null,
+  includePlayer = true,
+  participantEntityId?: string | null,
 ): DialoguePortraitConfig[] => {
   const normalized = normalizeDialogueSpeaker(speaker);
   const settings = gamePackage.settings;
@@ -1454,6 +1612,9 @@ const getDialoguePortraits = (
   }
 
   const portraitEntity =
+    (participantEntityId
+      ? gamePackage.entities.find((entity) => entity.id === participantEntityId)
+      : undefined) ||
     gamePackage.entities.find(
       (entity) =>
         normalizeDialogueSpeaker(entity.display_name) === normalized ||
@@ -1486,7 +1647,7 @@ const getDialoguePortraits = (
     flipX: speakerPortrait?.flipX,
   };
 
-  if (playerPortrait && primary.side === "left") {
+  if (includePlayer && playerPortrait && primary.side === "left") {
     return [primary, { ...playerPortrait, side: "right", active: false }];
   }
   return [primary];
@@ -1496,12 +1657,22 @@ function DialoguePortraitStage({
   speaker,
   gamePackage,
   dialogueId,
+  includePlayer = true,
+  participantEntityId,
 }: {
   speaker: string;
   gamePackage: GamePackage;
   dialogueId?: string | null;
+  includePlayer?: boolean;
+  participantEntityId?: string | null;
 }) {
-  const portraits = getDialoguePortraits(speaker, gamePackage, dialogueId);
+  const portraits = getDialoguePortraits(
+    speaker,
+    gamePackage,
+    dialogueId,
+    includePlayer,
+    participantEntityId,
+  );
   if (portraits.length === 0) return null;
 
   return (
@@ -1752,6 +1923,15 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     resetRun,
     activeDialogueId,
     activeDialogueNodeId,
+    activeConversationResponseId,
+    activeConversationParticipantKey,
+    activeConversationEntityId,
+    activeConversationLocalTopicIds,
+    activeConversationLocalDynamicTopicIds,
+    activeConversationRecentTopicKeys,
+    activeConversationShownItemId,
+    activeConversationEnding,
+    updateKeywordConversation,
     advanceDialogue,
     endDialogue,
     setQuestState,
@@ -1774,6 +1954,15 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       resetRun: state.resetRun,
       activeDialogueId: state.activeDialogueId,
       activeDialogueNodeId: state.activeDialogueNodeId,
+      activeConversationResponseId: state.activeConversationResponseId,
+      activeConversationParticipantKey: state.activeConversationParticipantKey,
+      activeConversationEntityId: state.activeConversationEntityId,
+      activeConversationLocalTopicIds: state.activeConversationLocalTopicIds,
+      activeConversationLocalDynamicTopicIds: state.activeConversationLocalDynamicTopicIds,
+      activeConversationRecentTopicKeys: state.activeConversationRecentTopicKeys,
+      activeConversationShownItemId: state.activeConversationShownItemId,
+      activeConversationEnding: state.activeConversationEnding,
+      updateKeywordConversation: state.updateKeywordConversation,
       advanceDialogue: state.advanceDialogue,
       endDialogue: state.endDialogue,
       setQuestState: state.setQuestState,
@@ -1801,7 +1990,34 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       maps: baseGamePackage.maps.map((map) => map.id === activeMap.id ? activeMap : map),
     };
   }, [activeMap, baseGamePackage]);
+  useEffect(() => {
+    const current = usePlayStore.getState().saveData;
+    if (!current) return;
+    const normalized = normalizeIntercessorCampaign(baseGamePackage, current);
+    if (normalized !== current) commitRuntimeSave(normalized);
+  }, [
+    baseGamePackage,
+    commitRuntimeSave,
+    saveData?.world_state_layers?.schema_version,
+    saveData?.world_state_layers?.authored.package_version,
+    saveData?.intercessor_campaign?.current_intercessor_id,
+    saveData?.dialogue_memory?.current_intercessor_id,
+  ]);
   const largeMapWindowKeyRef = useRef("");
+  const lastMapTopicDiscoveryRef = useRef("");
+  useEffect(() => {
+    if (!saveData?.current_map_id) {
+      lastMapTopicDiscoveryRef.current = "";
+      return;
+    }
+    const discoveryKey = `${saveData.package_version}:${saveData.current_map_id}`;
+    if (lastMapTopicDiscoveryRef.current === discoveryKey) return;
+    lastMapTopicDiscoveryRef.current = discoveryKey;
+    commitRuntimeSave(
+      discoverMapDialogueTopics(baseGamePackage, saveData, saveData.current_map_id),
+    );
+  }, [baseGamePackage, commitRuntimeSave, saveData]);
+
   useEffect(() => {
     const mapId = saveData?.current_map_id;
     const playerCell = saveData?.player?.cell;
@@ -1870,6 +2086,10 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   const [showSkills, setShowSkills] = useState(false);
   const [showSaveMenu, setShowSaveMenu] = useState(false);
   const [showJournal, setShowJournal] = useState(false);
+  const successionNoticeOpen = Boolean(
+    saveData?.intercessor_campaign?.last_transition &&
+      !saveData.intercessor_campaign.last_transition.acknowledged,
+  );
   // Bumped after slot writes/deletes so the menu re-reads localStorage.
   const [saveSlotRevision, setSaveSlotRevision] = useState(0);
   const [targetingSkillId, setTargetingSkillId] = useState<string | null>(null);
@@ -1921,6 +2141,13 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     cameraAzimuthRef.current = cameraAzimuth;
   }, [cameraAzimuth]);
   const [activeDocumentId, setActiveDocumentId] = useState<string | null>(null);
+  const [dialogueArchiveOpen, setDialogueArchiveOpen] = useState(false);
+  const [dialogueArchiveFilter, setDialogueArchiveFilter] = useState<
+    DialogueKeywordCategory | "all"
+  >("all");
+  const [dialogueShowItemPickerOpen, setDialogueShowItemPickerOpen] = useState(false);
+  const [pendingDialogueCutsceneId, setPendingDialogueCutsceneId] = useState<string | null>(null);
+  const initializedKeywordSessionRef = useRef<string | null>(null);
   const [cameraFocusOverride, setCameraFocusOverride] = useState<
     [number, number] | null
   >(null);
@@ -1944,17 +2171,14 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     document.addEventListener("visibilitychange", syncVisibility);
     return () => document.removeEventListener("visibilitychange", syncVisibility);
   }, []);
-  const performancePerceptionCadence = visualPreset === "performance";
   const perceptionMapDelta =
     activeMap && saveData
       ? saveData.map_deltas?.[activeMap.id]
       : undefined;
-  const perceptionClockCadence = performancePerceptionCadence
-    ? Math.floor(
-        (saveData?.clock_minutes || 0) /
-          PERFORMANCE_PERCEPTION_CLOCK_BUCKET_MINUTES,
-      )
-    : saveData?.clock_minutes;
+  const perceptionClockCadence = Math.floor(
+    (saveData?.clock_minutes || 0) /
+      PERFORMANCE_PERCEPTION_CLOCK_BUCKET_MINUTES,
+  );
   // The runtime adapter defensively clones these arrays on every command.
   // Depend on their contents in coarse mode so an otherwise identical fine
   // step does not defeat the perception memo just because the array identity
@@ -1963,10 +2187,31 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   const perceptionInventorySignature = (saveData?.inventory || [])
     .map((entry) => `${entry.id}:${entry.count}`)
     .join("\u001f");
-  // Building perception keys walks every sensory field. In Performance mode,
-  // rebuild on macro movement, meaningful world changes, or a coarse
-  // stationary clock bucket; fine footsteps no longer pay for two full scans
-  // just to reproduce the previous key.
+  const perceptionActorMacroSignature = useMemo(() => {
+    if (!activeMap) return "";
+    return (activeMap.entity_placements || [])
+      .map((placement, index) => {
+        const key = entityPlacementStateKey(activeMap.id, placement, index);
+        const state =
+          saveData?.entity_states?.[key] ||
+          saveData?.entity_states?.[placement.entity_id] ||
+          {};
+        const cell = state.cell || placement.cell;
+        return [
+          key,
+          Boolean(state.dead),
+          Boolean(state.hidden),
+          Math.floor(cell[0] / FINE_PER_MACRO),
+          Math.floor(cell[1] / FINE_PER_MACRO),
+          state.facing?.[0] ?? placement.facing?.[0] ?? 0,
+          state.facing?.[1] ?? placement.facing?.[1] ?? -1,
+        ].join(":");
+      })
+      .join("|");
+  }, [activeMap, saveData?.entity_states]);
+  // Fine walking is mechanically free inside a macro tile, so perception and
+  // viewer visibility share one authoritative solve for those three movement
+  // steps. Rendering must follow this field; visual quality never changes it.
   const perceptionInputKey = useMemo(
     () =>
       activeMap && saveData
@@ -1974,38 +2219,27 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             gamePackage,
             activeMap,
             saveData,
-            performancePerceptionCadence,
+            true,
           )
         : "",
     [
       activeMap,
       gamePackage,
-      performancePerceptionCadence,
-      performancePerceptionCadence ? null : saveData,
-      performancePerceptionCadence ? playerMacroX : saveData?.player.cell[0],
-      performancePerceptionCadence ? playerMacroZ : saveData?.player.cell[1],
+      playerMacroX,
+      playerMacroZ,
       perceptionClockCadence,
       saveData?.in_combat,
-      performancePerceptionCadence
-        ? perceptionPartySignature
-        : saveData?.party_members,
-      performancePerceptionCadence
-        ? perceptionInventorySignature
-        : saveData?.inventory,
+      perceptionPartySignature,
+      perceptionInventorySignature,
+      perceptionActorMacroSignature,
       saveData?.flags?.immersive_light_states,
-      performancePerceptionCadence ? null : saveData?.entity_states,
       perceptionMapDelta?.opened_doors,
       perceptionMapDelta?.moved_objects,
       perceptionMapDelta?.carried_objects,
       perceptionMapDelta?.removed_objects,
       perceptionMapDelta?.taken_items,
       perceptionMapDelta?.dropped_items,
-      performancePerceptionCadence
-        ? null
-        : perceptionMapDelta?.environment_fields,
-      performancePerceptionCadence
-        ? null
-        : saveData?.immersive_tile_layers?.[activeMap?.id || ""],
+      perceptionMapDelta?.environment_fields,
     ],
   );
   const viewerVisibilityInputKey = useMemo(
@@ -2015,20 +2249,17 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             gamePackage,
             activeMap,
             saveData,
-            performancePerceptionCadence,
+            true,
           )
         : "",
     [
       activeMap,
       gamePackage,
-      performancePerceptionCadence,
-      performancePerceptionCadence ? null : saveData,
-      performancePerceptionCadence ? playerMacroX : saveData?.player.cell[0],
-      performancePerceptionCadence ? playerMacroZ : saveData?.player.cell[1],
+      playerMacroX,
+      playerMacroZ,
       perceptionClockCadence,
-      performancePerceptionCadence
-        ? perceptionInventorySignature
-        : saveData?.inventory,
+      perceptionInventorySignature,
+      perceptionActorMacroSignature,
       saveData?.flags?.immersive_light_states,
       perceptionMapDelta?.opened_doors,
       perceptionMapDelta?.moved_objects,
@@ -2036,48 +2267,66 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       perceptionMapDelta?.removed_objects,
       perceptionMapDelta?.taken_items,
       perceptionMapDelta?.dropped_items,
-      performancePerceptionCadence
-        ? null
-        : perceptionMapDelta?.environment_fields,
-      performancePerceptionCadence ? null : saveData?.entity_states,
+      perceptionMapDelta?.environment_fields,
     ],
   );
-  const pendingExploredCellsRef = useRef<Map<string, Set<string>>>(new Map());
-  const exploredFlushTimerRef = useRef<number | null>(null);
-  const flushExploredCells = useCallback(() => {
-    if (exploredFlushTimerRef.current !== null) {
-      window.clearTimeout(exploredFlushTimerRef.current);
-      exploredFlushTimerRef.current = null;
+  const pendingExplorationRef = useRef<{
+    generation: string;
+    mapId: string;
+    keys: Set<string>;
+  } | null>(null);
+  const explorationFlushQueuedRef = useRef(false);
+  const queueExploredCells = useCallback((mapId: string, keys: string[]) => {
+    if (keys.length === 0) return;
+    const currentSave = usePlayStore.getState().saveData;
+    if (!currentSave || currentSave.current_map_id !== mapId) return;
+    const generation = [
+      currentSave.package_version,
+      currentSave.world_state_layers?.expedition.id ||
+        currentSave.dialogue_memory?.current_expedition_id ||
+        "expedition",
+      mapId,
+    ].join(":");
+    const pending = pendingExplorationRef.current;
+    if (!pending || pending.generation !== generation || pending.mapId !== mapId) {
+      pendingExplorationRef.current = {
+        generation,
+        mapId,
+        keys: new Set(keys),
+      };
+    } else {
+      keys.forEach((key) => pending.keys.add(key));
     }
-    const pending = pendingExploredCellsRef.current;
-    if (pending.size === 0) return;
-    pendingExploredCellsRef.current = new Map();
-    pending.forEach((keys, mapId) => {
-      usePlayStore.getState().markCellsExplored(mapId, [...keys]);
+    if (explorationFlushQueuedRef.current) return;
+    explorationFlushQueuedRef.current = true;
+
+    // WorldOverlays reports exploration from a passive render effect. Commit
+    // after that effect stack has unwound so a child cannot synchronously drive
+    // PlayEngine -> fog -> child -> store recursion. The expedition token keeps
+    // a queued old-map observation from leaking into a reset/new expedition.
+    queueMicrotask(() => {
+      explorationFlushQueuedRef.current = false;
+      const batch = pendingExplorationRef.current;
+      pendingExplorationRef.current = null;
+      if (!batch) return;
+      const latest = usePlayStore.getState().saveData;
+      const latestGeneration = latest
+        ? [
+            latest.package_version,
+            latest.world_state_layers?.expedition.id ||
+              latest.dialogue_memory?.current_expedition_id ||
+              "expedition",
+            latest.current_map_id,
+          ].join(":")
+        : "";
+      if (!latest || latestGeneration !== batch.generation) return;
+      usePlayStore.getState().markCellsExplored(batch.mapId, [...batch.keys]);
     });
   }, []);
-  const queueExploredCells = useCallback(
-    (mapId: string, keys: string[]) => {
-      if (keys.length === 0) return;
-      const pending = pendingExploredCellsRef.current;
-      const mapKeys = pending.get(mapId) || new Set<string>();
-      keys.forEach((key) => mapKeys.add(key));
-      pending.set(mapId, mapKeys);
-      if (exploredFlushTimerRef.current === null) {
-        exploredFlushTimerRef.current = window.setTimeout(flushExploredCells, 220);
-      }
-    },
-    [flushExploredCells],
-  );
-  useEffect(
-    () => () => {
-      flushExploredCells();
-    },
-    [flushExploredCells],
-  );
   const [showEngineEvents, setShowEngineEvents] = useState(false);
   const [showBehaviorIntents, setShowBehaviorIntents] = useState(false);
   const [showPerceptionDebug, setShowPerceptionDebug] = useState(false);
+  const [showMemoryDebug, setShowMemoryDebug] = useState(false);
   const engineEvents = usePlayStore((state) =>
     showEngineEvents || Boolean(saveData?.in_combat)
       ? state.engineEvents
@@ -2093,6 +2342,16 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   const visualConfig = SCREEN_VISUAL_PRESETS[visualPreset];
   const visualDprCap = Math.min(PLAY_DPR_MAX, visualConfig.dprCap);
   const effectivePlayDpr = Math.min(playDpr, visualDprCap);
+  const playFrameIntervalMs = PLAY_FRAME_INTERVAL_MS[visualPreset];
+  const playRenderRadius = scaleMacroDistanceToFine(
+    PLAY_RENDER_RADIUS_MACRO[visualPreset],
+  );
+  // Preset changes used to leave the adaptive probe's raw DPR above the
+  // effective cap. It then caused repeated heavyweight Play re-renders while
+  // spending many checks reducing a value that could not affect the canvas.
+  useEffect(() => {
+    setPlayDpr(visualDprCap);
+  }, [visualDprCap]);
   const cutsceneJumpsRef = useRef(0);
   const activeCellByCoord = useMemo(() => {
     const lookup = new Map<string, CellData>();
@@ -2126,6 +2385,29 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   const activeMapDelta = activeMap
     ? saveData?.map_deltas?.[activeMap.id]
     : undefined;
+  const activeExploredSource = activeMap
+    ? saveData?.explored_cells?.[activeMap.id] || EMPTY_EXPLORED_CELL_KEYS
+    : EMPTY_EXPLORED_CELL_KEYS;
+  const activeExploredCells = useMemo(
+    () => (activeMap ? [...activeExploredSource] : EMPTY_EXPLORED_CELL_KEYS),
+    [activeMap?.id, activeExploredSource],
+  );
+  const rendererExploredCells = useMemo<Record<string, string[]>>(
+    () => (activeMap ? { [activeMap.id]: activeExploredCells } : {}),
+    [activeMap?.id, activeExploredCells],
+  );
+  const activeVisualEnvironmentSignature =
+    visualEnvironmentFieldsSignature(activeMapDelta);
+  const activeVisualEnvironmentFields = useMemo(() => {
+    const result: NonNullable<MapDelta["environment_fields"]> = {};
+    Object.entries(activeMapDelta?.environment_fields || {}).forEach(
+      ([cellKey, fields]) => {
+        const visibleFields = fields.filter((field) => field.kind !== "sound");
+        if (visibleFields.length > 0) result[cellKey] = visibleFields;
+      },
+    );
+    return result;
+  }, [activeVisualEnvironmentSignature]);
   const activePlacementDelta = useMemo<MapDelta | undefined>(() => {
     if (!activeMapDelta) return undefined;
     return {
@@ -2140,6 +2422,58 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     activeMapDelta?.removed_objects,
     activeMapDelta?.carried_objects,
   ]);
+  // Exploration and hearing update bookkeeping inside entity_states much
+  // more often than an actor's visible representation changes. Feed the 3D
+  // tree a stable render-only projection so energy/search counters cannot
+  // remount or transform every entity during each fine-grid player step.
+  const rendererEntityStatesSignature = useMemo(
+    () =>
+      Object.entries(saveData?.entity_states || {})
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, state]: [string, any]) => {
+          const behavior = showBehaviorIntents
+            ? JSON.stringify(state?.behavior_intent || null)
+            : "";
+          return [
+            key,
+            state?.cell?.[0] ?? "",
+            state?.cell?.[1] ?? "",
+            state?.facing?.[0] ?? "",
+            state?.facing?.[1] ?? "",
+            state?.dead ? 1 : 0,
+            state?.hidden ? 1 : 0,
+            state?.hp ?? "",
+            behavior,
+          ].join(":");
+        })
+        .join("|"),
+    [saveData?.entity_states, showBehaviorIntents],
+  );
+  const rendererEntityStates = useMemo<Record<string, any>>(
+    () =>
+      Object.fromEntries(
+        Object.entries(saveData?.entity_states || {}).map(
+          ([key, state]: [string, any]) => [
+            key,
+            {
+              cell: state?.cell
+                ? [state.cell[0], state.cell[1]]
+                : undefined,
+              facing: state?.facing
+                ? [state.facing[0], state.facing[1]]
+                : undefined,
+              dead: Boolean(state?.dead),
+              hidden: Boolean(state?.hidden),
+              hp: state?.hp,
+              behavior_intent: showBehaviorIntents
+                ? state?.behavior_intent
+                : undefined,
+            },
+          ],
+        ),
+      ),
+    [rendererEntityStatesSignature],
+  );
   const isDoorOpenForPlay = useCallback(
     (placement: ObjectPlacementData) => isDoorPlacementOpen(activePlacementDelta, placement),
     [activePlacementDelta],
@@ -2168,6 +2502,17 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     });
     return blocked;
   }, [effectiveObjectPlacements, isDoorOpenForPlay, objectByIdForPlay]);
+  const stableMemoryPlacementCells = useMemo(() => {
+    const structure = new Set<string>();
+    effectiveObjectPlacements.forEach((placement) => {
+      const object = objectByIdForPlay.get(placement.object_id);
+      if (!isStableMemoryStructureObject(object)) return;
+      getPlacementFootprint(placement, object).forEach(([x, z]) => {
+        structure.add(playCellKey(x, z));
+      });
+    });
+    return structure;
+  }, [effectiveObjectPlacements, objectByIdForPlay]);
   // Containers occupy their whole MACRO tile on the fine grid (their cell is
   // the tile's center fine cell), so lookups key on the macro tile.
   const containerByCoord = useMemo(() => {
@@ -2258,6 +2603,8 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   const handleMoveRef = useRef<((dx: number, dz: number) => void) | null>(null);
   const handleActRef = useRef<(() => void) | null>(null);
   const waitRef = useRef<(() => void) | null>(null);
+  const toggleStealthRef = useRef<(() => void) | null>(null);
+  const stealthMoveReadyAtRef = useRef(0);
   const pendingLevelUps = getPendingLevelUps(saveData);
   const levelUpOpen = pendingLevelUps > 0;
   const levelUpOpenRef = useRef(false);
@@ -2311,6 +2658,22 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       });
     },
     [pulseForSfx],
+  );
+  const presentStealthActionBlock = useCallback(
+    (action: StealthBlockedAction = "act") => {
+      const currentSave = usePlayStore.getState().saveData;
+      if (!isPlayerStealthActive(currentSave)) return false;
+      const message = stealthBlockedActionMessage(action);
+      playSfx("warning", { volume: 0.24, cooldownMs: 160 });
+      addLog(message);
+      if (currentSave) {
+        useFxStore
+          .getState()
+          .addPopup(currentSave.player.cell, "Exit stealth", "#c4b5fd", 1.35);
+      }
+      return true;
+    },
+    [addLog, playSfx],
   );
   const alderamonticoGridStepRef = useRef("");
   const alderamonticoGridNoticeRef = useRef("");
@@ -3133,6 +3496,12 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     (x: number, z: number) => {
       if (!targetingSkillId || !saveData || !activeMap) return;
       if (levelUpOpenRef.current) return;
+      if (isPlayerStealthActive(saveData)) {
+        setTargetingSkillId(null);
+        setHoveredCell(null);
+        presentStealthActionBlock("skill");
+        return;
+      }
       const skill = gamePackage.abilities.find(
         (s) => s.id === targetingSkillId,
       );
@@ -3204,6 +3573,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       targetingSkillId,
       saveData,
       activeMap,
+      presentStealthActionBlock,
       computeTargetPattern,
       gamePackage,
       hoveredCell,
@@ -3228,6 +3598,10 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       const save = usePlayStore.getState().saveData;
       if (!save || save.playerStats.hp <= 0) return;
       if (getPendingLevelUps(save) > 0) return;
+      if (isPlayerStealthActive(save)) {
+        presentStealthActionBlock("skill");
+        return;
+      }
       const actor = getControlledActor(save, gamePackage);
       if (!actor) return; // an enemy is acting
       const skill = gamePackage.abilities.find((s) => s.id === skillId);
@@ -3256,7 +3630,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         `${actor.isPlayer ? "Aiming" : `${actor.name} readies`} ${skill.display_name} — tap a tile, tap again to cast.`,
       );
     },
-    [gamePackage, addLog, playSfx],
+    [gamePackage, addLog, playSfx, presentStealthActionBlock],
   );
 
   const targetingSkillIdRef = useRef<string | null>(null);
@@ -3271,18 +3645,23 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   const combatInputLockUntilRef = useRef(0);
   const combatInputNeedsReleaseRef = useRef(false);
   const combatInputHeldKeysRef = useRef<Set<string>>(new Set());
+  // A quick two-key chord can be released before the RAF loop opens its
+  // diagonal buffer. Remember every key consumed by that one tap so the
+  // second keyup cannot accidentally commit a second movement step.
+  const consumedMovementTapKeysRef = useRef<Set<string>>(new Set());
   const activeCombatTurnRef = useRef<string | null>(null);
   const repeatStateRef = useRef({
     dx: 0,
     dz: 0,
-    startTime: 0,
-    lastTick: 0,
+    nextTick: 0,
     bufferStart: 0,
     active: false,
+    wait: false,
   });
   const resetRepeatInputState = useCallback(() => {
     repeatStateRef.current.active = false;
     repeatStateRef.current.bufferStart = 0;
+    repeatStateRef.current.nextTick = 0;
   }, []);
   const releaseCombatInputGateIfReady = useCallback((time = inputNow()) => {
     if (time < combatInputLockUntilRef.current) return false;
@@ -3304,10 +3683,6 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   }, [activeCutscene]);
 
   useEffect(() => {
-    setPlayDpr(visualDprCap);
-  }, [visualDprCap]);
-
-  useEffect(() => {
     levelUpOpenRef.current = levelUpOpen;
     inputBlockedRef.current = Boolean(
       activeCutscene?.is_blocking ||
@@ -3316,6 +3691,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         showSkills ||
         showSaveMenu ||
         showJournal ||
+        successionNoticeOpen ||
         targetingSkillId ||
         activeDialogueId ||
         activeShopId ||
@@ -3332,6 +3708,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     showSkills,
     showSaveMenu,
     showJournal,
+    successionNoticeOpen,
     targetingSkillId,
     activeDialogueId,
     activeShopId,
@@ -3372,6 +3749,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   // inputs can't re-fire the moment the panel closes.
   const clearInputState = () => {
     keysDownRef.current.clear();
+    consumedMovementTapKeysRef.current.clear();
     joystickKeysRef.current.forEach((k) => simulateKey(k, false));
     joystickKeysRef.current.clear();
     combatInputHeldKeysRef.current.clear();
@@ -3381,6 +3759,102 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     resetRepeatInputState();
     setJoystickVis({ visible: false, baseX: 0, baseY: 0, thumbX: 0, thumbY: 0 });
   };
+
+  const toggleStealthMode = () => {
+    const currentSave = usePlayStore.getState().saveData;
+    if (!currentSave || currentSave.playerStats.hp <= 0) return;
+    // Target cursors are deliberately cancellable by the stance control. Other
+    // modal panels remain authoritative and cannot be acted through.
+    if (
+      activeCutscene?.is_blocking ||
+      levelUpOpen ||
+      showInventory ||
+      showSkills ||
+      showSaveMenu ||
+      showJournal ||
+      successionNoticeOpen ||
+      activeDialogueId ||
+      activeShopId ||
+      activeDocumentId ||
+      activeContainerId ||
+      activeAttendNodePanel
+    ) {
+      return;
+    }
+
+    const entering = !isPlayerStealthActive(currentSave);
+    clearInputState();
+    setTargetingSkillId(null);
+    setVerbTargeting(null);
+    setHoveredCell(null);
+    setVerbFeedback(null);
+    stealthMoveReadyAtRef.current = 0;
+    commitRuntimeSave(togglePlayerStealth(currentSave));
+    playSfx("ui_click", {
+      volume: entering ? 0.22 : 0.18,
+      playbackRate: entering ? 0.78 : 1.08,
+      cooldownMs: 120,
+    });
+    useFxStore
+      .getState()
+      .addPopup(
+        currentSave.player.cell,
+        entering ? "Stealth" : "Normal stance",
+        entering ? "#c4b5fd" : "#93c5fd",
+        1.45,
+      );
+    addLog(
+      entering
+        ? "Stealth mode active. Movement is slower and quieter. Exit stealth mode to act."
+        : "Stealth mode ended. Actions restored.",
+    );
+  };
+  toggleStealthRef.current = toggleStealthMode;
+
+  // Death is an atomic campaign transition, not a destructive run reset. The
+  // pure operator is naturally idempotent, so React replay and browser refresh
+  // cannot create duplicate deaths, ghosts, bundles, or successors.
+  useEffect(() => {
+    if ((saveData?.playerStats.hp ?? 1) > 0) return;
+    const current = usePlayStore.getState().saveData;
+    if (!current) return;
+    const transition = transitionIntercessorOnDeath(baseGamePackage, current);
+    if (!transition.changed || !transition.deceased || !transition.successor) return;
+
+    clearInputState();
+    setActiveCutscene(null);
+    setCutsceneActionIndex(0);
+    setCameraFocusOverride(null);
+    setShowInventory(false);
+    setShowSkills(false);
+    setShowSaveMenu(false);
+    setShowJournal(false);
+    setTargetingSkillId(null);
+    setVerbTargeting(null);
+    setActiveDocumentId(null);
+    setActiveAttendNodePanel(null);
+    endDialogue();
+    closeShop();
+    closeContainer();
+    commitRuntimeSave(transition.save);
+    const successorMap = baseGamePackage.maps.find(
+      (map) => map.id === transition.save.current_map_id,
+    );
+    if (successorMap) setActiveMap(successorMap);
+    addLog(
+      `${transition.deceased.display_name} died. ${transition.successor.display_name} takes up the expedition record.`,
+    );
+    playSfx("enemy_defeat", { volume: 0.55, cooldownMs: 250 });
+  }, [
+    addLog,
+    baseGamePackage,
+    closeContainer,
+    closeShop,
+    commitRuntimeSave,
+    endDialogue,
+    playSfx,
+    saveData?.playerStats.hp,
+  ]);
 
   useEffect(() => {
     const activeTurn = saveData?.in_combat
@@ -3401,11 +3875,15 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     // Suppress only keyboard keys physically held at the turn boundary.
     // A carried-over key should not auto-spend the new turn, but it also
     // should not block a fresh different direction.
-    // Joystick keys live in combatInputHeldKeysRef (not keysDownRef) and are
-    // continuously re-fired by pointer events, so including them here would
-    // permanently lock the gate — the joystick never "releases".
+    // Virtual joystick directions temporarily share keysDownRef, but they do
+    // not have a physical keyboard keyup at this boundary. Exclude the keys
+    // tracked by joystickKeysRef or the next pointer gesture can be swallowed.
     const heldKeyboardKeys = new Set(
-      [...keysDownRef.current].filter(isMovementCommandKey),
+      [...keysDownRef.current].filter(
+        (key) =>
+          isMovementCommandKey(key) &&
+          !joystickKeysRef.current.has(key),
+      ),
     );
     activeCombatTurnRef.current = activeTurn;
     clearInputState();
@@ -4020,6 +4498,35 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           () => usePlayStore.getState().setFlag(action.switch_id, action.switch_value ?? true),
         );
         finishAction();
+      } else if (action.type === "unlock_topic") {
+        const save = usePlayStore.getState().saveData;
+        if (save) {
+          let nextSave = initializeDialogueMemory(getRuntimeGamePackage(), save);
+          let learned = false;
+          if (action.topic_id) {
+            const discovery = discoverDialogueTopic(
+              getRuntimeGamePackage(),
+              nextSave,
+              action.topic_id,
+              `cutscene:${activeCutscene.id}`,
+            );
+            nextSave = discovery.save;
+            learned = learned || discovery.discovered;
+          }
+          if (action.dynamic_topic_id) {
+            const discovery = discoverDynamicDialogueTopic(
+              getRuntimeGamePackage(),
+              nextSave,
+              action.dynamic_topic_id,
+              `cutscene:${activeCutscene.id}`,
+            );
+            nextSave = discovery.save;
+            learned = learned || discovery.discovered;
+          }
+          commitRuntimeSave(nextSave);
+          if (learned) addLog("A new conversation topic has been remembered.");
+        }
+        finishAction();
       } else if (action.type === "move_player") {
         if (action.cell) {
           const save = usePlayStore.getState().saveData;
@@ -4378,6 +4885,36 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           cooldownMs: 30,
         });
         finishAction();
+      } else if (action.type === "emit_sound") {
+        const save = usePlayStore.getState().saveData;
+        if (save) {
+          const sourceCell: [number, number] = action.cell
+            ? [action.cell[0], action.cell[1]]
+            : [save.player.cell[0], save.player.cell[1]];
+          const soundResult = dispatchV1EmitSound({
+            gamePackage: getRuntimeGamePackage(),
+            save,
+            mapId: action.map_id || save.current_map_id,
+            actorId: action.entity_id || "script",
+            cell: sourceCell,
+            loudness: scaleMacroDistanceToFine(action.sound_loudness ?? 3),
+            tag: action.sound_tag || "scripted_sound",
+            materialTag: action.sound_material_tag,
+            sourceCategory: action.sound_category || "scripted_event",
+            sourceEntityId: action.entity_id,
+            sourceAction: "scripted_event",
+            revealsIdentity:
+              action.reveals_identity === true && Boolean(action.entity_id),
+            durationTicks: action.sound_duration_ticks ?? 8,
+            tags: ["scripted", ...(action.stimulus_tags || [])],
+            compactPropagation: true,
+          });
+          if (soundResult.ok) {
+            commitRuntimeSave(soundResult.save);
+            usePlayStore.getState().pushEngineEvents(soundResult.events);
+          }
+        }
+        finishAction();
       } else if (action.type === "screen_fade") {
         const duration = action.duration ?? 600;
         setScreenFade({
@@ -4564,16 +5101,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         return;
       }
 
-      let ax = 0;
-      let az = 0;
-      let wait = false;
       const keys = keysDownRef.current;
-
-      if (keys.has("arrowup") || keys.has("w")) az -= 1;
-      if (keys.has("arrowdown") || keys.has("s")) az += 1;
-      if (keys.has("arrowleft") || keys.has("a")) ax -= 1;
-      if (keys.has("arrowright") || keys.has("d")) ax += 1;
-      if (keys.has("z") || keys.has(".")) wait = true;
+      const { ax, az, wait } = resolveHeldMovementIntent(
+        keys,
+        consumedMovementTapKeysRef.current,
+      );
 
       const isPressing = ax !== 0 || az !== 0 || wait;
 
@@ -4582,6 +5114,15 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           ax,
           az,
           cameraAzimuthRef.current,
+        );
+        const stealthSpeedMultiplier = isPlayerStealthActive(currentSave)
+          ? resolveMovementHearingSettings(getRuntimeGamePackage())
+              .stealth_speed_multiplier
+          : 1;
+        const repeatIntervalMs = getNormalizedMovementRepeatIntervalMs(
+          MOVEMENT_REPEAT_INTERVAL_MS / stealthSpeedMultiplier,
+          rx,
+          rz,
         );
 
         const state = repeatStateRef.current;
@@ -4596,18 +5137,27 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           }
         }
 
-        if (!state.active || state.dx !== rx || state.dz !== rz) {
+        if (!state.active) {
           state.active = true;
           state.dx = rx;
           state.dz = rz;
-          state.startTime = time;
-          state.lastTick = time;
+          state.wait = wait;
+          state.nextTick =
+            time + MOVEMENT_REPEAT_START_MS / stealthSpeedMultiplier;
           if (wait) {
             if (waitRef.current) waitRef.current();
           } else {
             if (handleMoveRef.current && (rx !== 0 || rz !== 0))
               handleMoveRef.current(rx, rz);
           }
+        } else if (state.dx !== rx || state.dz !== rz || state.wait !== wait) {
+          // Adding or releasing one half of a chord changes direction without
+          // spending an extra immediate step. Resume at the normalized held
+          // cadence instead of lunging as each physical key is released.
+          state.dx = rx;
+          state.dz = rz;
+          state.wait = wait;
+          state.nextTick = time + repeatIntervalMs;
         } else {
           // Combat uses the same held fine-step movement as exploration. A
           // player/party actor switch still flushes carried input below, so a
@@ -4616,21 +5166,16 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           const enemyNearby = isEnemyNearbyRef.current
             ? isEnemyNearbyRef.current()
             : false;
-          if (inCombat || !enemyNearby) {
-            const holdDuration = time - state.startTime;
-            if (holdDuration > MOVEMENT_REPEAT_START_MS) {
-              const tickDiff = time - state.lastTick;
-              if (tickDiff >= MOVEMENT_REPEAT_INTERVAL_MS) {
-                state.lastTick +=
-                  MOVEMENT_REPEAT_INTERVAL_MS *
-                  Math.max(1, Math.floor(tickDiff / MOVEMENT_REPEAT_INTERVAL_MS));
-                if (wait) {
-                  if (waitRef.current) waitRef.current();
-                } else {
-                  if (handleMoveRef.current && (rx !== 0 || rz !== 0))
-                    handleMoveRef.current(rx, rz);
-                }
-              }
+          if ((inCombat || !enemyNearby) && time >= state.nextTick) {
+            // Schedule from the frame that actually committed the step. A
+            // slow render must never be repaid with a burst of simulation
+            // commands on the following frames.
+            state.nextTick = time + repeatIntervalMs;
+            if (wait) {
+              if (waitRef.current) waitRef.current();
+            } else {
+              if (handleMoveRef.current && (rx !== 0 || rz !== 0))
+                handleMoveRef.current(rx, rz);
             }
           }
         }
@@ -4643,6 +5188,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
 
     const handleKeyDown = (e: KeyboardEvent) => {
       const key = e.key.toLowerCase();
+      if (!e.repeat && isMovementCommandKey(key)) {
+        consumedMovementTapKeysRef.current.delete(key);
+      }
       const target = e.target as HTMLElement | null;
       const targetTag = target?.tagName;
       const targetIsFormControl =
@@ -4719,6 +5267,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           case "i":
             setShowInventory((prev) => !prev);
             break;
+          case "c":
+            toggleStealthRef.current?.();
+            break;
           case "q":
             setCameraQuarterTurns((turns) => turns + 1);
             resetRepeatInputState();
@@ -4736,6 +5287,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       const pendingTap =
         isMovementCommandKey(key) &&
         keysDownRef.current.has(key) &&
+        !consumedMovementTapKeysRef.current.has(key) &&
         !repeatStateRef.current.active &&
         !inputBlockedRef.current &&
         !isCombatInputGateActive();
@@ -4745,16 +5297,20 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       // animation frame (especially while a costly render is finishing), so
       // commit it here even when the buffer never got a chance to start.
       if (pendingTap) {
-        if (key === "z" || key === ".") {
+        const heldKeys = keysDownRef.current;
+        const { ax, az, wait } = resolveHeldMovementIntent(
+          heldKeys,
+          consumedMovementTapKeysRef.current,
+        );
+
+        keysDownRef.current.forEach((heldKey) => {
+          if (isMovementCommandKey(heldKey)) {
+            consumedMovementTapKeysRef.current.add(heldKey);
+          }
+        });
+        if (wait) {
           waitRef.current?.();
         } else {
-          let ax = 0;
-          let az = 0;
-          const heldKeys = keysDownRef.current;
-          if (heldKeys.has("arrowup") || heldKeys.has("w")) az -= 1;
-          if (heldKeys.has("arrowdown") || heldKeys.has("s")) az += 1;
-          if (heldKeys.has("arrowleft") || heldKeys.has("a")) ax -= 1;
-          if (heldKeys.has("arrowright") || heldKeys.has("d")) ax += 1;
           const [rx, rz] = getCameraRelativeGridMove(
             ax,
             az,
@@ -4768,15 +5324,23 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       }
 
       keysDownRef.current.delete(key);
+      consumedMovementTapKeysRef.current.delete(key);
       if (isMovementCommandKey(key)) {
         combatInputHeldKeysRef.current.delete(key);
         releaseCombatInputGateIfReady();
+        if (![...keysDownRef.current].some(isMovementCommandKey)) {
+          // Do not leave a released direction active until the next RAF. A
+          // fast opposite-direction tap can arrive in that gap and must be
+          // treated as a fresh one-step input.
+          resetRepeatInputState();
+        }
       }
     };
 
     const clearHeldInput = () => {
       keysDownRef.current.clear();
       combatInputHeldKeysRef.current.clear();
+      consumedMovementTapKeysRef.current.clear();
       resetRepeatInputState();
       releaseCombatInputGateIfReady();
     };
@@ -4858,10 +5422,24 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             (gamePackage.settings?.initial_known_skills as string[] | undefined) || [],
           startingPartyMembers:
             (gamePackage.settings?.starting_party_members as string[] | undefined) || [],
+          initialFlags: gamePackage.switches || {},
         },
       );
+      // `initSave` publishes a legacy-compatible top-level save first. On a
+      // brand-new run all campaign/layer dependency fields are still absent,
+      // so the normalization effect above cannot observe a field-level change
+      // from the preceding `null` save. Normalize synchronously after creation
+      // so the first rendered expedition always has its stable Intercessor and
+      // explicit authored/campaign/expedition layers.
+      const initializedSave = usePlayStore.getState().saveData;
+      if (initializedSave) {
+        commitRuntimeSave(
+          normalizeIntercessorCampaign(gamePackage, initializedSave),
+        );
+      }
     }
   }, [
+    commitRuntimeSave,
     gamePackage.maps,
     gamePackage.metadata.version,
     saveData?.current_map_id,
@@ -5106,6 +5684,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
               hp: saved.hp ?? def?.max_hp ?? 10,
               energy: saved.energy ?? 0,
               isDead: !!saved.dead || !!saved.hidden,
+              facing: (saved.facing || p.facing || [0, 1]) as [number, number],
                     };
                   })
                   .filter((n) => {
@@ -5240,6 +5819,10 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         if (playerEnergy >= 1000 && !readyNpc) break;
 
         if (readyNpc) {
+          const turnStartCell: [number, number] = [
+            readyNpc.cell[0],
+            readyNpc.cell[1],
+          ];
           readyNpc.energy -= npcFineActionEnergy;
           const behavior = resolveAlderamonticoBehavior(
             sData,
@@ -5466,6 +6049,16 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             fleeOneStep([danger[0], danger[1]]);
             updateTask("done");
           } else if (decision.action === "attack" || decision.action === "confront") {
+            const facingTarget = decision.target_cell || playerCell;
+            if (
+              facingTarget[0] !== readyNpc.cell[0] ||
+              facingTarget[1] !== readyNpc.cell[1]
+            ) {
+              readyNpc.facing = combatPrimaryDirection(
+                [readyNpc.cell[0], readyNpc.cell[1]],
+                [facingTarget[0], facingTarget[1]],
+              );
+            }
             if (areAdjacentMacro([readyNpc.cell[0], readyNpc.cell[1]], [playerCell[0], playerCell[1]])) {
               const dmg = Math.max(
                 1,
@@ -5547,9 +6140,19 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
               ].slice(-24),
             };
           }
+          if (
+            readyNpc.cell[0] !== turnStartCell[0] ||
+            readyNpc.cell[1] !== turnStartCell[1]
+          ) {
+            readyNpc.facing = combatPrimaryDirection(
+              turnStartCell,
+              [readyNpc.cell[0], readyNpc.cell[1]],
+            );
+          }
           nextEntities[readyNpc.key] = {
             ...recordedState,
             cell: readyNpc.cell,
+            facing: readyNpc.facing,
             energy: readyNpc.energy,
             hp: readyNpc.hp,
             dead: readyNpc.isDead,
@@ -5609,26 +6212,62 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       };
   };
 
-  const pumpEngine = () => {
-    const state = usePlayStore.getState();
-    const pumped = buildExplorationPumpState(state);
-    if (pumped) usePlayStore.setState(pumped);
-    // World has settled for this turn — check for an overheard exchange.
-    maybeFireBarks();
-  };
+  const automaticPumpTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
-    // Automatically pump engine if player energy drops below 1000.
-    // The pump is suspended while the combat queue is running.
-    if (
+    // Movement settles energy and nearby NPCs atomically in handleMove. Other
+    // full-cost verbs can still leave the player below the action threshold,
+    // so keep this fallback — but never publish another save synchronously from
+    // the effect that observed the previous save. A synchronous pump can cause
+    // React -> Zustand -> React to recurse until the maximum update depth is
+    // reached when a busy NPC settlement needs more than one pass.
+    const shouldPump =
       saveData &&
       !saveData.in_combat &&
+      !activeCutscene &&
+      !activeDialogueId &&
+      !activeDocumentId &&
+      !activeShopId &&
+      !activeContainerId &&
       (saveData.playerStats.energy || 0) < 1000 &&
-      (saveData.playerStats.hp || 0) > 0
-    ) {
-      pumpEngine();
-    }
-  }, [saveData?.playerStats.energy, saveData?.playerStats.hp, activeMap, saveData?.in_combat]);
+      (saveData.playerStats.hp || 0) > 0;
+    if (!shouldPump || automaticPumpTimerRef.current !== null) return undefined;
+
+    automaticPumpTimerRef.current = window.setTimeout(() => {
+      automaticPumpTimerRef.current = null;
+      const state = usePlayStore.getState();
+      const currentSave = state.saveData;
+      if (
+        !currentSave ||
+        currentSave.in_combat ||
+        (currentSave.playerStats.energy || 0) >= 1000 ||
+        (currentSave.playerStats.hp || 0) <= 0
+      ) {
+        return;
+      }
+      const pumped = buildExplorationPumpState(state);
+      if (pumped) usePlayStore.setState(pumped);
+      // World has settled for this turn — check for an overheard exchange.
+      window.setTimeout(maybeFireBarks, 0);
+    }, 0);
+
+    return () => {
+      if (automaticPumpTimerRef.current !== null) {
+        window.clearTimeout(automaticPumpTimerRef.current);
+        automaticPumpTimerRef.current = null;
+      }
+    };
+  }, [
+    activeContainerId,
+    activeCutscene,
+    activeDialogueId,
+    activeDocumentId,
+    activeMap,
+    activeShopId,
+    saveData?.in_combat,
+    saveData?.playerStats.energy,
+    saveData?.playerStats.hp,
+  ]);
 
   const performWait = useCallback(() => {
     const save = usePlayStore.getState().saveData;
@@ -5685,6 +6324,8 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     )
       return;
 
+    if (presentStealthActionBlock("talk")) return;
+
     const partyMemberId = currentSave.party_members?.[0];
     if (!partyMemberId) return;
 
@@ -5693,10 +6334,15 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       partyMember?.party_dialogue_id || partyMember?.dialogue_id;
     const dialogue = gamePackage.dialogue.find((d) => d.id === partyDialogueId);
 
-    if (dialogue?.nodes.length) {
+    if (dialogueCanStart(dialogue)) {
       clearInputState();
       completeTalkObjectivesForEntity(partyMemberId, currentSave);
-      usePlayStore.getState().startDialogue(dialogue.id, dialogue.nodes[0].id);
+      usePlayStore
+        .getState()
+        .startDialogue(dialogue!.id, dialogueEntryNodeId(dialogue!), {
+          participantKey: `party:${partyMemberId}`,
+          participantEntityId: partyMemberId,
+        });
       playSfx("dialogue_open", { volume: 0.32, cooldownMs: 120 });
       addLog(`Spoke with ${partyMember?.display_name || "party member"}.`);
     }
@@ -5710,6 +6356,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     completeTalkObjectivesForEntity,
     addLog,
     playSfx,
+    presentStealthActionBlock,
   ]);
 
   // One melee strike from the controlled actor against a hostile. In combat
@@ -5723,6 +6370,13 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     ): boolean => {
       const currentSave = usePlayStore.getState().saveData;
       if (!currentSave) return false;
+      if (
+        isPlayerStealthActive(currentSave) &&
+        (attacker.isPlayer || (currentSave.party_members || []).includes(attacker.key))
+      ) {
+        presentStealthActionBlock("attack");
+        return false;
+      }
       const gp = getRuntimeGamePackage();
       if (currentSave.in_combat && activeMap) {
         const targetState = currentSave.entity_states?.[targetKey] || {};
@@ -5797,6 +6451,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       handleEnemyDefeatedExperience,
       presentImmersiveCombatAttackOutcome,
       presentMeleeOutcome,
+      presentStealthActionBlock,
       playSfx,
     ],
   );
@@ -5806,6 +6461,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     if (!currentSave || !activeMap) return false;
     if (currentSave.playerStats.hp <= 0) return false;
     if (getPendingLevelUps(currentSave) > 0) return false;
+    if (presentStealthActionBlock("attack")) return false;
     const gp = getRuntimeGamePackage();
     const actor = getControlledActor(currentSave, gp);
     if (!actor) return false;
@@ -5840,13 +6496,14 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     );
     if (attacked && currentSave.in_combat) advanceCombatTurnCore();
     return attacked;
-  }, [activeMap, addLog, advanceCombatTurnCore, executeMeleeAttack, playSfx]);
+  }, [activeMap, addLog, advanceCombatTurnCore, executeMeleeAttack, playSfx, presentStealthActionBlock]);
 
   const executeCombatShove = useCallback((): boolean => {
     const currentSave = usePlayStore.getState().saveData;
     if (!activeMap || !currentSave?.in_combat) return false;
     if (currentSave.playerStats.hp <= 0) return false;
     if (getPendingLevelUps(currentSave) > 0) return false;
+    if (presentStealthActionBlock("attack")) return false;
 
     const gp = getRuntimeGamePackage();
     const actor = getControlledActor(currentSave, gp);
@@ -5918,6 +6575,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     handleEnemyDefeatedExperience,
     playSfx,
     presentCombatShoveOutcome,
+    presentStealthActionBlock,
   ]);
 
   // Player-set overwatch (Stage 6): spend the turn to arm a reactive zone.
@@ -5929,6 +6587,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     if (!activeMap || !currentSave?.in_combat) return false;
     if (currentSave.playerStats.hp <= 0) return false;
     if (getPendingLevelUps(currentSave) > 0) return false;
+    if (presentStealthActionBlock("attack")) return false;
     if (currentSave.active_turn_id !== "player") return false;
     if (currentSave.flags?.immersive_overwatch_player) {
       playSfx("warning", { volume: 0.22, cooldownMs: 160 });
@@ -5952,7 +6611,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     );
     advanceCombatTurnCore();
     return true;
-  }, [activeMap, addLog, advanceCombatTurnCore, commitRuntimeSave, playSfx]);
+  }, [activeMap, addLog, advanceCombatTurnCore, commitRuntimeSave, playSfx, presentStealthActionBlock]);
 
   const handleMove = useCallback(
     (dx: number, dz: number) => {
@@ -5975,6 +6634,17 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       const inCombat = !!currentSave.in_combat;
       const actor = getControlledActor(currentSave, gp);
       if (!actor) return; // an enemy is acting
+      const actorUsesStealth = isActorUsingStealthStance(currentSave, actor.key);
+      const throttleStealthMovement = actor.isPlayer && actorUsesStealth;
+      const stealthMoveIntervalMs = throttleStealthMovement
+        ? MOVEMENT_REPEAT_INTERVAL_MS /
+          resolveMovementHearingSettings(gp).stealth_speed_multiplier
+        : 0;
+      if (
+        throttleStealthMovement &&
+        inputNow() < stealthMoveReadyAtRef.current
+      )
+        return;
       if (!inCombat && (currentSave.playerStats.energy || 0) < ENERGY_PER_FINE_STEP) return;
 
       const actorCell = actor.cell;
@@ -5995,7 +6665,10 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         // Exploration walking costs energy per macro tile of distance — a
         // fine step is a third of the legacy step price (§4.4).
         energyCost: actor.isPlayer && !inCombat ? ENERGY_PER_FINE_STEP : 0,
-        allowDoorwayAssist: actor.isPlayer && !inCombat,
+        // A doorway assist is an interaction, not quiet repositioning. In
+        // stealth the closed door remains a bump until the player exits the
+        // stance and deliberately acts on it.
+        allowDoorwayAssist: actor.isPlayer && !inCombat && !actorUsesStealth,
       });
       if (movementCommand.ok) {
         const resolvedCell = actor.isPlayer
@@ -6014,15 +6687,26 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       // still owned by PlayMode. Actors are FINE_PER_MACRO² footprints, so
       // every cell of the destination footprint is checked.
       let blocked = !movementCommand.ok;
+      const contactedArchitecture = new Set<string>();
       for (const [fx, fz] of actorFootprintCells([nx, nz])) {
         const footCell = getActiveCell(fx, fz);
+        const stepTooHigh = Boolean(
+          footCell &&
+            getJamEngineVisualHeight(footCell) -
+              getJamEngineVisualHeight(currentCell) >
+              1,
+        );
         if (
           !footCell ||
           !footCell.walkable ||
-          getJamEngineVisualHeight(footCell) -
-            getJamEngineVisualHeight(currentCell) >
-            1
+          stepTooHigh
         ) {
+          if (
+            footCell &&
+            (!footCell.walkable || footCell.blocks_los || stepTooHigh)
+          ) {
+            contactedArchitecture.add(fineCoordKey(fx, fz));
+          }
           blocked = true;
           break;
         }
@@ -6034,11 +6718,17 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
               (o) => o.id === footCell.object_id,
             );
           if (cellObjDef && cellObjDef.collision?.profile !== "none") {
+            if (isStableMemoryStructureObject(cellObjDef)) {
+              contactedArchitecture.add(fineCoordKey(fx, fz));
+            }
             blocked = true;
             break;
           }
         }
         if (isBlockedByPlacement(fx, fz)) {
+          if (stableMemoryPlacementCells.has(playCellKey(fx, fz))) {
+            contactedArchitecture.add(fineCoordKey(fx, fz));
+          }
           blocked = true;
           break;
         }
@@ -6128,6 +6818,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         if (entityData) {
           faceActor(newFacing);
 
+          if (actorUsesStealth) {
+            presentStealthActionBlock(entityData.is_npc ? "talk" : "attack");
+            return;
+          }
+
           if (entityData.is_npc) {
             // Mid-combat there is no time for talk — the NPC just blocks.
             if (actor.isPlayer && !inCombat && entityData.dialogue_id) {
@@ -6136,12 +6831,15 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                 .gamePackage.dialogue.find(
                   (d) => d.id === entityData.dialogue_id,
                 );
-              if (dialogue && dialogue.nodes.length > 0) {
+              if (dialogueCanStart(dialogue)) {
                 clearInputState();
                 completeTalkObjectivesForEntity(entityData.id, currentSave);
                 usePlayStore
                   .getState()
-                  .startDialogue(dialogue.id, dialogue.nodes[0].id);
+                  .startDialogue(dialogue!.id, dialogueEntryNodeId(dialogue!), {
+                    participantKey: entityKey,
+                    participantEntityId: entityData.id,
+                  });
                 playSfx("dialogue_open", { volume: 0.32, cooldownMs: 120 });
                 addLog(`Started conversation with ${entityData.display_name}...`);
               }
@@ -6160,6 +6858,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         if (blocked) {
           faceActor(newFacing);
           if (actor.isPlayer) {
+            if (contactedArchitecture.size > 0) {
+              usePlayStore
+                .getState()
+                .markCellsExplored(activeMap.id, [...contactedArchitecture]);
+            }
             playSfx("bump", { volume: 0.24, cooldownMs: 90 });
           }
         } else {
@@ -6304,6 +7007,64 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             }
           }
 
+          // Followers are repositioned by the exploration pump instead of a
+          // core move command. Emit one compact mechanical pulse for each
+          // follower at the same macro-step cadence as the audible footstep;
+          // the collective stance rule therefore makes the entire moving
+          // party quieter without multiplying the environment-field payload
+          // on every fine-grid step.
+          const emitFollowerFootsteps =
+            actor.isPlayer &&
+            !inCombat &&
+            playerFootstepFineStepsRef.current + 1 >=
+              PLAYER_FOOTSTEP_FINE_STEP_INTERVAL;
+          if (emitFollowerFootsteps) {
+            for (const follower of latestPartyFollowersRef.current) {
+              const surface =
+                getActiveCell(follower.cell[0], follower.cell[1])?.terrain ||
+                "default";
+              const followerUsesStealth = isActorUsingStealthStance(
+                settledBaseSave,
+                follower.entity_id,
+              );
+              const followerSound = dispatchV1EmitSound({
+                gamePackage: gp,
+                save: settledBaseSave,
+                mapId: activeMap.id,
+                actorId: follower.entity_id,
+                cell: follower.cell,
+                loudness: scaleMacroDistanceToFine(
+                  movementNoiseLoudness(
+                    gp,
+                    settledBaseSave,
+                    follower.entity_id,
+                    surface,
+                  ),
+                ),
+                tag: "footstep",
+                materialTag: surface,
+                sourceCategory: followerUsesStealth
+                  ? "movement_stealth"
+                  : "movement_normal",
+                sourceEntityId: follower.entity_id,
+                sourceAction: "movement",
+                revealsIdentity: false,
+                durationTicks: 8,
+                tags: [
+                  "movement",
+                  "follower",
+                  followerUsesStealth ? "stealth" : "walking",
+                  surface,
+                ],
+                compactPropagation: true,
+              });
+              if (followerSound.ok) {
+                settledBaseSave = followerSound.save;
+                settledEvents.push(...followerSound.events);
+              }
+            }
+          }
+
           const movementStore = usePlayStore.getState();
           const pumpedMovementState =
             actor.isPlayer && !inCombat
@@ -6323,6 +7084,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           usePlayStore.getState().pushEngineEvents(settledEvents);
           if (triggeredCutscene) setActiveCutscene(triggeredCutscene);
           if (actor.isPlayer) {
+            if (actorUsesStealth) {
+              stealthMoveReadyAtRef.current = inputNow() + stealthMoveIntervalMs;
+            }
             playerFootstepFineStepsRef.current += 1;
             if (
               playerFootstepFineStepsRef.current >=
@@ -6378,9 +7142,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       getActiveCell,
       getContainerAtCell,
       isBlockedByPlacement,
+      stableMemoryPlacementCells,
       logCoreExperience,
       advanceCombatTurnCore,
       playSfx,
+      presentStealthActionBlock,
       presentWorldStateBlockFeedback,
     ],
   );
@@ -6431,6 +7197,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     const currentSave = usePlayStore.getState().saveData;
     const gp = getRuntimeGamePackage();
     if (!currentSave || !activeMap) return false;
+    if (presentStealthActionBlock("interact")) return true;
     if ((currentSave.playerStats.energy || 0) < WORKSTATION_ACTION_ENERGY_COST) {
       playSfx("warning", { volume: 0.22, cooldownMs: 120 });
       addLog("Not ready to collect.");
@@ -6470,6 +7237,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     const currentSave = usePlayStore.getState().saveData;
     const gp = getRuntimeGamePackage();
     if (!currentSave || !activeMap) return;
+    if (presentStealthActionBlock("interact")) return;
     if (currentSave.in_combat) {
       playSfx("warning", { volume: 0.22, cooldownMs: 120 });
       addLog("No time to use the workstation in combat.");
@@ -6561,6 +7329,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   const interruptWorkstationProcess = (station: SimulationWorkstationData) => {
     const currentSave = usePlayStore.getState().saveData;
     if (!currentSave || !activeMap) return;
+    if (presentStealthActionBlock("interact")) return;
     const activeProcess = getActiveProcessForWorkstation(currentSave, activeMap.id, station.id);
     if (!activeProcess) return;
     const interruptResult = dispatchV1InterruptProcess({
@@ -6716,6 +7485,13 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   const beginVerb = (kind: string) => {
     setVerbFeedback(null);
     const verb = kind as PlayModeWheelVerbKind;
+    if (
+      isPlayerStealthActive(saveData) &&
+      presentStealthActionBlock(
+        verb === "throw" ? "throw" : verb === "drop" ? "item" : "act",
+      )
+    )
+      return;
     if (saveData && activeMap) {
       const worldState = evaluateImmersiveWorldStateForSave(getRuntimeGamePackage(), saveData, {
         mapId: activeMap.id,
@@ -6753,6 +7529,19 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   const confirmVerbTarget = (x: number, z: number) => {
     const targeting = verbTargetingRef.current;
     if (!targeting) return;
+    const latestSave = usePlayStore.getState().saveData;
+    if (isPlayerStealthActive(latestSave)) {
+      setVerbTargeting(null);
+      setHoveredCell(null);
+      presentStealthActionBlock(
+        targeting.verb === "throw"
+          ? "throw"
+          : targeting.verb === "drop"
+            ? "item"
+            : "act",
+      );
+      return;
+    }
     if (!verbTargetCells.some((c) => c.x === x && c.z === z)) {
       presentImmersiveVerbFailure(targeting.verb, [x, z], "Can't target there.");
       return;
@@ -6948,6 +7737,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     if (getPendingLevelUps(saveData) > 0) return;
     if (activeCutscene && activeCutscene.is_blocking) return;
     if (activeAttendNodePanel) return;
+    if (presentStealthActionBlock("attend")) return;
     if (!attendTarget) {
       playSfx("warning", { volume: 0.22, cooldownMs: 120 });
       addLog("Face a living actor to Attend.");
@@ -7135,6 +7925,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     if (saveData.playerStats.hp <= 0) return;
     if (getPendingLevelUps(saveData) > 0) return;
     if (activeCutscene && activeCutscene.is_blocking) return;
+    if (presentStealthActionBlock("act")) return;
     
     const gp = getRuntimeGamePackage();
     const inCombat = !!saveData.in_combat;
@@ -7285,12 +8076,19 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           const dialogue = useEngineStore
             .getState()
             .gamePackage.dialogue.find((d) => d.id === entityData.dialogue_id);
-          if (dialogue && dialogue.nodes.length > 0) {
+          if (dialogueCanStart(dialogue)) {
             clearInputState();
             completeTalkObjectivesForEntity(entityData.id, saveData);
             usePlayStore
               .getState()
-              .startDialogue(dialogue.id, dialogue.nodes[0].id);
+              .startDialogue(dialogue!.id, dialogueEntryNodeId(dialogue!), {
+                participantKey: entityPlacementStateKey(
+                  activeMap.id,
+                  entityPlacement,
+                  entityIndex!,
+                ),
+                participantEntityId: entityData.id,
+              });
             playSfx("dialogue_open", { volume: 0.32, cooldownMs: 120 });
             addLog(`Started conversation with ${entityData.display_name}...`);
           } else {
@@ -7479,11 +8277,15 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         );
         return;
       }
-      if (dialogue && dialogue.nodes.length > 0) {
+      if (dialogueCanStart(dialogue)) {
         clearInputState();
         usePlayStore
           .getState()
-          .startDialogue(dialogue.id, dialogue.nodes[0].id);
+          .startDialogue(dialogue!.id, dialogueEntryNodeId(dialogue!), {
+            participantKey: `${activeMap.id}:object:${
+              placement.id || `${placement.object_id}:${placement.cell.join(":")}`
+            }`,
+          });
         playSfx("door_transition", { volume: 0.28, cooldownMs: 180 });
         playSfx("dialogue_open", { volume: 0.3, cooldownMs: 120 });
         addLog(`Knocked at ${placementObject?.display_name || "Doorway"}...`);
@@ -7497,13 +8299,21 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       const dialogue = useEngineStore
         .getState()
         .gamePackage.dialogue.find((d) => d.id === placement.dialogue_id);
-      if (dialogue && dialogue.nodes.length > 0) {
+      if (dialogueCanStart(dialogue)) {
         clearInputState();
         usePlayStore
           .getState()
-          .startDialogue(dialogue.id, dialogue.nodes[0].id);
+          .startDialogue(dialogue!.id, dialogueEntryNodeId(dialogue!), {
+            participantKey: `${activeMap.id}:object:${
+              placement.id || `${placement.object_id}:${placement.cell.join(":")}`
+            }`,
+          });
         playSfx("dialogue_open", { volume: 0.32, cooldownMs: 120 });
-        addLog(`Started conversation with ${dialogue.nodes[0].speaker}...`);
+        addLog(
+          `Started conversation with ${
+            dialogue!.speaker || dialogue!.nodes[0]?.speaker || dialogue!.display_name
+          }...`,
+        );
         return;
       }
     }
@@ -7554,6 +8364,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   const handleDropItem = (itemId: string) => {
     const currentSave = usePlayStore.getState().saveData;
     if (!currentSave || !activeMap) return;
+    if (presentStealthActionBlock("item")) return;
     if ((currentSave.playerStats.energy || 0) < 1000) {
       addLog("Not ready to act.");
       return;
@@ -7671,6 +8482,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     const store = usePlayStore.getState();
     const currentSave = store.saveData;
     if (!currentSave) return;
+    if (presentStealthActionBlock("item")) return;
 
     const effects = itemDef.effects;
     let used = false;
@@ -7838,12 +8650,41 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     }
   };
 
-  // Stable render inputs for GameRenderer (recomputed only when the world
-  // actually changes, not on every player step).
-  const renderMapDelta = useMemo(
-    () => (activeMap ? activeMapDelta : undefined),
-    [activeMap, activeMapDelta],
-  );
+  // Stable render inputs for GameRenderer (recomputed only when something
+  // visible changes, not when a mechanical footstep pulse is appended).
+  const renderMapDelta = useMemo<MapDelta | undefined>(() => {
+    if (!activeMap || !activeMapDelta) return undefined;
+    return {
+      taken_items: activeMapDelta.taken_items,
+      opened_doors: activeMapDelta.opened_doors,
+      unlocked_doors: activeMapDelta.unlocked_doors,
+      dropped_items: activeMapDelta.dropped_items,
+      containers: activeMapDelta.containers,
+      moved_objects: activeMapDelta.moved_objects,
+      carried_objects: activeMapDelta.carried_objects,
+      removed_objects: activeMapDelta.removed_objects,
+      simulation_conditions: activeMapDelta.simulation_conditions,
+      surface_layers: activeMapDelta.surface_layers,
+      environment_fields: activeVisualEnvironmentFields,
+      npc_tasks: activeMapDelta.npc_tasks,
+      simulation_processes: activeMapDelta.simulation_processes,
+    };
+  }, [
+    activeMap?.id,
+    activeMapDelta?.taken_items,
+    activeMapDelta?.opened_doors,
+    activeMapDelta?.unlocked_doors,
+    activeMapDelta?.dropped_items,
+    activeMapDelta?.containers,
+    activeMapDelta?.moved_objects,
+    activeMapDelta?.carried_objects,
+    activeMapDelta?.removed_objects,
+    activeMapDelta?.simulation_conditions,
+    activeMapDelta?.surface_layers,
+    activeVisualEnvironmentFields,
+    activeMapDelta?.npc_tasks,
+    activeMapDelta?.simulation_processes,
+  ]);
   const containerRenderPlacements = useMemo(
     () =>
       (activeMap?.container_placements || []).map((c) => ({
@@ -7910,25 +8751,27 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       ? perceptionSnapshotState
       : null;
 
-  // Physical visibility is the expensive half. In Performance mode its
-  // observer is anchored to the current macro-tile center, so three fine
-  // walking steps share one simulation. Exploration and sound sensing are
-  // merged below and never invalidate this base snapshot.
+  // Phase 2–3 intentionally anchors the mechanical observer to the macro-tile
+  // center so fine walking does not rerun illumination and LOS. The renderer
+  // consumes this snapshot verbatim; it must not invent a different light
+  // origin or footprint.
   const viewerVisibilityBase = useMemo((): ImmersiveViewerVisibilitySnapshot | null => {
     if (!activeMap || !saveData) return null;
     try {
-      const visibilitySave: PlaySave = visualPreset === "performance"
-        ? {
-            ...saveData,
-            player: {
-              ...saveData.player,
-              cell: [
-                Math.floor(saveData.player.cell[0] / FINE_PER_MACRO) * FINE_PER_MACRO + FINE_HALF_EXTENT,
-                Math.floor(saveData.player.cell[1] / FINE_PER_MACRO) * FINE_PER_MACRO + FINE_HALF_EXTENT,
-              ],
-            },
-          }
-        : saveData;
+      const visibilitySave: PlaySave = {
+        ...saveData,
+        player: {
+          ...saveData.player,
+          cell: [
+            Math.floor(saveData.player.cell[0] / FINE_PER_MACRO) *
+                FINE_PER_MACRO +
+              FINE_HALF_EXTENT,
+            Math.floor(saveData.player.cell[1] / FINE_PER_MACRO) *
+                FINE_PER_MACRO +
+              FINE_HALF_EXTENT,
+          ],
+        },
+      };
       return createImmersiveViewerVisibilityFromV1(
         gamePackage,
         visibilitySave,
@@ -7938,7 +8781,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     } catch {
       return null;
     }
-  }, [activeMap, gamePackage, viewerVisibilityInputKey, visualPreset]);
+  }, [activeMap, gamePackage, viewerVisibilityInputKey]);
 
   const viewerVisibility = useMemo((): ImmersiveViewerVisibilitySnapshot | null => {
     if (!viewerVisibilityBase || !activeMap || !saveData) return viewerVisibilityBase;
@@ -7948,7 +8791,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         [cell[0], cell[1]],
       ]),
     );
-    (saveData.explored_cells?.[activeMap.id] || []).forEach((key) => {
+    activeExploredCells.forEach((key) => {
       const cell = parseFineCoordKey(key);
       if (!Number.isFinite(cell[0]) || !Number.isFinite(cell[1])) return;
       discoveredByKey.set(key, [cell[0], cell[1]]);
@@ -7969,7 +8812,64 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       discovered: [...discoveredByKey.values()].sort(sortCells),
       sensed: [...sensedByKey.values()].sort(sortCells),
     };
-  }, [activeMap, perceptionSnapshot, saveData?.explored_cells, viewerVisibilityBase]);
+  }, [activeMap, activeExploredCells, perceptionSnapshot, viewerVisibilityBase]);
+
+  const memoryDebugState = useMemo(() => {
+    if (!activeMap || !viewerVisibility) {
+      return { visible: 0, remembered: 0, unknown: 0 };
+    }
+    const illuminationByKey = new Map(
+      viewerVisibility.illumination.cells.map((entry) => [
+        fineCoordKey(entry.cell[0], entry.cell[1]),
+        entry.value,
+      ]),
+    );
+    const visible = new Set(
+      viewerVisibility.terrain_visible
+        .filter((cell) =>
+          hasAuthoritativePresentLight(
+            illuminationByKey.get(fineCoordKey(cell[0], cell[1])) ?? 0,
+          ),
+        )
+        .map((cell) => fineCoordKey(cell[0], cell[1])),
+    );
+    const lineOfSight = new Set(
+      (viewerVisibility.line_of_sight || viewerVisibility.terrain_visible).map(
+        (cell) => fineCoordKey(cell[0], cell[1]),
+      ),
+    );
+    const remembered = new Set(
+      viewerVisibility.discovered
+        .map((cell) => fineCoordKey(cell[0], cell[1]))
+        .filter((key) => lineOfSight.has(key) && !visible.has(key)),
+    );
+    const activeCells = new Set(
+      viewerVisibility.illumination.cells.map((entry) =>
+        fineCoordKey(entry.cell[0], entry.cell[1]),
+      ),
+    );
+    let unknown = 0;
+    activeCells.forEach((key) => {
+      if (!visible.has(key) && !remembered.has(key)) unknown += 1;
+    });
+    return {
+      visible: visible.size,
+      remembered: remembered.size,
+      unknown,
+    };
+  }, [activeMap, viewerVisibility]);
+
+  const visibleNearbyHostiles = useMemo(() => {
+    if (!viewerVisibility) return [] as NearbyHostile[];
+    const actorVisible = new Set(
+      viewerVisibility.currently_visible.map((cell) =>
+        fineCoordKey(cell[0], cell[1]),
+      ),
+    );
+    return nearbyHostiles.filter((hostile) =>
+      actorVisible.has(fineCoordKey(hostile.cell[0], hostile.cell[1])),
+    );
+  }, [nearbyHostiles, viewerVisibility]);
 
   const playerIllumination = useMemo(
     () =>
@@ -8116,6 +9016,111 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reachableWorkstation?.id, workstationProcessIds]);
 
+  // Dialogue state is computed null-safely before the loading guard so the
+  // keyword-session effect always occupies the same hook slot. New games can
+  // briefly render without a map/save while initialization completes.
+  const activeDialogue = activeDialogueId
+    ? gamePackage.dialogue.find((dialogue) => dialogue.id === activeDialogueId)
+    : undefined;
+  const activeDialogueNode = activeDialogue?.nodes.find(
+    (node) => node.id === activeDialogueNodeId,
+  );
+  const activeKeywordResponse =
+    activeDialogue?.format === "keyword_v1"
+      ? activeDialogue.responses?.find(
+          (response) => response.id === activeConversationResponseId,
+        )
+      : undefined;
+  const activeKeywordSpeaker =
+    activeKeywordResponse?.speaker ||
+    activeDialogue?.speaker ||
+    activeDialogue?.display_name ||
+    "Conversation";
+  const dialogueHasSceneImage = Boolean(
+    activeKeywordResponse?.scene_image_url || activeDialogueNode?.scene_image_url,
+  );
+  const startConversationCutscene = useCallback((cutsceneId?: string) => {
+    if (!cutsceneId) return;
+    const cutscene = gamePackage.cutscenes.find((entry) => entry.id === cutsceneId);
+    if (!cutscene) return;
+    setCutsceneActionIndex(0);
+    setActiveCutscene(cutscene);
+  }, [gamePackage.cutscenes]);
+
+  useEffect(() => {
+    if (!activeDialogueId) {
+      initializedKeywordSessionRef.current = null;
+      setDialogueArchiveOpen(false);
+      setDialogueShowItemPickerOpen(false);
+      setPendingDialogueCutsceneId(null);
+      return;
+    }
+    if (!saveData || activeDialogue?.format !== "keyword_v1") return;
+    const participantKey = activeConversationParticipantKey || activeDialogue.id;
+    const sessionKey = `${activeDialogue.id}:${participantKey}:${activeDialogueNodeId || "start"}`;
+    if (initializedKeywordSessionRef.current === sessionKey) return;
+    initializedKeywordSessionRef.current = sessionKey;
+
+    const outcome = beginKeywordConversation({
+      gamePackage,
+      save: saveData,
+      dialogueId: activeDialogue.id,
+      participantKey,
+      participantEntityId: activeConversationEntityId || undefined,
+      entryNodeId: activeDialogueNodeId || undefined,
+    });
+    commitRuntimeSave(outcome.save);
+    const closesImmediately = shouldCloseKeywordConversationImmediately({
+      endsDialogue: outcome.endConversation,
+      responseText: outcome.response?.text,
+      triggerCutsceneId: outcome.triggerCutsceneId,
+    });
+    if (closesImmediately) {
+      endDialogue();
+      setDialogueArchiveOpen(false);
+      setDialogueShowItemPickerOpen(false);
+      setPendingDialogueCutsceneId(null);
+      startConversationCutscene(outcome.triggerCutsceneId);
+    } else {
+      updateKeywordConversation({
+        responseId: outcome.response?.id || "__keyword_no_response__",
+        participantKey,
+        localTopicIds: Array.from(
+          new Set([...activeConversationLocalTopicIds, ...outcome.localTopicIds]),
+        ),
+        localDynamicTopicIds: Array.from(
+          new Set([
+            ...activeConversationLocalDynamicTopicIds,
+            ...outcome.localDynamicTopicIds,
+          ]),
+        ),
+        ending: outcome.endConversation,
+      });
+    }
+    if (!outcome.ok) addLog(outcome.reason || "This conversation has no opening response.");
+    if (outcome.newlyDiscoveredTopicIds.length || outcome.newlyDiscoveredDynamicTopicIds.length) {
+      addLog("New conversation topics remembered.");
+    }
+    if (!closesImmediately && outcome.triggerCutsceneId) {
+      setPendingDialogueCutsceneId(outcome.triggerCutsceneId);
+      updateKeywordConversation({ ending: true });
+    }
+  }, [
+    activeConversationEntityId,
+    activeConversationLocalDynamicTopicIds,
+    activeConversationLocalTopicIds,
+    activeConversationParticipantKey,
+    activeDialogue,
+    activeDialogueId,
+    activeDialogueNodeId,
+    addLog,
+    commitRuntimeSave,
+    gamePackage,
+    saveData,
+    startConversationCutscene,
+    updateKeywordConversation,
+  ]);
+
   if (!activeMap || !saveData) {
     return (
       <div className="flex-1 flex items-center justify-center">
@@ -8125,6 +9130,20 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   }
 
   const inCombat = !!saveData.in_combat;
+  const playerStealthActive = isPlayerStealthActive(saveData);
+  const movementHearingSettings = resolveMovementHearingSettings(gamePackage);
+  const intercessorCampaign = saveData.intercessor_campaign;
+  const currentIntercessor = intercessorCampaign
+    ? intercessorCampaign.records[intercessorCampaign.current_intercessor_id]
+    : undefined;
+  const intercessorHistory = getIntercessorHistory(saveData);
+  const successionNotice = intercessorCampaign?.last_transition;
+  const successionDeceased = successionNotice
+    ? intercessorCampaign?.records[successionNotice.deceased_intercessor_id]
+    : undefined;
+  const successionSuccessor = successionNotice
+    ? intercessorCampaign?.records[successionNotice.successor_intercessor_id]
+    : undefined;
   const controlledActor = getControlledActor(saveData, gamePackage);
   const activeTurnId = inCombat ? (saveData.active_turn_id ?? null) : null;
 
@@ -8170,7 +9189,8 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       activeDocumentId ||
       activeContainerId ||
       activeAttendNodePanel ||
-      levelUpOpen,
+      levelUpOpen ||
+      successionNoticeOpen,
   );
   // `reachableWorkstation` / `workstationProcessDefs` / `workstationProcessIds`
   // are computed above the loading guard (see the workstation sync effect).
@@ -8258,6 +9278,25 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       const action = ability.runtime_action;
       let disabled = false;
       let disabledReason: string | undefined;
+      const stealthBlocked = playerStealthActive && action !== "wait";
+      if (stealthBlocked) {
+        const blockedAction: StealthBlockedAction =
+          ability.ability_kind === "skill" || !action
+            ? "skill"
+            : action === "basic_attack" ||
+                action === "shove" ||
+                action === "overwatch"
+              ? "attack"
+              : action === "throw"
+                ? "throw"
+                : action === "drop"
+                  ? "item"
+                  : action === "attend"
+                    ? "attend"
+                    : "act";
+        disabled = true;
+        disabledReason = stealthBlockedActionMessage(blockedAction);
+      }
       const requireActor = () => {
         if (!controlledActor) {
           disabled = true;
@@ -8271,62 +9310,64 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         }
       };
 
-      if (ability.ability_kind === "skill") {
-        requireActor();
-        if (!disabled && controlledActor) {
-          if ((controlledActor.mp ?? 0) < ability.mp_cost) {
+      if (!disabled) {
+        if (ability.ability_kind === "skill") {
+          requireActor();
+          if (!disabled && controlledActor) {
+            if ((controlledActor.mp ?? 0) < ability.mp_cost) {
+              disabled = true;
+              disabledReason = `Needs ${ability.mp_cost} MP.`;
+            } else if (!inCombat && controlledActor.isPlayer && (activeStats.energy || 0) < ability.ap_cost) {
+              disabled = true;
+              disabledReason = "Not ready to act yet.";
+            }
+          }
+        } else if (action === "basic_attack") {
+          requireActor();
+          if (!disabled && !inCombat && controlledActor?.isPlayer && (activeStats.energy || 0) < 1000) {
             disabled = true;
-            disabledReason = `Needs ${ability.mp_cost} MP.`;
-          } else if (!inCombat && controlledActor.isPlayer && (activeStats.energy || 0) < ability.ap_cost) {
+            disabledReason = "Not ready to attack yet.";
+          }
+        } else if (action === "shove") {
+          requireActor();
+          if (!disabled && !inCombat) {
+            disabled = true;
+            disabledReason = "Shove is a combat action.";
+          }
+        } else if (action === "overwatch") {
+          requireActor();
+          if (!disabled && commandingParty) {
+            disabled = true;
+            disabledReason = "Only the player can set overwatch.";
+          } else if (!disabled && !inCombat) {
+            disabled = true;
+            disabledReason = "Overwatch is a combat action.";
+          } else if (!disabled && saveData.flags?.immersive_overwatch_player) {
+            disabled = true;
+            disabledReason = "Overwatch is already armed.";
+          }
+        } else if (action === "attend") {
+          requirePlayerControl();
+          if (!disabled && !attendTarget) {
+            disabled = true;
+            disabledReason = "Face a living actor.";
+          }
+        } else if (action === "wait") {
+          requireActor();
+          if (!disabled && !inCombat && (activeStats.energy || 0) < 1000) {
+            disabled = true;
+            disabledReason = "Not ready to wait.";
+          }
+        } else if (isPlayModeVerbAction(action)) {
+          requirePlayerControl();
+          if (!disabled && !inCombat && (activeStats.energy || 0) < 1000) {
             disabled = true;
             disabledReason = "Not ready to act yet.";
           }
-        }
-      } else if (action === "basic_attack") {
-        requireActor();
-        if (!disabled && !inCombat && controlledActor?.isPlayer && (activeStats.energy || 0) < 1000) {
-          disabled = true;
-          disabledReason = "Not ready to attack yet.";
-        }
-      } else if (action === "shove") {
-        requireActor();
-        if (!disabled && !inCombat) {
-          disabled = true;
-          disabledReason = "Shove is a combat action.";
-        }
-      } else if (action === "overwatch") {
-        requireActor();
-        if (!disabled && commandingParty) {
-          disabled = true;
-          disabledReason = "Only the player can set overwatch.";
-        } else if (!disabled && !inCombat) {
-          disabled = true;
-          disabledReason = "Overwatch is a combat action.";
-        } else if (!disabled && saveData.flags?.immersive_overwatch_player) {
-          disabled = true;
-          disabledReason = "Overwatch is already armed.";
-        }
-      } else if (action === "attend") {
-        requirePlayerControl();
-        if (!disabled && !attendTarget) {
-          disabled = true;
-          disabledReason = "Face a living actor.";
-        }
-      } else if (action === "wait") {
-        requireActor();
-        if (!disabled && !inCombat && (activeStats.energy || 0) < 1000) {
-          disabled = true;
-          disabledReason = "Not ready to wait.";
-        }
-      } else if (isPlayModeVerbAction(action)) {
-        requirePlayerControl();
-        if (!disabled && !inCombat && (activeStats.energy || 0) < 1000) {
-          disabled = true;
-          disabledReason = "Not ready to act yet.";
-        }
-        if (!disabled && action === "drop" && !(saveData.inventory || []).some((entry) => entry.count > 0)) {
-          disabled = true;
-          disabledReason = "Nothing to drop.";
+          if (!disabled && action === "drop" && !(saveData.inventory || []).some((entry) => entry.count > 0)) {
+            disabled = true;
+            disabledReason = "Nothing to drop.";
+          }
         }
       }
 
@@ -8337,6 +9378,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         ability,
         disabled,
         disabledReason,
+        stealthBlocked,
         costLabel: costs.join(" / "),
       };
     })
@@ -8576,30 +9618,12 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     stealthFeedback?.highest_alertness ||
     strongestPerceptionAlert?.alertness ||
     "oblivious";
-  const stealthScore = Math.max(
-    0,
-    Math.min(1, stealthFeedback?.strongest_score ?? strongestPerceptionAlert?.score ?? 0),
-  );
-  const perceptionAlertRows =
-    perceptionSnapshot?.alerts
-      .filter(
-        (alert) =>
-          !gamePackage.entities.find((entity) => entity.id === alert.entity_id)?.is_npc,
-      )
-      .slice()
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 3)
-      .map((alert) => ({
-        key: alert.actor_id,
-        name: gamePackage.entities.find((entity) => entity.id === alert.entity_id)?.display_name || "Watcher",
-        alertness: alert.alertness,
-        score: alert.score,
-        stimulus: titleCaseEffect(alert.stimulus.kind),
-        sense: alert.sense_id || "default",
-        cause: titleCaseEffect(alert.cause || alert.stimulus.kind),
-        target: alert.target_cell,
-        evidenceTick: alert.evidence_tick ?? alert.stimulus.tick,
-      })) || [];
+  const detectionSummary: Record<ImmersiveAlertnessState, string> = {
+    oblivious: "No attention",
+    suspicious: "Something stirs",
+    searching: "They are searching",
+    combat: "You are seen",
+  };
   const worldStateGate =
     worldStateEvaluation?.denials[0] ||
     worldStateEvaluation?.gates.find((gate) => !gate.passed && gate.severity === "warning") ||
@@ -8666,13 +9690,168 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     (saveData.alderamontico_state?.grid?.region_id === activeAlderamonticoRegionId
       ? saveData.alderamontico_state.grid.fed
       : undefined);
-  const activeDialogue = activeDialogueId
-    ? gamePackage.dialogue.find((d) => d.id === activeDialogueId)
-    : undefined;
-  const activeDialogueNode = activeDialogue?.nodes.find(
-    (n) => n.id === activeDialogueNodeId,
-  );
-  const dialogueHasSceneImage = Boolean(activeDialogueNode?.scene_image_url);
+  const knownDialogueTopics =
+    activeDialogue?.format === "keyword_v1"
+      ? getKnownDialogueTopics({
+          gamePackage,
+          save: saveData,
+          dialogueId: activeDialogue.id,
+          participantKey: activeConversationParticipantKey || activeDialogue.id,
+          localTopicIds: activeConversationLocalTopicIds,
+          localDynamicTopicIds: activeConversationLocalDynamicTopicIds,
+        })
+      : [];
+
+  const contextualDialogueTopics = (() => {
+    const promoted = new Set<string>([
+      ...activeConversationRecentTopicKeys,
+      ...(activeKeywordResponse?.context_topic_ids || []),
+      ...(activeKeywordResponse?.context_dynamic_topic_ids || []).map((id) => `dynamic:${id}`),
+      ...(activeKeywordResponse?.mentions || []).flatMap((mention) =>
+        mention.dynamic_topic_id
+          ? [`dynamic:${mention.dynamic_topic_id}`]
+          : mention.topic_id
+            ? [mention.topic_id]
+            : [],
+      ),
+    ]);
+    const candidates = [...knownDialogueTopics]
+      .filter((topic) => topic.relevant || promoted.has(topic.key))
+      .sort(
+        (left, right) =>
+          Number(promoted.has(right.key)) - Number(promoted.has(left.key)) ||
+          Number(right.changed) - Number(left.changed) ||
+          Number(right.important) - Number(left.important) ||
+          left.displayLabel.localeCompare(right.displayLabel),
+      );
+    // Practical intentions must never be crowded out by a growing subject
+    // vocabulary. Reserve room for every authored action (normally Silence,
+    // Show item, and Goodbye), then use the remaining compact-list slots for
+    // the most relevant conversation subjects.
+    const actions = candidates.filter((topic) => Boolean(topic.actionKind));
+    const subjects = candidates.filter((topic) => !topic.actionKind);
+    const reservedActions = actions.slice(0, 5);
+    return [
+      ...subjects.slice(0, Math.max(0, 10 - reservedActions.length)),
+      ...reservedActions,
+    ];
+  })();
+
+  const selectConversationTopic = (topic: DialogueTopicRef, shownItemId?: string) => {
+    if (!activeDialogueId || activeDialogue?.format !== "keyword_v1") return;
+    const topicDescriptor = knownDialogueTopics.find(
+      (candidate) => topicRefKey(candidate.ref) === topicRefKey(topic),
+    );
+    if (topicDescriptor?.actionKind === "show_item" && !shownItemId) {
+      setDialogueShowItemPickerOpen(true);
+      return;
+    }
+    const currentSave = usePlayStore.getState().saveData;
+    if (!currentSave) return;
+    const participantKey = activeConversationParticipantKey || activeDialogue.id;
+    const result = dispatchV1SelectDialogueTopic({
+      gamePackage,
+      save: currentSave,
+      dialogueId: activeDialogue.id,
+      topic,
+      participantKey,
+      shownItemId,
+      entryNodeId: activeDialogueNodeId || undefined,
+    });
+    if (!result.ok || !result.outcome) {
+      addLog(result.reason || "This subject draws no response.");
+      return;
+    }
+    commitRuntimeSave(result.save);
+    usePlayStore.getState().pushEngineEvents(result.events);
+    const outcome = result.outcome;
+    const closesImmediately = shouldCloseKeywordConversationImmediately(outcome);
+    const nextRecent = topicRefKey(topic);
+    if (closesImmediately) {
+      endDialogue();
+      setDialogueArchiveOpen(false);
+      setDialogueShowItemPickerOpen(false);
+      setPendingDialogueCutsceneId(null);
+      startConversationCutscene(outcome.triggerCutsceneId);
+    } else {
+      updateKeywordConversation({
+        responseId: outcome.responseId || "__keyword_no_response__",
+        localTopicIds: Array.from(
+          new Set([...activeConversationLocalTopicIds, ...outcome.localTopicIds]),
+        ),
+        localDynamicTopicIds: Array.from(
+          new Set([
+            ...activeConversationLocalDynamicTopicIds,
+            ...outcome.localDynamicTopicIds,
+          ]),
+        ),
+        recentTopicKeys: [
+          nextRecent,
+          ...activeConversationRecentTopicKeys.filter((key) => key !== nextRecent),
+        ].slice(0, 8),
+        shownItemId: shownItemId || null,
+        ending: outcome.endsDialogue || Boolean(outcome.triggerCutsceneId),
+      });
+    }
+    setDialogueArchiveOpen(false);
+    setDialogueShowItemPickerOpen(false);
+    if (outcome.newlyDiscoveredTopicIds.length || outcome.newlyDiscoveredDynamicTopicIds.length) {
+      addLog("New conversation topics remembered.");
+    }
+    if (!closesImmediately && outcome.triggerCutsceneId) {
+      setPendingDialogueCutsceneId(outcome.triggerCutsceneId);
+    }
+    playSfx("dialogue_next", { volume: 0.24, cooldownMs: 100 });
+  };
+
+  const finishKeywordConversation = () => {
+    const cutsceneId = pendingDialogueCutsceneId;
+    endDialogue();
+    setDialogueArchiveOpen(false);
+    setDialogueShowItemPickerOpen(false);
+    setPendingDialogueCutsceneId(null);
+    startConversationCutscene(cutsceneId || undefined);
+  };
+
+  const renderKeywordResponseText = (text: string) => {
+    const mentions = (activeKeywordResponse?.mentions || [])
+      .map((mention) => ({
+        mention,
+        index: text.toLocaleLowerCase().indexOf(mention.phrase.toLocaleLowerCase()),
+      }))
+      .filter((entry) => entry.index >= 0)
+      .sort((left, right) => left.index - right.index);
+    if (!mentions.length) return text;
+    const rendered: React.ReactNode[] = [];
+    let cursor = 0;
+    mentions.forEach(({ mention, index }, mentionIndex) => {
+      if (index < cursor) return;
+      if (index > cursor) rendered.push(text.slice(cursor, index));
+      const phrase = text.slice(index, index + mention.phrase.length);
+      const ref: DialogueTopicRef | null = mention.dynamic_topic_id
+        ? { kind: "dynamic", dynamicTopicId: mention.dynamic_topic_id }
+        : mention.topic_id
+          ? { kind: "static", topicId: mention.topic_id }
+          : null;
+      rendered.push(
+        ref ? (
+          <button
+            type="button"
+            key={`${mention.phrase}:${mentionIndex}`}
+            onClick={() => selectConversationTopic(ref)}
+            className="mx-0.5 inline rounded-sm border-b border-cyan-300/55 bg-indigo-400/10 px-0.5 font-semibold text-cyan-200 shadow-[0_0_10px_rgba(103,232,249,0.18)] transition hover:bg-indigo-300/20 hover:text-white focus:outline-none focus:ring-1 focus:ring-cyan-300/70"
+          >
+            {phrase}
+          </button>
+        ) : (
+          phrase
+        ),
+      );
+      cursor = index + mention.phrase.length;
+    });
+    if (cursor < text.length) rendered.push(text.slice(cursor));
+    return rendered;
+  };
   const bottomPanelOpen = Boolean(
     activeShopId ||
       activeDocumentId ||
@@ -8712,18 +9891,58 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   );
 
   return (
-    <div className="flex flex-col h-full bg-neutral-950 relative overflow-hidden pb-16 sm:pb-0" style={{ touchAction: 'none' }}>
+    <div
+      data-testid="play-engine-root"
+      data-active-cutscene={activeCutscene?.id || ""}
+      data-active-dialogue={activeDialogueId || ""}
+      data-active-map={activeMap.id}
+      data-player-cell={`${saveData.player.cell?.[0] ?? 0},${saveData.player.cell?.[1] ?? 0}`}
+      data-player-energy={String(saveData.playerStats.energy || 0)}
+      data-current-intercessor-id={currentIntercessor?.id || ""}
+      data-current-intercessor-name={currentIntercessor?.display_name || ""}
+      data-intercessor-generation={String(currentIntercessor?.generation || 0)}
+      data-expedition-id={saveData.world_state_layers?.expedition.id || ""}
+      data-expedition-index={String(saveData.world_state_layers?.expedition.index || 0)}
+      data-intercessor-count={String(intercessorHistory.length)}
+      data-death-event-count={String(Object.keys(intercessorCampaign?.death_events || {}).length)}
+      data-ghost-request-count={String(Object.keys(intercessorCampaign?.ghost_requests || {}).length)}
+      data-bundle-request-count={String(Object.keys(intercessorCampaign?.bundle_requests || {}).length)}
+      data-stealth-active={String(playerStealthActive)}
+      data-player-stance={playerStealthActive ? "stealth" : "normal"}
+      data-movement-noise={playerStealthActive ? "quiet" : "normal"}
+      data-party-stealth-rule={movementHearingSettings.party_stealth_rule}
+      data-input-blocked={String(
+        Boolean(
+          activeCutscene?.is_blocking ||
+            levelUpOpen ||
+            showInventory ||
+            showSkills ||
+            showSaveMenu ||
+            showJournal ||
+            successionNoticeOpen ||
+            targetingSkillId ||
+            activeDialogueId ||
+            activeShopId ||
+            activeDocumentId ||
+            activeContainerId ||
+            activeAttendNodePanel,
+        ),
+      )}
+      className="flex flex-col h-full bg-neutral-950 relative overflow-hidden pb-16 sm:pb-0"
+      style={{ touchAction: 'none' }}
+    >
       <div className="flex-1 relative min-h-0">
         <Canvas
           // Background play tabs should not keep submitting a complete 3D
           // scene. They render on state demand and resume the normal animation
           // loop as soon as the tab becomes visible again.
-          frameloop={
-            visualPreset === "performance" || !pageVisible
-              ? "demand"
-              : "always"
+          frameloop="demand"
+          shadows={
+            bottomPanelOpen ||
+            (visualPreset !== "high" && visualPreset !== "ultra")
+              ? false
+              : "basic"
           }
-          shadows={visualPreset === "performance" ? false : "basic"}
           camera={{
             position: initialCameraPosition,
             fov: PLAY_CAMERA_PROFILES[cameraMode].fov,
@@ -8736,8 +9955,13 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             powerPreference: "high-performance",
           }}
         >
-          <PerformanceFrameDriver
-            enabled={visualPreset === "performance" && pageVisible}
+          <DemandFrameDriver
+            enabled={shouldDriveDemandFrames({
+              pageVisible,
+              performanceMode: visualPreset === "performance",
+              bottomPanelOpen,
+            })}
+            intervalMs={playFrameIntervalMs}
           />
           <IsometricCameraRig
             playerPos={visualPlayerPos}
@@ -8752,7 +9976,10 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           <BlackStarLightRig
             playerPos={visualPlayerPos}
             ambientLight={activeMap.ambient_light ?? 0.08}
-            shadowsEnabled={visualPreset !== "performance"}
+            shadowsEnabled={
+              (visualPreset === "high" || visualPreset === "ultra") &&
+              !bottomPanelOpen
+            }
           />
           <AdaptiveQualityProbe
             dpr={effectivePlayDpr}
@@ -8760,9 +9987,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             maxDpr={visualDprCap}
             setDpr={setPlayDpr}
             frameBudgetMs={
-              visualPreset === "performance"
-                ? PERFORMANCE_FRAME_INTERVAL_MS
-                : undefined
+              playFrameIntervalMs
             }
           />
           <GameRenderer3D
@@ -8786,7 +10011,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             }
             rangeCells={verbTargeting ? verbTargetCells : targetingRangeCells}
             hoveredCell={hoveredCell}
-            entityStates={saveData.entity_states}
+            entityStates={rendererEntityStates}
             actorPhysicalStates={saveData.actor_physical_states}
             partyFollowers={partyFollowers}
             partyMemberIds={partyMemberIds}
@@ -8796,19 +10021,25 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             combatOverwatchZones={combatTacticalSnapshot?.overwatch_zones}
             combatIntents={combatTacticalSnapshot?.intents}
             perceptionAlerts={perceptionSnapshot?.alerts}
+            perceptionStimuli={perceptionSnapshot?.stimuli}
             showBehaviorIntents={showBehaviorIntents}
             worldDeniedCells={worldDeniedCells}
             showGrid={false}
-            enableOcclusion={visualPreset !== "performance"}
+            enableOcclusion={visualPreset !== "performance" && !bottomPanelOpen}
             occlusionAzimuth={cameraAzimuth}
             renderCenter={cameraFocusOverride || renderedFocusPos}
-            renderRadius={PLAY_RENDER_RADIUS}
+            renderRadius={playRenderRadius}
             fogOfWar={fogOfWar}
             fogResolution={(gamePackage.settings?.fog_los_resolution as "macro" | "fine" | undefined) ?? "macro"}
             authoritativeVisibility={viewerVisibility}
+            authoritativeVisibilityExpected
             showPerceptionDebug={showPerceptionDebug}
+            showMemoryDebug={showMemoryDebug}
             performanceMode={visualPreset === "performance"}
-            initialExplored={saveData.explored_cells}
+            authoritativePointLightBudget={
+              PLAY_AUTHORITATIVE_POINT_LIGHT_BUDGET[visualPreset]
+            }
+            initialExplored={rendererExploredCells}
             onExplore={queueExploredCells}
           />
           <ScreenFX inCombat={inCombat} mapId={activeMap.id} />
@@ -8862,18 +10093,38 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           </div>
         )}
 
-        {/* Floating Act button — contextual interaction stays separate from abilities. */}
-        {!levelUpOpen && !targetingSkillId && !activeShopId && !activeDialogueId && !activeDocumentId && !activeContainerId && !activeAttendNodePanel && (
+        {/* Floating stance / Act controls. Stealth remains reachable while a
+            target cursor is open so it can deliberately cancel that action. */}
+        {!levelUpOpen && !activeCutscene?.is_blocking && !showInventory && !showSkills && !showSaveMenu && !showJournal && !successionNoticeOpen && !activeShopId && !activeDialogueId && !activeDocumentId && !activeContainerId && !activeAttendNodePanel && (
           <div className="absolute right-3 z-20 flex flex-col gap-2 pointer-events-auto" style={{ bottom: 'calc(0.75rem + env(safe-area-inset-bottom))' }}>
             <button
-              className="w-12 h-12 sm:w-16 sm:h-16 bg-ui-panel active:brightness-150 rounded-full flex flex-col items-center justify-center active:scale-90 transition-all select-none shadow-[0_0_15px_rgba(0,0,0,0.8)] border-ui-accent text-[var(--color-ui-accent)] touch-manipulation gap-0.5"
-              style={{ borderStyle: "solid", borderWidth: "2px" }}
-              onClick={handleAct}
-              title="Interact / Act"
+              type="button"
+              data-testid="stealth-stance-toggle"
+              aria-pressed={playerStealthActive}
+              className={`flex h-11 w-12 select-none touch-manipulation flex-col items-center justify-center gap-0.5 rounded-full border-2 shadow-[0_0_15px_rgba(0,0,0,0.8)] transition-all active:scale-90 active:brightness-150 sm:h-14 sm:w-16 ${
+                playerStealthActive
+                  ? "border-violet-300 bg-violet-950/95 text-violet-100 shadow-[0_0_18px_rgba(139,92,246,0.45)]"
+                  : "border-slate-500 bg-ui-panel text-slate-300"
+              }`}
+              onClick={toggleStealthMode}
+              title={`${playerStealthActive ? "Exit" : "Enter"} stealth mode (C)`}
             >
-              <Hand className="w-5 h-5 sm:w-7 sm:h-7 drop-shadow-md" />
-              <span className="text-[8px] font-[family-name:var(--font-display)] font-bold tracking-widest uppercase opacity-90 text-accent-glow">Act</span>
+              <Eye className="h-4 w-4 drop-shadow-md sm:h-5 sm:w-5" />
+              <span className="text-[7px] font-[family-name:var(--font-display)] font-bold uppercase tracking-widest sm:text-[8px]">
+                {playerStealthActive ? "Stand" : "Sneak"}
+              </span>
             </button>
+            {!targetingSkillId && !verbTargeting && (
+              <button
+                className="w-12 h-12 sm:w-16 sm:h-16 bg-ui-panel active:brightness-150 rounded-full flex flex-col items-center justify-center active:scale-90 transition-all select-none shadow-[0_0_15px_rgba(0,0,0,0.8)] border-ui-accent text-[var(--color-ui-accent)] touch-manipulation gap-0.5"
+                style={{ borderStyle: "solid", borderWidth: "2px" }}
+                onClick={handleAct}
+                title="Interact / Act"
+              >
+                <Hand className="w-5 h-5 sm:w-7 sm:h-7 drop-shadow-md" />
+                <span className="text-[8px] font-[family-name:var(--font-display)] font-bold tracking-widest uppercase opacity-90 text-accent-glow">Act</span>
+              </button>
+            )}
           </div>
         )}
 
@@ -8907,7 +10158,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                     type="button"
                     aria-label={ability.display_name}
                     onClick={() => activateAbility(entry)}
-                    disabled={entry.disabled}
+                    disabled={entry.disabled && !entry.stealthBlocked}
                     className={`relative flex h-12 w-[46px] flex-col items-center justify-center gap-0.5 rounded-sm bg-ui-panel text-center shadow-[0_0_15px_rgba(0,0,0,0.8)] transition-all select-none touch-manipulation sm:h-16 sm:w-[60px] ${
                       entry.disabled ? "opacity-40 grayscale" : "active:scale-90 brightness-100"
                     } ${colorClass}`}
@@ -9133,6 +10384,16 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             className="px-2.5 py-2 sm:px-4 sm:py-3 bg-ui-panel border-ui-accent rounded-sm shadow-[0_0_20px_rgba(0,0,0,0.8)] flex flex-col gap-1.5 sm:gap-2.5 w-36 sm:w-48"
             style={{ borderStyle: "solid", borderWidth: "2px" }}
           >
+            {currentIntercessor && (
+              <div className="border-b border-[var(--color-ui-accent-dark)]/45 pb-1">
+                <div className="truncate font-serif text-[10px] font-bold text-[var(--color-ui-text)] sm:text-xs" title={currentIntercessor.display_name}>
+                  {currentIntercessor.display_name}
+                </div>
+                <div className="font-[family-name:var(--font-display)] text-[7px] font-bold uppercase tracking-[0.2em] text-[var(--color-ui-accent)] sm:text-[8px]">
+                  Intercessor {currentIntercessor.generation} · Expedition {saveData.world_state_layers?.expedition.index || 1}
+                </div>
+              </div>
+            )}
             <div>
               <div className="flex justify-between items-end mb-0.5 px-0.5">
                 <span className="text-[#e63946] text-[9px] sm:text-[11px] font-[family-name:var(--font-display)] font-bold tracking-widest uppercase">Vitality</span>
@@ -9252,6 +10513,39 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             </div>
           )}
 
+          {!overlayOpen && (
+            <div
+              data-testid="stealth-stance-indicator"
+              data-stealth-active={String(playerStealthActive)}
+              data-noise-level={playerStealthActive ? "quiet" : "normal"}
+              className={`mt-0.5 w-36 rounded-sm border px-2.5 py-2 shadow-[0_0_20px_rgba(0,0,0,0.75)] sm:w-48 ${
+                playerStealthActive
+                  ? "border-violet-500/75 bg-violet-950/90 text-violet-100"
+                  : "border-slate-700/75 bg-slate-950/88 text-slate-200"
+              }`}
+              style={{ borderStyle: "solid", borderWidth: "1px" }}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="flex items-center gap-1 text-[9px] font-[family-name:var(--font-display)] font-bold uppercase tracking-widest sm:text-[10px]">
+                  <Eye className="h-3 w-3 shrink-0 sm:h-3.5 sm:w-3.5" />
+                  Stance
+                </span>
+                <span className="text-[9px] font-bold uppercase tracking-wide sm:text-[10px]">
+                  {playerStealthActive ? "Stealth" : "Normal"}
+                </span>
+              </div>
+              <div className="mt-1 flex items-center justify-between gap-2 text-[8px] font-bold uppercase tracking-wide opacity-90 sm:text-[9px]">
+                <span>{playerStealthActive ? "Quiet steps" : "Normal steps"}</span>
+                <span>{playerStealthActive ? "Slower" : "Full pace"}</span>
+              </div>
+              {partyMemberIds.length > 0 && (
+                <div className="mt-1 border-t border-current/20 pt-1 font-serif text-[8px] leading-tight opacity-75 sm:text-[9px]">
+                  Collective stance: followers move {playerStealthActive ? "quietly" : "normally"} with you.
+                </div>
+              )}
+            </div>
+          )}
+
           {!overlayOpen && perceptionSnapshot && (
             <div
               className={`mt-0.5 w-36 rounded-sm border px-2.5 py-2 shadow-[0_0_20px_rgba(0,0,0,0.75)] sm:w-48 ${ALERTNESS_HUD_STYLES[stealthAlertness]}`}
@@ -9260,37 +10554,15 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
               <div className="flex items-center justify-between gap-2">
                 <span className="flex items-center gap-1 text-[9px] font-[family-name:var(--font-display)] font-bold uppercase tracking-widest sm:text-[10px]">
                   <Eye className="h-3 w-3 shrink-0 sm:h-3.5 sm:w-3.5" />
-                  Stealth
+                  Detection
                 </span>
                 <span className="text-[9px] font-bold uppercase tracking-wide sm:text-[10px]">
                   {ALERTNESS_LABELS[stealthAlertness]}
                 </span>
               </div>
-              <div className="mt-1 h-1.5 w-full overflow-hidden rounded-sm bg-black/70">
-                <div
-                  className="h-full bg-current transition-all duration-300"
-                  style={{ width: `${Math.round(stealthScore * 100)}%` }}
-                />
+              <div className="mt-1 border-t border-current/20 pt-1 font-serif text-[9px] font-bold leading-tight opacity-90 sm:text-[10px]">
+                {detectionSummary[stealthAlertness]}
               </div>
-              <div className="mt-1 flex justify-between text-[8px] font-bold uppercase tracking-wide opacity-90 sm:text-[9px]">
-                <span>{stealthFeedback?.visible_to_count ?? perceptionSnapshot.totals.combat} seeing</span>
-                <span>{stealthFeedback?.alerted_count ?? perceptionSnapshot.totals.alerted_actors} alerted</span>
-              </div>
-              {perceptionAlertRows.length > 0 && (
-                <div className="mt-1 space-y-0.5 border-t border-current/25 pt-1">
-                  {perceptionAlertRows.map((alert) => (
-                    <div key={alert.key} className="text-[8px] font-bold leading-tight sm:text-[9px]" title={`${alert.sense}: ${alert.cause} at ${alert.target[0]},${alert.target[1]}`}>
-                      <div className="flex justify-between gap-2">
-                        <span className="truncate">{alert.name.split(" ")[0]}</span>
-                        <span className="shrink-0 opacity-90">
-                          {ALERTNESS_LABELS[alert.alertness]} {Math.round(alert.score * 100)}
-                        </span>
-                      </div>
-                      <div className="truncate font-normal opacity-75">{alert.cause} · {alert.target[0]},{alert.target[1]}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
             </div>
           )}
 
@@ -9521,7 +10793,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
 
           {/* Danger panel — who's hunting you, how hurt they are.
               In combat the initiative strip carries this information. */}
-          {!inCombat && nearbyHostiles.length > 0 && (
+          {!inCombat && visibleNearbyHostiles.length > 0 && (
             <div
               className="px-4 py-3 bg-ui-panel border-[#8b1c1c] rounded-sm shadow-[0_0_20px_rgba(0,0,0,0.8)] flex flex-col gap-2.5 w-48 mt-1"
               style={{ borderStyle: "solid", borderWidth: "1px" }}
@@ -9530,7 +10802,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                 <Swords className="w-4 h-4" />
                 Hostiles
               </div>
-              {nearbyHostiles.slice(0, 3).map((h) => (
+              {visibleNearbyHostiles.slice(0, 3).map((h) => (
                 <div key={h.key}>
                   <div className="flex justify-between items-end mb-1 px-1">
                     <span className="text-[10px] font-serif font-bold text-[#e63946] truncate pr-1">
@@ -9550,9 +10822,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                   </div>
                 </div>
               ))}
-              {nearbyHostiles.length > 3 && (
+              {visibleNearbyHostiles.length > 3 && (
                 <div className="text-center text-[10px] font-serif font-bold text-[#8b1c1c] pt-1 italic">
-                  + {nearbyHostiles.length - 3} More
+                  + {visibleNearbyHostiles.length - 3} More
                 </div>
               )}
             </div>
@@ -9678,6 +10950,18 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                 </button>
                 <button
                   onPointerDown={(event) => { event.stopPropagation(); clearInputState(); }}
+                  onClick={() => { clearInputState(); setShowMemoryDebug((value) => !value); }}
+                  title="Unknown / Remembered / Visible presentation states"
+                  className={`h-7 shrink-0 rounded-sm px-2 font-[family-name:var(--font-display)] text-[10px] font-bold uppercase tracking-wider transition-colors sm:text-[11px] ${
+                    showMemoryDebug
+                      ? "bg-violet-500/25 text-violet-100"
+                      : "text-neutral-400 hover:text-neutral-100"
+                  }`}
+                >
+                  Memory
+                </button>
+                <button
+                  onPointerDown={(event) => { event.stopPropagation(); clearInputState(); }}
                   onClick={() => {
                     clearInputState();
                     setFogOfWar(!fogOfWar);
@@ -9736,9 +11020,56 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                 <div key={`sense:${alert.actor_id}`} className="mb-1 border-b border-cyan-950/80 pb-1 last:border-0">
                   <div className="text-neutral-200">{gamePackage.entities.find((entity) => entity.id === alert.entity_id)?.display_name || alert.entity_id}</div>
                   <div>{alert.sensory_profile_id || "default"}/{alert.sense_id || "sense"} · {alert.cause || alert.stimulus.kind}</div>
-                  <div className="text-cyan-300/80">{alert.alertness} {Math.round(alert.score * 100)} · evidence {alert.target_cell[0]},{alert.target_cell[1]} · t{alert.evidence_tick ?? alert.stimulus.tick ?? perceptionSnapshot.generated_at_tick}</div>
+                  <div className="text-cyan-300/80">{alert.alertness} {Math.round(alert.score * 100)} · {alert.stimulus.kind === "sound" ? "last-heard estimate" : "evidence"} {alert.target_cell[0]},{alert.target_cell[1]} · t{alert.evidence_tick ?? alert.stimulus.tick ?? perceptionSnapshot.generated_at_tick}</div>
+                  {alert.stimulus.kind === "sound" && (
+                    <div className="text-violet-300/75">
+                      repeat {alert.sound_repeat_count ?? 0} · live target {alert.tracks_live_target ? "yes" : "no"}
+                    </div>
+                  )}
                 </div>
               ))}
+              <div className="mt-2 border-t border-cyan-900/80 pt-1 font-bold uppercase tracking-wider text-cyan-300">
+                Mechanical sound pulses
+              </div>
+              {!(perceptionSnapshot?.stimuli || []).some((stimulus) => stimulus.kind === "sound") ? (
+                <div className="text-neutral-500">No active sound stimulus.</div>
+              ) : (perceptionSnapshot?.stimuli || [])
+                .filter((stimulus) => stimulus.kind === "sound")
+                .slice(-8)
+                .map((stimulus, index) => (
+                  <div
+                    key={`sound-debug:${stimulus.sequence || stimulus.tick || index}:${stimulus.cell[0]}:${stimulus.cell[1]}`}
+                    className="border-b border-cyan-950/80 py-0.5 last:border-0"
+                  >
+                    <div className="text-neutral-200">
+                      {stimulus.source_category || stimulus.tag || "sound"} · seq {stimulus.sequence ?? "—"}
+                    </div>
+                    <div className="text-cyan-300/80">
+                      origin {stimulus.cell[0]},{stimulus.cell[1]} · intensity {Math.round(stimulus.intensity * 100)} · radius {Math.round(stimulus.radius * 10) / 10}
+                    </div>
+                  </div>
+                ))}
+            </div>
+          )}
+          {showMemoryDebug && (
+            <div className="pointer-events-none absolute right-2 top-24 z-30 w-56 rounded-sm border border-violet-700/70 bg-neutral-950/94 p-2 font-mono text-[10px] leading-snug text-violet-100 shadow-lg backdrop-blur-sm sm:top-28">
+              <div className="mb-1 font-bold uppercase tracking-wider text-violet-300">
+                Memory vision · LOS gated
+              </div>
+              <div className="grid grid-cols-[0.75rem_1fr_auto] items-center gap-x-1.5 gap-y-1">
+                <span className="h-2.5 w-2.5 rounded-sm bg-cyan-400" />
+                <span>Visible</span>
+                <span>{memoryDebugState.visible}</span>
+                <span className="h-2.5 w-2.5 rounded-sm bg-violet-500" />
+                <span>Remembered</span>
+                <span>{memoryDebugState.remembered}</span>
+                <span className="h-2.5 w-2.5 rounded-sm bg-red-500" />
+                <span>Unknown / occluded</span>
+                <span>{memoryDebugState.unknown}</span>
+              </div>
+              <div className="mt-1.5 border-t border-violet-900/80 pt-1 text-[9px] text-violet-300/75">
+                Violet memory shows only inside current geometric LOS.
+              </div>
             </div>
           )}
           {showBehaviorIntents && (
@@ -10073,39 +11404,75 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         />
       )}
 
-      {/* Game Over Overlay */}
-      {saveData &&
-        saveData.playerStats.hp !== undefined &&
-        saveData.playerStats.hp <= 0 && (
-          <div className="absolute inset-0 bg-red-950/80 z-50 flex flex-col items-center justify-center p-4">
-            <h1 className="text-6xl font-bold font-serif text-red-500 mb-4 tracking-widest drop-shadow-[0_0_15px_rgba(239,68,68,0.8)]">
-              YOU DIED
+      {/* Succession is persisted before this notice appears. Refreshing here
+          restores the same transition instead of replaying the death. */}
+      {successionNoticeOpen && successionNotice && successionDeceased && successionSuccessor && (
+        <div
+          data-testid="succession-overlay"
+          className="absolute inset-0 z-50 flex items-center justify-center bg-[radial-gradient(ellipse_at_center,rgba(45,28,69,0.93)_0%,rgba(3,3,8,0.98)_72%)] p-4"
+        >
+          <div className="w-full max-w-xl border border-violet-700/80 bg-neutral-950/94 p-6 text-center shadow-[0_0_60px_rgba(76,29,149,0.45)] sm:p-8">
+            <div className="font-[family-name:var(--font-display)] text-[10px] font-bold uppercase tracking-[0.34em] text-violet-300">
+              Expedition {successionDeceased.death?.expedition_index || ""} closed
+            </div>
+            <h1 className="mt-3 font-serif text-4xl font-bold text-red-300 sm:text-5xl">
+              {successionDeceased.display_name} died
             </h1>
-            <p className="text-red-200/60 mb-8 max-w-sm text-center">
-              Your run has ended. Load a save or begin again.
+            <p className="mx-auto mt-4 max-w-md font-serif text-sm leading-relaxed text-neutral-300">
+              The map remembers. A ghost request and death-bundle request have been recorded at {successionDeceased.death?.map_id || "the last map"}
+              {successionDeceased.death ? ` · ${successionDeceased.death.cell[0]},${successionDeceased.death.cell[1]}` : ""}.
             </p>
-            <div className="flex gap-4">
+            <div className="mx-auto mt-6 max-w-sm border-y border-violet-900/70 py-4">
+              <div className="font-[family-name:var(--font-display)] text-[9px] font-bold uppercase tracking-[0.28em] text-violet-400">
+                The next Intercessor
+              </div>
+              <div className="mt-1 font-serif text-2xl font-bold text-violet-100">
+                {successionSuccessor.display_name}
+              </div>
+              <div className="mt-1 text-[10px] font-bold uppercase tracking-widest text-neutral-500">
+                Generation {successionSuccessor.generation} · Expedition {saveData.world_state_layers?.expedition.index || ""}
+              </div>
+            </div>
+            <div className="mt-6 flex flex-col justify-center gap-3 sm:flex-row">
               <button
                 onClick={() => {
-                  playSfx("ui_click", { volume: 0.22, cooldownMs: 120 });
-                  resetRun();
+                  clearInputState();
+                  playSfx("ui_click", { volume: 0.26, cooldownMs: 120 });
+                  commitRuntimeSave(acknowledgeSuccessionTransition(saveData));
+                  addLog(`${successionSuccessor.display_name} begins the next expedition.`);
                 }}
-                className="px-8 py-3 bg-red-900 hover:bg-red-800 text-red-100 rounded shadow-[0_0_15px_rgba(153,27,27,0.5)] font-bold tracking-widest hover:scale-105 transition-all"
+                className="border border-violet-500 bg-violet-950/80 px-7 py-3 font-[family-name:var(--font-display)] text-xs font-bold uppercase tracking-[0.2em] text-violet-100 transition hover:bg-violet-900"
               >
-                RESTART
+                Continue as {successionSuccessor.display_name}
               </button>
               <button
                 onClick={() => {
                   playSfx("save_chime", { volume: 0.32, cooldownMs: 120 });
                   setShowSaveMenu(true);
                 }}
-                className="px-8 py-3 bg-amber-950 hover:bg-amber-900 text-amber-100 border border-amber-800 rounded font-bold tracking-widest hover:scale-105 transition-all"
+                className="border border-amber-800 bg-amber-950/70 px-6 py-3 font-[family-name:var(--font-display)] text-xs font-bold uppercase tracking-[0.2em] text-amber-100 transition hover:bg-amber-900"
               >
-                LOAD SAVE
+                Load Save
               </button>
             </div>
           </div>
-        )}
+        </div>
+      )}
+
+      {/* Packages may explicitly disable succession and retain conventional
+          game-over behavior. New Game is the only full campaign discard. */}
+      {!successionNoticeOpen &&
+        gamePackage.settings?.intercessor_succession?.enabled === false &&
+        saveData.playerStats.hp <= 0 && (
+        <div className="absolute inset-0 bg-red-950/80 z-50 flex flex-col items-center justify-center p-4">
+          <h1 className="text-6xl font-bold font-serif text-red-500 mb-4 tracking-widest">YOU DIED</h1>
+          <p className="text-red-200/60 mb-8 max-w-sm text-center">Succession is disabled for this package.</p>
+          <div className="flex gap-4">
+            <button onClick={resetRun} className="px-8 py-3 bg-red-900 text-red-100 rounded font-bold tracking-widest">NEW CAMPAIGN</button>
+            <button onClick={() => setShowSaveMenu(true)} className="px-8 py-3 bg-amber-950 text-amber-100 border border-amber-800 rounded font-bold tracking-widest">LOAD SAVE</button>
+          </div>
+        </div>
+      )}
 
       {/* Journal Overlay */}
       {showJournal && (
@@ -10215,6 +11582,73 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
               </section>
 
               <section className="space-y-4">
+                <div className="space-y-2" data-testid="intercessor-history">
+                  <div className="flex items-center justify-between gap-2">
+                    <h3 className="text-xs font-semibold uppercase tracking-wide text-violet-400">Intercessor History</h3>
+                    <span className="text-[10px] font-bold uppercase tracking-wide text-neutral-600">
+                      Expedition {saveData.world_state_layers?.expedition.index || 1}
+                    </span>
+                  </div>
+                  {intercessorHistory.map((record) => {
+                    const deathMap = record.death
+                      ? gamePackage.maps.find((map) => map.id === record.death?.map_id)
+                      : undefined;
+                    return (
+                      <div
+                        key={record.id}
+                        data-intercessor-record-id={record.id}
+                        className={`rounded border px-3 py-2 ${
+                          record.status === "active"
+                            ? "border-violet-700/70 bg-violet-950/25"
+                            : "border-neutral-800 bg-neutral-900/90"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="truncate font-serif text-sm font-bold text-neutral-100">{record.display_name}</span>
+                          <span className={`text-[9px] font-bold uppercase tracking-widest ${record.status === "active" ? "text-violet-300" : "text-red-300"}`}>
+                            {record.status}
+                          </span>
+                        </div>
+                        <div className="mt-0.5 text-[10px] font-bold uppercase tracking-wide text-neutral-500">
+                          Generation {record.generation}
+                          {record.signature_skill_id ? ` · ${gamePackage.abilities.find((skill) => skill.id === record.signature_skill_id)?.display_name || record.signature_skill_id}` : ""}
+                        </div>
+                        {record.death && (
+                          <div className="mt-2 border-t border-neutral-800 pt-2 text-[10px] leading-relaxed text-neutral-400">
+                            Died in {deathMap?.display_name || record.death.map_id} at {record.death.cell[0]},{record.death.cell[1]} · Day {Math.floor(record.death.clock_minutes / 1440) + 1}, {String(Math.floor((record.death.clock_minutes % 1440) / 60)).padStart(2, "0")}:{String(record.death.clock_minutes % 60).padStart(2, "0")}
+                            <div className="mt-1 text-violet-400/80">
+                              Ghost {record.ghost_request_id ? "requested" : "not requested"} · Bundle {record.bundle_request_id ? "requested" : "not requested"}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {gamePackage.settings?.campaign_debug && currentIntercessor && (
+                    <button
+                      type="button"
+                      data-testid="reset-expedition-debug"
+                      onClick={() => {
+                        const current = usePlayStore.getState().saveData;
+                        if (!current) return;
+                        const result = beginNewExpedition(baseGamePackage, current, {
+                          reason: "reset",
+                          intercessorId: currentIntercessor.id,
+                        });
+                        commitRuntimeSave(result.save);
+                        setShowJournal(false);
+                        addLog(
+                          `Expedition ${result.closedExpedition.index} closed. Campaign memory retained; tactical state reset.`,
+                        );
+                        playSfx("door_transition", { volume: 0.35, cooldownMs: 180 });
+                      }}
+                      className="w-full rounded border border-violet-800 bg-violet-950/35 px-3 py-2 text-[10px] font-bold uppercase tracking-widest text-violet-200 transition hover:bg-violet-900/50"
+                    >
+                      QA: end expedition here
+                    </button>
+                  )}
+                </div>
+
                 <div className="space-y-2">
                   <h3 className="text-xs font-semibold uppercase tracking-wide text-neutral-500">Inventory</h3>
                   {(saveData.inventory || []).filter((entry) => entry.count > 0).length > 0 ? (
@@ -10942,6 +12376,8 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                 <div className="flex flex-col items-center gap-2">
                   <p className="text-neutral-500">Document not found.</p>
                   <button
+                    type="button"
+                    aria-label="Close document"
                     onClick={() => {
                       playSfx("ui_back", { volume: 0.2, cooldownMs: 120 });
                       setActiveDocumentId(null);
@@ -10960,6 +12396,8 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                     {document.display_name}
                   </h3>
                   <button
+                    type="button"
+                    aria-label="Close document"
                     onClick={() => {
                       playSfx("ui_back", { volume: 0.2, cooldownMs: 120 });
                       setActiveDocumentId(null);
@@ -10976,6 +12414,264 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                   {document.content}
                 </div>
               </div>
+            );
+          })()
+        ) : activeDialogueId && activeDialogue?.format === "keyword_v1" ? (
+          (() => {
+            const sceneImageUrl = activeKeywordResponse?.scene_image_url;
+            const hasSceneImage = Boolean(sceneImageUrl);
+            const archiveTopics = knownDialogueTopics.filter(
+              (topic) => dialogueArchiveFilter === "all" || topic.category === dialogueArchiveFilter,
+            );
+            const eligibleInventory = (saveData.inventory || [])
+              .filter((entry) => entry.count > 0)
+              .map((entry) => ({
+                ...entry,
+                item: gamePackage.items.find((item) => item.id === entry.id),
+              }))
+              .filter((entry) => Boolean(entry.item));
+            return (
+              <>
+                {hasSceneImage && sceneImageUrl ? (
+                  <DialogueSceneImageStage
+                    src={sceneImageUrl}
+                    alt={activeKeywordResponse?.scene_image_alt}
+                  />
+                ) : (
+                  <DialoguePortraitStage
+                    speaker={activeKeywordSpeaker}
+                    gamePackage={gamePackage}
+                    dialogueId={activeDialogue.id}
+                    includePlayer={false}
+                    participantEntityId={activeConversationEntityId}
+                  />
+                )}
+                <div
+                  className={`w-full ${
+                    hasSceneImage
+                      ? "max-w-3xl bg-black/70 backdrop-blur-[2px] border-x border-cyan-300/45"
+                      : "max-w-2xl bg-[#070812]/92 backdrop-blur-[2px] border-x border-indigo-400/35"
+                  } h-full flex flex-col relative z-20 shadow-[0_0_34px_rgba(0,0,0,0.78)]`}
+                >
+                  <div className="flex shrink-0 items-center justify-between border-b border-indigo-400/30 px-4 py-2 sm:px-6 sm:py-3">
+                    <div className="min-w-0">
+                      <h3 className="truncate font-[family-name:var(--font-display)] text-base font-bold uppercase tracking-[0.2em] text-cyan-200 text-accent-glow sm:text-xl">
+                        {activeKeywordSpeaker}
+                      </h3>
+                      <p className="mt-0.5 text-[10px] uppercase tracking-[0.22em] text-indigo-200/55">
+                        Choose what deserves attention
+                      </p>
+                    </div>
+                    <div className="ml-3 flex shrink-0 items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDialogueArchiveOpen((open) => !open);
+                          setDialogueShowItemPickerOpen(false);
+                          playSfx("ui_click", { volume: 0.16, cooldownMs: 80 });
+                        }}
+                        className={`flex items-center gap-2 rounded border px-3 py-1.5 text-[10px] font-bold uppercase tracking-[0.18em] transition ${
+                          dialogueArchiveOpen
+                            ? "border-cyan-300/70 bg-cyan-300/15 text-cyan-100"
+                            : "border-indigo-300/30 bg-indigo-300/5 text-indigo-100/75 hover:border-cyan-300/55 hover:text-cyan-100"
+                        }`}
+                      >
+                        <BookOpen className="h-3.5 w-3.5" />
+                        Topics
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="Leave conversation"
+                        title="Leave conversation"
+                        onClick={() => {
+                          playSfx("ui_back", { volume: 0.2, cooldownMs: 120 });
+                          finishKeywordConversation();
+                        }}
+                        className="rounded border border-indigo-300/25 p-1.5 text-indigo-100/55 transition hover:border-cyan-300/55 hover:bg-indigo-300/10 hover:text-cyan-100"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex-1 overflow-y-auto px-4 py-3 sm:px-7 sm:py-5">
+                    {activeKeywordResponse ? (
+                      <p className="text-center font-serif text-sm leading-relaxed text-neutral-100 drop-shadow-sm sm:text-lg">
+                        {renderKeywordResponseText(activeKeywordResponse.text)}
+                      </p>
+                    ) : (
+                      <p className="text-center font-serif text-sm italic text-indigo-100/55 sm:text-base">
+                        No further response.
+                      </p>
+                    )}
+                    {activeConversationShownItemId && (
+                      <p className="mt-3 text-center text-[10px] uppercase tracking-[0.18em] text-indigo-200/55">
+                        Shown: {gamePackage.items.find((item) => item.id === activeConversationShownItemId)?.display_name || activeConversationShownItemId}
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="shrink-0 border-t border-indigo-400/30 bg-black/25 px-3 py-2 sm:px-5 sm:py-3">
+                    {activeConversationEnding ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          playSfx("ui_back", { volume: 0.2, cooldownMs: 120 });
+                          finishKeywordConversation();
+                        }}
+                        className="w-full rounded border border-cyan-300/45 bg-cyan-300/10 px-4 py-2 text-center text-xs font-bold uppercase tracking-[0.2em] text-cyan-100 transition hover:bg-cyan-300/20"
+                      >
+                        {pendingDialogueCutsceneId ? "Continue" : "Close"}
+                      </button>
+                    ) : (
+                      <div className="flex flex-wrap justify-center gap-1.5 sm:gap-2">
+                        {contextualDialogueTopics.map((topic) => (
+                          <button
+                            type="button"
+                            key={topic.key}
+                            onClick={() => selectConversationTopic(topic.ref)}
+                            className={`relative rounded border px-3 py-1.5 text-xs font-semibold tracking-wide transition sm:text-sm ${
+                              topic.actionKind
+                                ? "border-neutral-500/45 bg-neutral-900/65 text-neutral-200 hover:border-cyan-300/50 hover:text-cyan-100"
+                                : topic.changed
+                                  ? "border-violet-300/65 bg-violet-400/15 text-violet-100 shadow-[0_0_12px_rgba(196,181,253,0.2)]"
+                                  : "border-indigo-300/35 bg-indigo-950/65 text-indigo-100 hover:border-cyan-300/60 hover:text-cyan-100"
+                            }`}
+                          >
+                            {topic.changed && (
+                              <span className="mr-1 text-[9px] text-violet-200" aria-label="New response available">
+                                ◇
+                              </span>
+                            )}
+                            {topic.displayLabel}
+                          </button>
+                        ))}
+                        {contextualDialogueTopics.length === 0 && (
+                          <button
+                            type="button"
+                            onClick={() => setDialogueArchiveOpen(true)}
+                            className="rounded border border-indigo-300/30 px-4 py-2 text-xs uppercase tracking-[0.18em] text-indigo-100/70 hover:text-cyan-100"
+                          >
+                            Open topic archive
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {dialogueArchiveOpen && (
+                    <div className="absolute inset-0 z-40 flex flex-col bg-[#060711]/[0.98] backdrop-blur-md">
+                      <div className="flex shrink-0 items-center justify-between border-b border-indigo-400/35 px-4 py-3">
+                        <div>
+                          <h4 className="font-[family-name:var(--font-display)] text-sm font-bold uppercase tracking-[0.2em] text-cyan-200 sm:text-base">
+                            Remembered Topics
+                          </h4>
+                          <p className="mt-1 text-[10px] tracking-wide text-indigo-100/50">
+                            Stable names, places, objects, events, and intentions.
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setDialogueArchiveOpen(false)}
+                          className="rounded p-2 text-indigo-100/60 hover:bg-indigo-300/10 hover:text-cyan-100"
+                          aria-label="Close topic archive"
+                        >
+                          <X className="h-5 w-5" />
+                        </button>
+                      </div>
+                      <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-indigo-400/20 px-3 py-2">
+                        <button
+                          type="button"
+                          onClick={() => setDialogueArchiveFilter("all")}
+                          className={`rounded px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider ${dialogueArchiveFilter === "all" ? "bg-cyan-300/15 text-cyan-100" : "text-indigo-100/55 hover:text-indigo-100"}`}
+                        >
+                          All
+                        </button>
+                        {DIALOGUE_ARCHIVE_CATEGORIES.map((category) => (
+                          <button
+                            type="button"
+                            key={category.id}
+                            onClick={() => setDialogueArchiveFilter(category.id)}
+                            className={`whitespace-nowrap rounded px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider ${dialogueArchiveFilter === category.id ? "bg-cyan-300/15 text-cyan-100" : "text-indigo-100/55 hover:text-indigo-100"}`}
+                          >
+                            {category.label}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="grid flex-1 auto-rows-min grid-cols-1 gap-2 overflow-y-auto p-3 sm:grid-cols-2">
+                        {archiveTopics.map((topic) => (
+                          <button
+                            type="button"
+                            key={topic.key}
+                            disabled={!topic.relevant}
+                            onClick={() => selectConversationTopic(topic.ref)}
+                            className={`flex items-center justify-between rounded border px-3 py-2 text-left transition ${
+                              topic.relevant
+                                ? "border-indigo-300/35 bg-indigo-950/55 text-indigo-50 hover:border-cyan-300/60"
+                                : "cursor-default border-indigo-300/10 bg-black/20 text-indigo-100/30"
+                            }`}
+                          >
+                            <span className="truncate text-sm font-semibold">{topic.displayLabel}</span>
+                            <span className="ml-2 flex shrink-0 items-center gap-2 text-[9px] uppercase tracking-wider text-indigo-200/45">
+                              {topic.changed && <span className="text-violet-200">◇ new</span>}
+                              {topic.scope}
+                            </span>
+                          </button>
+                        ))}
+                        {archiveTopics.length === 0 && (
+                          <p className="col-span-full py-8 text-center font-serif italic text-indigo-100/45">
+                            No remembered topics in this group.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {dialogueShowItemPickerOpen && (
+                    <div className="absolute inset-0 z-50 flex flex-col bg-[#060711]/[0.98] backdrop-blur-md">
+                      <div className="flex shrink-0 items-center justify-between border-b border-indigo-400/35 px-4 py-3">
+                        <div>
+                          <h4 className="font-[family-name:var(--font-display)] text-sm font-bold uppercase tracking-[0.2em] text-cyan-200 sm:text-base">
+                            Show Item
+                          </h4>
+                          <p className="mt-1 text-[10px] text-indigo-100/50">The item stays in your inventory.</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setDialogueShowItemPickerOpen(false)}
+                          className="rounded p-2 text-indigo-100/60 hover:bg-indigo-300/10 hover:text-cyan-100"
+                          aria-label="Cancel showing an item"
+                        >
+                          <X className="h-5 w-5" />
+                        </button>
+                      </div>
+                      <div className="grid flex-1 auto-rows-min grid-cols-1 gap-2 overflow-y-auto p-4 sm:grid-cols-2">
+                        {eligibleInventory.map((entry) => (
+                          <button
+                            type="button"
+                            key={entry.id}
+                            onClick={() =>
+                              selectConversationTopic(
+                                { kind: "static", topicId: "action:show_item" },
+                                entry.id,
+                              )
+                            }
+                            className="flex items-center justify-between rounded border border-indigo-300/35 bg-indigo-950/55 px-4 py-3 text-left text-indigo-50 transition hover:border-cyan-300/60 hover:bg-indigo-900/55"
+                          >
+                            <span className="font-semibold">{entry.item?.display_name}</span>
+                            <span className="text-xs text-indigo-200/55">×{entry.count}</span>
+                          </button>
+                        ))}
+                        {eligibleInventory.length === 0 && (
+                          <p className="col-span-full py-8 text-center font-serif italic text-indigo-100/45">
+                            You carry nothing that can be shown.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </>
             );
           })()
         ) : activeDialogueId && activeDialogueNodeId ? (

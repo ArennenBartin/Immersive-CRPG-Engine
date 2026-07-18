@@ -56,6 +56,7 @@ import {
   ContainerItemRef,
   ContainerRef,
   DialogueChoiceOutcome,
+  KeywordDialogueOutcome,
   DoorRef,
   DroppedItemRef,
   Engine,
@@ -65,6 +66,7 @@ import {
   GroundItemRef,
   InteractiveGridWorld,
   MapTransitionRef,
+  MechanicalSoundMetadata,
   NpcTaskAdvanceOutcome,
   PushableObjectRef,
   QuestObjectiveCompletion,
@@ -79,6 +81,11 @@ import {
   TriggerRef,
   ValidationResult,
 } from "./pipeline";
+import {
+  isActorUsingStealthStance,
+  movementNoiseLoudness,
+  resolveMovementHearingSettings,
+} from "./hearingStealth";
 import { hashSeed, RngStreams } from "./rng";
 import {
   buildConditionContext,
@@ -86,6 +93,14 @@ import {
   resolveDialogueChoice,
   resolveEnding,
 } from "./story";
+import {
+  discoverDocumentDialogueTopics,
+  discoverItemDialogueTopics,
+  discoverMapDialogueTopics,
+  resolveKeywordDialogueResponse,
+  selectKeywordDialogueTopic,
+  type DialogueTopicRef,
+} from "./keywordDialogue";
 import { applyStatus, statModifiers, type StatusInstance } from "./statuses";
 import {
   alderamonticoImpulseHasEffect,
@@ -116,6 +131,9 @@ export interface V1GridWorldOptions {
 export interface V1ActionCostOptions {
   energyCost?: number;
   clockMinutes?: number;
+  // Reserved for authored/systemic dispatch. Player-facing calls leave this
+  // false so the stance remains a real engine rule rather than only a UI lock.
+  bypassPlayerStealth?: boolean;
 }
 
 export interface V1MoveDispatchOptions extends V1GridWorldOptions, V1ActionCostOptions {
@@ -223,6 +241,15 @@ export interface V1ChooseDialogueOptionDispatchOptions extends V1StateDispatchOp
   dialogueId: string;
   nodeId: string;
   optionIndex: number;
+}
+
+export interface V1SelectDialogueTopicDispatchOptions extends V1StateDispatchOptions {
+  dialogueId: string;
+  topic?: DialogueTopicRef | null;
+  participantKey?: string;
+  shownItemId?: string;
+  entryNodeId?: string;
+  countAsk?: boolean;
 }
 
 export interface V1ShopBuyDispatchOptions extends V1StateDispatchOptions {
@@ -350,6 +377,15 @@ export interface V1EmitSoundDispatchOptions extends V1GridWorldOptions {
   loudness: number;
   tag?: string;
   materialTag?: string;
+  sourceCategory?: string;
+  sourceEntityId?: string;
+  sourceFactionId?: string;
+  ownerId?: string;
+  sourceAction?: string;
+  revealsIdentity?: boolean;
+  durationTicks?: number;
+  tags?: string[];
+  compactPropagation?: boolean;
 }
 
 export interface V1AdvanceNpcTasksDispatchOptions extends V1GridWorldOptions {
@@ -413,6 +449,8 @@ const cloneSaveForRuntime = (save: PlaySave): PlaySave => ({
   },
   playerStats: { ...save.playerStats },
   flags: { ...(save.flags || {}) },
+  variables: save.variables ? { ...save.variables } : undefined,
+  relationships: save.relationships ? { ...save.relationships } : undefined,
   quests: { ...(save.quests || {}) },
   inventory: [...(save.inventory || [])],
   chemistry: save.chemistry ? structuredClone(save.chemistry) : undefined,
@@ -423,6 +461,13 @@ const cloneSaveForRuntime = (save: PlaySave): PlaySave => ({
   map_deltas: { ...(save.map_deltas || {}) },
   faction_rep: { ...(save.faction_rep || {}) },
   read_documents: [...(save.read_documents || [])],
+  dialogue_memory: save.dialogue_memory ? structuredClone(save.dialogue_memory) : undefined,
+  world_state_layers: save.world_state_layers
+    ? structuredClone(save.world_state_layers)
+    : undefined,
+  intercessor_campaign: save.intercessor_campaign
+    ? structuredClone(save.intercessor_campaign)
+    : undefined,
   explored_cells: save.explored_cells
     ? Object.fromEntries(
         Object.entries(save.explored_cells).map(([mapId, cells]) => [mapId, [...cells]]),
@@ -453,6 +498,28 @@ const cloneSaveForRuntime = (save: PlaySave): PlaySave => ({
   immersive_scheduler: save.immersive_scheduler ? structuredClone(save.immersive_scheduler) : undefined,
   immersive_tile_layers: save.immersive_tile_layers ? structuredClone(save.immersive_tile_layers) : undefined,
   combat_queue: [...(save.combat_queue || [])],
+});
+
+type RuntimeSaveSnapshotMode = "deep" | "exploration_player_move";
+
+// Exploration movement is the hottest command in Play: one dispatch happens
+// for every fine-grid step. That path only replaces player, playerStats, flags,
+// map_deltas, and (when facts are emitted) world_facts immutably. Fork those
+// owned branches while sharing the large chemistry/simulation/memory subtrees
+// that movement only reads. Combat and every other command retain the complete
+// defensive clone above.
+const forkExplorationPlayerMoveSave = (save: PlaySave): PlaySave => ({
+  ...save,
+  player: {
+    ...save.player,
+    cell: cloneCell(save.player.cell),
+    facing: cloneCell(save.player.facing),
+  },
+  playerStats: { ...save.playerStats },
+  flags: { ...(save.flags || {}) },
+  map_deltas: { ...(save.map_deltas || {}) },
+  entity_states: { ...(save.entity_states || {}) },
+  world_facts: save.world_facts ? [...save.world_facts] : undefined,
 });
 
 const stepFacing = (fromX: number, fromY: number, toX: number, toY: number): [number, number] => [
@@ -506,8 +573,14 @@ export class V1GridWorld implements InteractiveGridWorld {
     placements: CurrentObjectPlacement[];
   };
 
-  constructor(private options: V1GridWorldOptions) {
-    this.save = cloneSaveForRuntime(options.save);
+  constructor(
+    private options: V1GridWorldOptions,
+    private snapshotMode: RuntimeSaveSnapshotMode = "deep",
+  ) {
+    this.save =
+      snapshotMode === "exploration_player_move"
+        ? forkExplorationPlayerMoveSave(options.save)
+        : cloneSaveForRuntime(options.save);
     this.activeMap = this.resolveMap(options.mapId || this.save.current_map_id);
     const cachedObjects = objectDefinitionIndexCache.get(options.gamePackage);
     this.objectById =
@@ -595,6 +668,15 @@ export class V1GridWorld implements InteractiveGridWorld {
 
   getSave(): PlaySave {
     return cloneSaveForRuntime(this.save);
+  }
+
+  // Dispatchers consume an owned result snapshot. The public getSave() API
+  // remains fully defensive; only the one-shot exploration movement world uses
+  // this copy-on-write fork to avoid deep-cloning the complete run a second time.
+  getDispatchSave(): PlaySave {
+    return this.snapshotMode === "exploration_player_move"
+      ? forkExplorationPlayerMoveSave(this.save)
+      : this.getSave();
   }
 
   getMapDelta(): MapDelta | undefined {
@@ -881,7 +963,25 @@ export class V1GridWorld implements InteractiveGridWorld {
         },
       };
       this.recordMovementSurfaceTransfer(id, to);
-      this.emitSoundAt(to, this.scaleMacroDistanceToFine(1), "footstep", id, "soft");
+      const surface = this.getActiveCell(x, y)?.terrain || "default";
+      const stealth = isActorUsingStealthStance(this.save, id);
+      this.emitSoundAt(
+        to,
+        this.scaleMacroDistanceToFine(
+          movementNoiseLoudness(this.options.gamePackage, this.save, id, surface),
+        ),
+        "footstep",
+        id,
+        surface,
+        {
+          sourceCategory: stealth ? "movement_stealth" : "movement_normal",
+          sourceEntityId: id,
+          sourceAction: "movement",
+          revealsIdentity: false,
+          tags: ["movement", stealth ? "stealth" : "walking", surface],
+          compactPropagation: true,
+        },
+      );
       return;
     }
 
@@ -897,7 +997,25 @@ export class V1GridWorld implements InteractiveGridWorld {
       },
     };
     this.recordMovementSurfaceTransfer(id, to);
-    this.emitSoundAt(to, this.scaleMacroDistanceToFine(1), "footstep", id, "soft");
+    const surface = this.getActiveCell(x, y)?.terrain || "default";
+    const stealth = isActorUsingStealthStance(this.save, id);
+    this.emitSoundAt(
+      to,
+      this.scaleMacroDistanceToFine(
+        movementNoiseLoudness(this.options.gamePackage, this.save, id, surface),
+      ),
+      "footstep",
+      id,
+      surface,
+      {
+        sourceCategory: stealth ? "movement_stealth" : "movement_normal",
+        sourceEntityId: id,
+        sourceAction: "movement",
+        revealsIdentity: false,
+        tags: ["movement", stealth ? "stealth" : "walking", surface],
+        compactPropagation: true,
+      },
+    );
   }
 
   // ── Interactive capabilities (ground items + doors) ──
@@ -933,6 +1051,20 @@ export class V1GridWorld implements InteractiveGridWorld {
         taken_items: [...(delta.taken_items || []), item.id],
       }));
     }
+    this.emitSoundAt(
+      this.save.player.cell,
+      this.scaleMacroDistanceToFine(0.75),
+      "item_pickup",
+      PLAYER_ENTITY_ID,
+      "soft",
+      {
+        sourceCategory: "interaction",
+        sourceAction: "pickup",
+        revealsIdentity: false,
+        tags: ["item", "interaction"],
+        compactPropagation: true,
+      },
+    );
   }
 
   canDropItemAt(itemId: string, count: number, cell: [number, number]): ValidationResult {
@@ -962,6 +1094,20 @@ export class V1GridWorld implements InteractiveGridWorld {
         { id: dropped.id, item_id: itemId, cell: cloneCell(cell), count },
       ],
     }));
+    this.emitSoundAt(
+      cell,
+      this.scaleMacroDistanceToFine(1.25),
+      "item_drop",
+      PLAYER_ENTITY_ID,
+      "solid",
+      {
+        sourceCategory: "impact",
+        sourceAction: "drop",
+        revealsIdentity: false,
+        tags: ["item", "impact"],
+        compactPropagation: true,
+      },
+    );
     return dropped;
   }
 
@@ -1087,7 +1233,7 @@ export class V1GridWorld implements InteractiveGridWorld {
   }
 
   changeMap(transition: MapTransitionRef): void {
-    this.save = {
+    this.save = discoverMapDialogueTopics(this.options.gamePackage, {
       ...this.save,
       current_map_id: transition.toMapId,
       player: {
@@ -1095,7 +1241,7 @@ export class V1GridWorld implements InteractiveGridWorld {
         cell: cloneCell(transition.cell),
         facing: cloneCell(transition.facing),
       },
-    };
+    }, transition.toMapId);
     this.activeMap = this.resolveMap(transition.toMapId);
     this.currentPlacementCache = undefined;
     this.indexCells();
@@ -1181,6 +1327,20 @@ export class V1GridWorld implements InteractiveGridWorld {
         updated_at_tick: this.tick,
       }),
     );
+    this.emitSoundAt(
+      container.cell,
+      this.scaleMacroDistanceToFine(1.5),
+      "container_open",
+      PLAYER_ENTITY_ID,
+      "wood",
+      {
+        sourceCategory: "interaction",
+        sourceAction: "open_container",
+        revealsIdentity: false,
+        tags: ["container", "interaction"],
+        compactPropagation: true,
+      },
+    );
   }
 
   searchContainer(container: ContainerRef): void {
@@ -1258,7 +1418,7 @@ export class V1GridWorld implements InteractiveGridWorld {
     const existing = inventory.find((entry) => entry.id === itemId);
     if (existing) existing.count += count;
     else inventory.push({ id: itemId, count });
-    this.save = { ...this.save, inventory };
+    this.save = discoverItemDialogueTopics(this.options.gamePackage, { ...this.save, inventory }, itemId);
   }
 
   removeItem(itemId: string, count: number): void {
@@ -1294,8 +1454,10 @@ export class V1GridWorld implements InteractiveGridWorld {
 
   markDocumentRead(documentId: string): void {
     const read = this.save.read_documents || [];
-    if (read.includes(documentId)) return;
-    this.save = { ...this.save, read_documents: [...read, documentId] };
+    const withRead = read.includes(documentId)
+      ? this.save
+      : { ...this.save, read_documents: [...read, documentId] };
+    this.save = discoverDocumentDialogueTopics(this.options.gamePackage, withRead, documentId);
   }
 
   learnSkill(skillId: string): void {
@@ -1547,6 +1709,73 @@ export class V1GridWorld implements InteractiveGridWorld {
     };
   }
 
+  canSelectDialogueTopic(
+    dialogueId: string,
+    topicKind: "static" | "dynamic" | "opening",
+    topicId: string | undefined,
+    participantKey: string | undefined,
+    shownItemId: string | undefined,
+    entryNodeId: string | undefined,
+  ): ValidationResult {
+    const topic: DialogueTopicRef | null = topicKind === "opening"
+      ? null
+      : topicKind === "dynamic"
+        ? { kind: "dynamic", dynamicTopicId: topicId || "" }
+        : { kind: "static", topicId: topicId || "" };
+    const resolution = resolveKeywordDialogueResponse({
+      gamePackage: this.options.gamePackage,
+      save: this.save,
+      dialogueId,
+      topic,
+      participantKey,
+      shownItemId,
+      entryNodeId,
+    });
+    if (resolution) return { ok: true };
+    if (topic?.kind === "static" && topic.topicId === "action:goodbye") return { ok: true };
+    return { ok: false, reason: "no keyword response" };
+  }
+
+  selectDialogueTopic(
+    dialogueId: string,
+    topicKind: "static" | "dynamic" | "opening",
+    topicId: string | undefined,
+    participantKey: string | undefined,
+    shownItemId: string | undefined,
+    entryNodeId: string | undefined,
+    countAsk: boolean,
+  ): KeywordDialogueOutcome {
+    const topic: DialogueTopicRef | null = topicKind === "opening"
+      ? null
+      : topicKind === "dynamic"
+        ? { kind: "dynamic", dynamicTopicId: topicId || "" }
+        : { kind: "static", topicId: topicId || "" };
+    const selected = selectKeywordDialogueTopic({
+      gamePackage: this.options.gamePackage,
+      save: this.save,
+      dialogueId,
+      topic,
+      participantKey,
+      shownItemId,
+      entryNodeId,
+      countAsk,
+    });
+    this.save = selected.save;
+    return {
+      dialogueId,
+      responseId: selected.response?.id,
+      responseText: selected.response?.text,
+      topicKey: selected.topicKey,
+      triggerCutsceneId: selected.triggerCutsceneId,
+      endsDialogue: selected.endConversation,
+      effectsApplied: selected.effectsApplied,
+      localTopicIds: selected.localTopicIds,
+      localDynamicTopicIds: selected.localDynamicTopicIds,
+      newlyDiscoveredTopicIds: selected.newlyDiscoveredTopicIds,
+      newlyDiscoveredDynamicTopicIds: selected.newlyDiscoveredDynamicTopicIds,
+    };
+  }
+
   canBuyShopItem(shopId: string, stockIndex: number): ValidationResult {
     const stock = this.getShopStockEntry(shopId, stockIndex);
     if (!stock) return { ok: false, reason: "no stock" };
@@ -1608,6 +1837,9 @@ export class V1GridWorld implements InteractiveGridWorld {
   }
 
   canMeleeAttack(actorId: string, targetId: string) {
+    if (isActorUsingStealthStance(this.save, actorId)) {
+      return { ok: false, reason: "stealth stance" };
+    }
     const actor = this.getCombatActor(actorId);
     if (!actor) return { ok: false, reason: "actor not found" };
     const target = this.getCombatActor(targetId);
@@ -1680,6 +1912,9 @@ export class V1GridWorld implements InteractiveGridWorld {
   }
 
   canCastSkill(actorId: string, skillId: string, targetCells: [number, number][]) {
+    if (isActorUsingStealthStance(this.save, actorId)) {
+      return { ok: false, reason: "stealth stance" };
+    }
     const actor = this.getCombatActor(actorId);
     if (!actor) return { ok: false, reason: "actor not found" };
     const skill = this.getSkill(skillId);
@@ -3087,6 +3322,44 @@ export class V1GridWorld implements InteractiveGridWorld {
     return undefined;
   }
 
+  private nextInvestigationSearchTarget(
+    task: SimulationNpcTaskRecord,
+  ): { target: [number, number]; step: number } | undefined {
+    if (task.task_type !== "investigate") return undefined;
+    const step = Math.max(0, Math.floor(task.search_step || 0));
+    const steps = Math.max(0, Math.floor(task.search_steps || 0));
+    if (step >= steps) return undefined;
+    const origin = task.search_origin_cell || task.target_cell || task.origin_cell!;
+    const distance = this.scaleMacroDistanceToFine(1);
+    const offsets: [number, number][] = [
+      [distance, 0],
+      [0, distance],
+      [-distance, 0],
+      [0, -distance],
+      [distance, distance],
+      [-distance, distance],
+      [-distance, -distance],
+      [distance, -distance],
+    ];
+    for (let offsetIndex = 0; offsetIndex < offsets.length; offsetIndex += 1) {
+      const offset = offsets[(step + offsetIndex) % offsets.length];
+      const candidate: [number, number] = [
+        origin[0] + offset[0],
+        origin[1] + offset[1],
+      ];
+      const cell = this.getActiveCell(candidate[0], candidate[1]);
+      if (
+        cell?.walkable &&
+        !this.cellObjectBlocks(cell) &&
+        !this.containerBlocks(candidate[0], candidate[1]) &&
+        !this.placementBlocks(candidate[0], candidate[1])
+      ) {
+        return { target: candidate, step: step + 1 };
+      }
+    }
+    return { target: cloneCell(origin), step: step + 1 };
+  }
+
   private findFleeStep(actorId: string, danger: [number, number]): [number, number] | undefined {
     const actor = this.getEntity(actorId);
     if (!actor) return undefined;
@@ -3272,6 +3545,21 @@ export class V1GridWorld implements InteractiveGridWorld {
         outcome.failed += 1;
         actedActors.add(activeTask.actor_id);
         return { ...activeTask, state: "failed" as const, result: "path_blocked", completed_at_tick: nextTick };
+      }
+
+      const searchTarget = this.nextInvestigationSearchTarget(activeTask);
+      if (searchTarget) {
+        actedActors.add(activeTask.actor_id);
+        return {
+          ...activeTask,
+          target_cell: searchTarget.target,
+          search_origin_cell:
+            activeTask.search_origin_cell ||
+            cloneCell(activeTask.target_cell),
+          search_step: searchTarget.step,
+          progress_ticks: (activeTask.progress_ticks || 0) + elapsed,
+          result: "searching_local_area",
+        };
       }
 
       const completed = this.completeNpcTask(activeTask);
@@ -4287,16 +4575,35 @@ export class V1GridWorld implements InteractiveGridWorld {
     tag: string,
     actorId = PLAYER_ENTITY_ID,
     materialTag?: string,
+    metadata: MechanicalSoundMetadata = {},
   ): { origin: [number, number]; cells: number; loudness: number; tag: string } {
+    const tuning = resolveMovementHearingSettings(this.options.gamePackage);
+    const soundSequence =
+      Math.max(0, Number(this.save.flags?.immersive_sound_sequence || 0)) + 1;
+    this.save = {
+      ...this.save,
+      flags: {
+        ...(this.save.flags || {}),
+        immersive_sound_sequence: soundSequence,
+      },
+    };
     const materialBoost = materialTag === "metal" || materialTag === "glass" ? 1.25 : materialTag === "cloth" ? 0.7 : 1;
     const effectiveLoudness = Math.max(1, loudness * materialBoost);
-    const radius = Math.max(1, Math.min(8, Math.ceil(effectiveLoudness)));
+    const attenuation = Math.max(0.05, tuning.sound_attenuation_per_cell);
+    const radius = Math.max(
+      1,
+      Math.min(
+        this.scaleMacroDistanceToFine(12),
+        Math.ceil(effectiveLoudness / attenuation),
+      ),
+    );
     const propagatedFields: Array<{
       cell: [number, number];
       field: Omit<SimulationEnvironmentFieldRecord, "id" | "created_at_tick" | "age_ticks">;
     }> = [];
-    for (let dx = -radius; dx <= radius; dx += 1) {
-      for (let dy = -radius; dy <= radius; dy += 1) {
+    const propagationRadius = metadata.compactPropagation ? 0 : radius;
+    for (let dx = -propagationRadius; dx <= propagationRadius; dx += 1) {
+      for (let dy = -propagationRadius; dy <= propagationRadius; dy += 1) {
         const distance = Math.abs(dx) + Math.abs(dy);
         if (distance > radius) continue;
         const target: [number, number] = [cell[0] + dx, cell[1] + dy];
@@ -4313,10 +4620,19 @@ export class V1GridWorld implements InteractiveGridWorld {
             occlusion = 1;
             break;
           }
-          if (rayCell.blocks_los) occlusion += 0.28;
+          if (
+            rayCell.blocks_los ||
+            this.cellObjectBlocks(rayCell) ||
+            this.containerBlocks(rayCell.x, rayCell.z) ||
+            this.placementBlocks(rayCell.x, rayCell.z)
+          ) {
+            occlusion += tuning.barrier_reduction;
+          }
         }
         occlusion = Math.min(0.92, occlusion);
-        const openIntensity = (effectiveLoudness - distance) / Math.max(1, effectiveLoudness);
+        const openIntensity =
+          (effectiveLoudness - distance * attenuation) /
+          Math.max(1, effectiveLoudness);
         const intensity = Math.max(0.02, openIntensity * (1 - occlusion));
         if (intensity <= 0.02) continue;
         propagatedFields.push({
@@ -4327,14 +4643,23 @@ export class V1GridWorld implements InteractiveGridWorld {
             source: distance === 0 ? "runtime" : "propagation",
             tag,
             actor_id: actorId,
-            action: "emit_sound",
+            action: metadata.sourceAction || "emit_sound",
             origin_cell: cloneCell(cell),
             radius,
             frequency_tag: tag,
             material_tag: materialTag,
             occlusion,
             decay_per_tick: 0.25,
-            expires_at_tick: this.tick + 8,
+            expires_at_tick: this.tick + Math.max(1, metadata.durationTicks ?? 8),
+            source_category: metadata.sourceCategory || tag,
+            source_entity_id: metadata.sourceEntityId || actorId,
+            source_faction_id: metadata.sourceFactionId,
+            owner_id: metadata.ownerId,
+            reveals_identity: metadata.revealsIdentity ?? false,
+            duration_ticks: Math.max(1, metadata.durationTicks ?? 8),
+            stimulus_tags: [...new Set([tag, materialTag, ...(metadata.tags || [])].filter(Boolean))] as string[],
+            propagation_mode: metadata.compactPropagation ? "compact" : "expanded",
+            stimulus_sequence: soundSequence,
           },
         });
       }
@@ -4346,7 +4671,45 @@ export class V1GridWorld implements InteractiveGridWorld {
       // update instead; when several entries ever share a cell, reading back
       // from `environmentFields` preserves the original sequential semantics.
       this.updateMapDelta((delta) => {
-        const environmentFields = { ...(delta.environment_fields || {}) };
+        // Compact footsteps are transient evidence, but older saves retained
+        // every visited origin forever. That made each later step scan and
+        // serialize an ever-growing history. Prune expired sound and movement
+        // pulses older than four macro steps as the next compact pulse is
+        // committed. Non-sound fields and authored/scripted sound retain their
+        // existing lifetime semantics.
+        const oldestMovementSequence = Math.max(
+          0,
+          soundSequence - FINE_PER_MACRO * 4,
+        );
+        const environmentFields = Object.entries(
+          delta.environment_fields || {},
+        ).reduce<Record<string, SimulationEnvironmentFieldRecord[]>>(
+          (result, [key, fields]) => {
+            const retained = fields.filter((field) => {
+              if (field.kind !== "sound") return true;
+              if (
+                field.expires_at_tick !== undefined &&
+                field.expires_at_tick <= this.tick
+              ) {
+                return false;
+              }
+              const isCompactMovement =
+                field.propagation_mode === "compact" &&
+                (field.tag === "footstep" ||
+                  field.frequency_tag === "footstep" ||
+                  field.source_category === "movement_normal" ||
+                  field.source_category === "movement_stealth");
+              return (
+                !isCompactMovement ||
+                Number(field.stimulus_sequence || 0) >=
+                  oldestMovementSequence
+              );
+            });
+            if (retained.length > 0) result[key] = retained;
+            return result;
+          },
+          {},
+        );
         propagatedFields.forEach(({ cell: target, field }) => {
           const key = this.environmentFieldKey(target);
           const current = environmentFields[key] || [];
@@ -4354,7 +4717,9 @@ export class V1GridWorld implements InteractiveGridWorld {
             ...current.slice(-9),
             {
               ...field,
-              id: `env_${field.kind}_${this.tick}_${target[0]}_${target[1]}_${current.length}`,
+              id: metadata.compactPropagation
+                ? `env_${field.kind}_${this.tick}_${target[0]}_${target[1]}_${current.length}_${soundSequence}`
+                : `env_${field.kind}_${this.tick}_${target[0]}_${target[1]}_${current.length}`,
               age_ticks: 0,
               created_at_tick: this.tick,
             },
@@ -4362,9 +4727,6 @@ export class V1GridWorld implements InteractiveGridWorld {
         });
         return { ...delta, environment_fields: environmentFields };
       });
-    }
-    if (effectiveLoudness >= 3) {
-      this.queueNpcTasksForDisturbance("sound", cell, cell, Math.min(1, effectiveLoudness / 8), radius);
     }
     return {
       origin: cloneCell(cell),
@@ -4671,6 +5033,15 @@ export class V1GridWorld implements InteractiveGridWorld {
     object: ObjectData | undefined,
   ): PushableObjectRef {
     const affordance = resolveObjectManipulationAffordance(object);
+    const materialTag = (
+      object?.simulation?.material_id ||
+      object?.chem_material_id ||
+      "solid"
+    ).replace(/^sim_mat_/, "");
+    const macroSoundLoudness = Math.min(
+      12,
+      Math.max(3, Math.ceil(3 + affordance.mass_kg / 5)),
+    );
     return {
       key,
       objectId: placement.object_id,
@@ -4683,6 +5054,8 @@ export class V1GridWorld implements InteractiveGridWorld {
       pushDifficulty: affordance.push_difficulty,
       pushEnergyCost: affordance.push_energy_cost,
       requiresCooperation: affordance.requires_cooperation,
+      soundLoudness: this.scaleMacroDistanceToFine(macroSoundLoudness),
+      materialTag,
     };
   }
 
@@ -4958,7 +5331,7 @@ const buildV1DispatchResult = (
   result: ReturnType<Engine["dispatch"]>,
 ) => {
   const events = [...world.events.getLog().slice(eventStart)];
-  const afterSave = world.getSave();
+  const afterSave = world.getDispatchSave();
   const kernelFacts = result.ok
     ? createKernelFactsFromEngineEvents({
         gamePackage: options.gamePackage,
@@ -4971,12 +5344,24 @@ const buildV1DispatchResult = (
   return { ...result, events, save, world, kernelFacts };
 };
 
+const v1StealthActionBlocked = (
+  options: V1GridWorldOptions & V1ActionCostOptions,
+  actorId: string,
+) =>
+  options.bypassPlayerStealth !== true &&
+  isActorUsingStealthStance(options.save, actorId);
+
 export const dispatchV1MoveEntity = (options: V1MoveDispatchOptions) => {
   const engine = new Engine();
   registerCoreCommands(engine);
-  const world = createV1GridWorld(options);
-  const before = world.events.getLog().length;
   const actorId = options.actorId || PLAYER_ENTITY_ID;
+  const world = new V1GridWorld(
+    options,
+    actorId === PLAYER_ENTITY_ID && !options.save.in_combat
+      ? "exploration_player_move"
+      : "deep",
+  );
+  const before = world.events.getLog().length;
   let resolvedDelta: [number, number] = [options.dx, options.dy];
   let doorwayAssisted = false;
   let result = engine.dispatch(
@@ -5006,7 +5391,21 @@ export const dispatchV1MoveEntity = (options: V1MoveDispatchOptions) => {
     }
   }
   if (result.ok) {
-    world.applyActionCost(actorId, options);
+    const stealthMovement = isActorUsingStealthStance(options.save, actorId);
+    const speedMultiplier = resolveMovementHearingSettings(
+      options.gamePackage,
+    ).stealth_speed_multiplier;
+    world.applyActionCost(
+      actorId,
+      stealthMovement && Number(options.energyCost || 0) > 0
+        ? {
+            ...options,
+            energyCost: Math.ceil(
+              Number(options.energyCost || 0) / Math.max(0.1, speedMultiplier),
+            ),
+          }
+        : options,
+    );
   }
   const dispatchResult = buildV1DispatchResult(options, world, before, result);
   if (doorwayAssisted && actorId === PLAYER_ENTITY_ID) {
@@ -5097,10 +5496,18 @@ const dispatchV1ContainerCommand = (
   registerCoreCommands(engine);
   const world = createV1GridWorld(options);
   const before = world.events.getLog().length;
+  const actorId = options.actorId || PLAYER_ENTITY_ID;
+  if (v1StealthActionBlocked(options, actorId)) {
+    return buildV1DispatchResult(options, world, before, {
+      ok: false,
+      reason: "stealth stance",
+      events: [],
+    });
+  }
   const result = engine.dispatch(
     {
       type,
-      actorId: options.actorId || PLAYER_ENTITY_ID,
+      actorId,
       params: {
         containerId: options.containerId,
         ...params,
@@ -5146,10 +5553,18 @@ const dispatchV1CellCommand = (type: string, options: V1CellDispatchOptions) => 
   registerCoreCommands(engine);
   const world = createV1GridWorld(options);
   const before = world.events.getLog().length;
+  const actorId = options.actorId || PLAYER_ENTITY_ID;
+  if (v1StealthActionBlocked(options, actorId)) {
+    return buildV1DispatchResult(options, world, before, {
+      ok: false,
+      reason: "stealth stance",
+      events: [],
+    });
+  }
   const result = engine.dispatch(
     {
       type,
-      actorId: options.actorId || PLAYER_ENTITY_ID,
+      actorId,
       params: { x: options.x, y: options.y },
     },
     world,
@@ -5170,10 +5585,18 @@ export const dispatchV1DropItem = (options: V1DropItemDispatchOptions) => {
   registerCoreCommands(engine);
   const world = createV1GridWorld(options);
   const before = world.events.getLog().length;
+  const actorId = options.actorId || PLAYER_ENTITY_ID;
+  if (v1StealthActionBlocked(options, actorId)) {
+    return buildV1DispatchResult(options, world, before, {
+      ok: false,
+      reason: "stealth stance",
+      events: [],
+    });
+  }
   const result = engine.dispatch(
     {
       type: "drop_item",
-      actorId: options.actorId || PLAYER_ENTITY_ID,
+      actorId,
       params: { itemId: options.itemId, count: options.count ?? 1, cell: options.cell },
     },
     world,
@@ -5207,13 +5630,21 @@ const dispatchV1ObjectManipulation = (
   registerCoreCommands(engine);
   const world = createV1GridWorld(options);
   const before = world.events.getLog().length;
+  const actorId = options.actorId || PLAYER_ENTITY_ID;
+  if (v1StealthActionBlocked(options, actorId)) {
+    return buildV1DispatchResult(options, world, before, {
+      ok: false,
+      reason: "stealth stance",
+      events: [],
+    });
+  }
   const pushRef = world.getPushableObjectAt(options.x, options.y);
   const action = type === "carry_object" ? "carry" : type === "drag_object" ? "drag" : type === "pull_object" ? "pull" : "push";
   const computedEnergyCost = pushRef ? world.getManipulationEnergyCost(pushRef, action) : 0;
   const result = engine.dispatch(
     {
       type,
-      actorId: options.actorId || PLAYER_ENTITY_ID,
+      actorId,
       params: {
         x: options.x,
         y: options.y,
@@ -5303,6 +5734,15 @@ export const dispatchV1EmitSound = (options: V1EmitSoundDispatchOptions) => {
         loudness: options.loudness,
         tag: options.tag || "sound",
         materialTag: options.materialTag,
+        sourceCategory: options.sourceCategory,
+        sourceEntityId: options.sourceEntityId,
+        sourceFactionId: options.sourceFactionId,
+        ownerId: options.ownerId,
+        sourceAction: options.sourceAction,
+        revealsIdentity: options.revealsIdentity,
+        durationTicks: options.durationTicks,
+        tags: options.tags,
+        compactPropagation: options.compactPropagation,
       },
     },
     world,
@@ -5554,6 +5994,29 @@ export const dispatchV1ChooseDialogueOption = (options: V1ChooseDialogueOptionDi
   });
   const outcome = result.events.find((event) => event.type === "dialogue_option_chosen")
     ?.payload as unknown as DialogueChoiceOutcome | undefined;
+  return { ...result, outcome };
+};
+
+export const dispatchV1SelectDialogueTopic = (options: V1SelectDialogueTopicDispatchOptions) => {
+  const topicKind = !options.topic
+    ? "opening"
+    : options.topic.kind;
+  const topicId = !options.topic
+    ? undefined
+    : options.topic.kind === "dynamic"
+      ? options.topic.dynamicTopicId
+      : options.topic.topicId;
+  const result = dispatchV1StateCommand("select_dialogue_topic", options, {
+    dialogueId: options.dialogueId,
+    topicKind,
+    topicId,
+    participantKey: options.participantKey,
+    shownItemId: options.shownItemId,
+    entryNodeId: options.entryNodeId,
+    countAsk: options.countAsk ?? true,
+  });
+  const outcome = result.events.find((event) => event.type === "dialogue_topic_selected")
+    ?.payload as unknown as KeywordDialogueOutcome | undefined;
   return { ...result, outcome };
 };
 

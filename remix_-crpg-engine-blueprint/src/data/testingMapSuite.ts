@@ -3,7 +3,7 @@
 // authored content lives in src/data/qaSuite/* wing modules; this file merges
 // them into a package for the explicit builders in qaSuiteInstaller.ts.
 //
-// The suite is the engine's living acceptance test: a hub and ten labs that
+// The suite is the engine's living acceptance test: a hub and eleven labs that
 // prove the fine-grid movement rebuild, the flowing chemistry (button-released
 // floods, a viscosity race, fire with a wet moat, dissipating gas), the
 // emotional layer, dialogue/cutscene/quest/story systems, combat, world
@@ -27,6 +27,12 @@ import { storyWing } from "./qaSuite/storyWing";
 import { combatWing } from "./qaSuite/combatWing";
 import { worldWing } from "./qaSuite/worldWing";
 import { perceptionWing } from "./qaSuite/perceptionWing";
+import {
+  QA_PERSISTENCE_ARTIFACT_PLACEMENT_ID,
+  QA_PERSISTENCE_MAP_ID,
+  QA_PERSISTENCE_SHORTCUT_ID,
+  persistenceWing,
+} from "./qaSuite/persistenceWing";
 
 export const TEST_SUITE_START_MAP_ID = QA_START_MAP_ID;
 export const TEST_SUITE_START_SPAWN_ID = QA_START_SPAWN_ID;
@@ -34,7 +40,7 @@ export const TEST_SUITE_PLAYER_SPRITE_ID = peopleHorrorSpriteId(1, 1);
 // Bump on any suite-content change: persisted packages refresh their qa_*
 // content when this differs (engineStore hydration), and stale play saves
 // rebuild against the new version.
-export const TEST_SUITE_VERSION = "2.3.0";
+export const TEST_SUITE_VERSION = "3.1.0";
 
 const wings = mergeWings([
   hubWing,
@@ -43,6 +49,7 @@ const wings = mergeWings([
   combatWing,
   worldWing,
   perceptionWing,
+  persistenceWing,
 ]);
 export const TEST_SUITE_MAP_IDS = wings.maps.map((map) => map.id);
 const TEST_SUITE_MAP_ID_SET = new Set(TEST_SUITE_MAP_IDS);
@@ -85,12 +92,37 @@ export const withTestingMapSuite = (
       ],
       clock_start_hour: 9,
       end_title: "QA SUITE COMPLETE",
+      world_state_policy: {
+        campaign_switch_ids: ["qa_persistence_major"],
+        expedition_switch_ids: ["qa_persistence_hazard"],
+        persistent_door_ids: {
+          [QA_PERSISTENCE_MAP_ID]: [QA_PERSISTENCE_SHORTCUT_ID],
+        },
+        persistent_item_ids: {
+          [QA_PERSISTENCE_MAP_ID]: [QA_PERSISTENCE_ARTIFACT_PLACEMENT_ID],
+        },
+      },
+      intercessor_succession: {
+        enabled: true,
+        hub_map_id: TEST_SUITE_START_MAP_ID,
+        hub_spawn_id: TEST_SUITE_START_SPAWN_ID,
+        name_prefixes: ["Al", "Bren", "Mara", "Sola"],
+        name_roots: ["der", "mont", "vale", "rin"],
+        name_suffixes: ["a", "en", "ic", "o"],
+        banned_names: ["Null", "Test"],
+        reserved_names: ["Mara Vale", "Sable North"],
+        duplicate_name_policy: "avoid",
+        history_keyword_id: "qa_topic_past_intercessor",
+      },
+      campaign_debug: true,
     },
     sprite_library: mergeSprites(pkg.sprite_library),
     // The bundled game is the QA suite itself. Do not retain legacy worlds,
     // generated regions, or author-added maps when installing the suite.
     maps: [...wings.maps],
     entities: mergedEntities,
+    keywords: mergeById(pkg.keywords, wings.keywords),
+    dynamic_topics: mergeById(pkg.dynamic_topics, wings.dynamicTopics),
     dialogue: mergeById(pkg.dialogue, wings.dialogue),
     documents: mergeById(pkg.documents, wings.documents),
     quests: mergeById(pkg.quests, wings.quests),

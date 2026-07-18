@@ -19,7 +19,13 @@ import {
 } from "./simulation";
 import { applyStatus } from "./statuses";
 import { entityPlacementStateKey } from "../utils/entityState";
-import { isPushableObject, placementHasCollision, placementOriginKey } from "../utils/objectFootprint";
+import {
+  applyPlacementDeltas,
+  isPushableObject,
+  placementHasCollision,
+  placementOriginKey,
+} from "../utils/objectFootprint";
+import { placementBlocksFogLineOfSight } from "../utils/fogOfWar";
 import {
   FINE_CARDINAL_DIRECTIONS,
   FINE_PER_MACRO,
@@ -27,6 +33,7 @@ import {
   parseFineCoordKey,
 } from "./gridCoordinates";
 import { isFineExpandedPackage } from "./fineWorld";
+import { resolveMovementHearingSettings } from "./hearingStealth";
 import {
   createImmersiveIlluminationSnapshotFromV1,
   queryImmersiveIlluminationAtCell,
@@ -258,7 +265,14 @@ export interface ImmersivePerceptionStimulus {
   source_id?: string;
   source_actor_id?: string;
   source_action?: string;
+  source_category?: string;
+  source_entity_id?: string;
+  source_faction_id?: string;
   owner_id?: string;
+  reveals_identity?: boolean;
+  duration_ticks?: number;
+  propagation_mode?: "expanded" | "compact";
+  sequence?: number;
   mobility?: "fixed" | "carried" | "placed" | "thrown" | "environmental";
 }
 
@@ -276,6 +290,10 @@ export interface ImmersivePerceptionAlertRecord {
   evidence_tick?: number;
   tracks_live_target?: boolean;
   target_actor_id?: string;
+  tracked_source_id?: string;
+  source_traced?: boolean;
+  evidence_driver?: "hearing" | "sight" | "source" | "environment";
+  sound_repeat_count?: number;
 }
 
 export interface ImmersiveStage4PerceptionSnapshot {
@@ -2036,6 +2054,14 @@ const perceptionStimuliFromStage2Snapshot = (
       source_id?: string;
       source_actor_id?: string;
       source_action?: string;
+      source_category?: string;
+      source_entity_id?: string;
+      source_faction_id?: string;
+      owner_id?: string;
+      reveals_identity?: boolean;
+      duration_ticks?: number;
+      propagation_mode?: "expanded" | "compact";
+      sequence?: number;
     }
   >();
   Object.entries(save.map_deltas?.[snapshot.map_id]?.environment_fields || {}).forEach(
@@ -2047,18 +2073,52 @@ const perceptionStimuliFromStage2Snapshot = (
         const parsedCell = parseFineCoordKey(fieldCellKey);
         const origin = cloneCell(field.origin_cell || [parsedCell[0], parsedCell[1]]);
         const tag = field.frequency_tag || field.tag || "sound";
-        const groupKey = `${field.actor_id || "world"}:${origin[0]}:${origin[1]}:${tag}`;
+        // Sequence is the pulse identity. Fine-grid steps can share a clock
+        // tick, so tick alone would merge distinct footsteps and prevent
+        // repeat accumulation. Legacy fields retain their old tick grouping.
+        const pulseIdentity = Number.isFinite(Number(field.stimulus_sequence))
+          ? `sequence:${Number(field.stimulus_sequence)}`
+          : `tick:${field.created_at_tick || snapshot.generated_at_tick}`;
+        const groupKey = `${field.actor_id || field.source_entity_id || "world"}:${origin[0]}:${origin[1]}:${tag}:${pulseIdentity}`;
         const existing = dynamicSounds.get(groupKey);
         dynamicSounds.set(groupKey, {
           cell: origin,
           intensity: Math.max(existing?.intensity || 0, field.intensity),
           radius: Math.max(existing?.radius || 0, field.radius || 1),
           tag,
-          tags: [...new Set([...(existing?.tags || []), field.tag || "sound", field.frequency_tag || "sound", field.material_tag || ""])].filter(Boolean),
+          tags: [
+            ...new Set([
+              ...(existing?.tags || []),
+              "sound",
+              field.tag || "sound",
+              field.frequency_tag || "sound",
+              field.material_tag || "",
+              field.source_category || "",
+              ...(field.stimulus_tags || []),
+            ]),
+          ].filter(Boolean),
           tick: Math.max(existing?.tick || 0, field.created_at_tick || snapshot.generated_at_tick),
           source_id: existing?.source_id || field.id,
-          source_actor_id: field.actor_id,
-          source_action: field.action,
+          source_actor_id: existing?.source_actor_id || field.actor_id,
+          source_action: existing?.source_action || field.action,
+          source_category: existing?.source_category || field.source_category,
+          source_entity_id: existing?.source_entity_id || field.source_entity_id,
+          source_faction_id: existing?.source_faction_id || field.source_faction_id,
+          owner_id: existing?.owner_id || field.owner_id,
+          reveals_identity:
+            existing?.reveals_identity === true || field.reveals_identity === true,
+          duration_ticks: Math.max(
+            existing?.duration_ticks || 0,
+            field.duration_ticks || 0,
+          ) || undefined,
+          propagation_mode:
+            existing?.propagation_mode === "expanded" ||
+            field.propagation_mode === "expanded"
+              ? "expanded"
+              : field.propagation_mode || existing?.propagation_mode,
+          sequence: Number.isFinite(Number(field.stimulus_sequence))
+            ? Number(field.stimulus_sequence)
+            : existing?.sequence,
         });
       });
     },
@@ -2075,6 +2135,14 @@ const perceptionStimuliFromStage2Snapshot = (
       source_id: sound.source_id,
       source_actor_id: sound.source_actor_id,
       source_action: sound.source_action,
+      source_category: sound.source_category,
+      source_entity_id: sound.source_entity_id,
+      source_faction_id: sound.source_faction_id,
+      owner_id: sound.owner_id,
+      reveals_identity: sound.reveals_identity === true,
+      duration_ticks: sound.duration_ticks,
+      propagation_mode: sound.propagation_mode,
+      sequence: sound.sequence,
     });
   });
   illumination.sources.forEach((source) => {
@@ -2087,7 +2155,11 @@ const perceptionStimuliFromStage2Snapshot = (
       tags: [...source.stimulus_tags],
       tick: source.created_at_tick ?? snapshot.generated_at_tick,
       source_id: source.id,
-      source_actor_id: source.carrier_actor_id,
+      // A source may be perceptible without exposing who carries it. Identity
+      // is only evidence when the light profile explicitly opts in.
+      source_actor_id: source.exposes_carrier
+        ? source.carrier_actor_id
+        : undefined,
       owner_id: source.owner_actor_id,
       mobility:
         source.source_kind === "carried_item" || source.source_kind === "carried_object"
@@ -2202,30 +2274,44 @@ const isInViewCone = (
   actorCell: [number, number],
   facing: [number, number],
   stimulusCell: [number, number],
+  viewConeDegrees = 120,
 ): boolean => {
-  const dist = manhattan(actorCell, stimulusCell);
-  if (dist <= 1) return true;
   const dx = stimulusCell[0] - actorCell[0];
   const dy = stimulusCell[1] - actorCell[1];
-  const dominant: [number, number] =
-    Math.abs(dx) >= Math.abs(dy)
-      ? [sign(dx), 0]
-      : [0, sign(dy)];
-  const normalizedFacing = normalizeFacing(facing);
-  return normalizedFacing[0] === dominant[0] && normalizedFacing[1] === dominant[1];
+  const targetLength = Math.hypot(dx, dy);
+  if (targetLength <= 1) return true;
+  const authoredFacingX = Number(facing?.[0] || 0);
+  const authoredFacingY = Number(facing?.[1] || 0);
+  const facingLength = Math.hypot(authoredFacingX, authoredFacingY);
+  const facingX = facingLength > 0.0001 ? authoredFacingX : 0;
+  const facingY = facingLength > 0.0001 ? authoredFacingY : -1;
+  const safeFacingLength = Math.max(0.0001, Math.hypot(facingX, facingY));
+  const dot =
+    (facingX * dx + facingY * dy) /
+    (safeFacingLength * targetLength);
+  const halfAngleRadians =
+    (clamp(viewConeDegrees, 1, 360) * 0.5 * Math.PI) / 180;
+  return dot >= Math.cos(halfAngleRadians) - 0.000001;
 };
 
 interface RuntimeSensoryChannel {
   id: string;
   stimulus_kinds: ImmersivePerceptionStimulus["kind"][];
   stimulus_tags?: string[];
+  ignored_stimulus_tags: string[];
+  stimulus_tag_multipliers: Record<string, number>;
   range: number;
   threshold: number;
   sensitivity: number;
+  repeated_sound_gain: number;
+  positional_uncertainty: number;
+  barrier_response: "normal" | "reduced" | "ignore";
   requires_los: boolean;
   requires_view_cone: boolean;
+  view_cone_degrees: number;
   requires_illumination: boolean;
   tracks_live_target: boolean;
+  source_tracking: "none" | "lock_after_acquisition";
 }
 
 interface RuntimeSensoryProfile {
@@ -2246,10 +2332,17 @@ const DEFAULT_SENSORY_PROFILE: RuntimeSensoryProfile = {
       range: 8,
       threshold: 0.04,
       sensitivity: 1,
+      ignored_stimulus_tags: [],
+      stimulus_tag_multipliers: {},
+      repeated_sound_gain: 0,
+      positional_uncertainty: 0,
+      barrier_response: "normal",
       requires_los: true,
       requires_view_cone: true,
+      view_cone_degrees: 120,
       requires_illumination: true,
       tracks_live_target: true,
+      source_tracking: "none",
     },
     {
       id: "ordinary_hearing",
@@ -2257,10 +2350,17 @@ const DEFAULT_SENSORY_PROFILE: RuntimeSensoryProfile = {
       range: 8,
       threshold: 0.15,
       sensitivity: 1,
+      ignored_stimulus_tags: [],
+      stimulus_tag_multipliers: {},
+      repeated_sound_gain: 0.08,
+      positional_uncertainty: 0,
+      barrier_response: "normal",
       requires_los: false,
       requires_view_cone: false,
+      view_cone_degrees: 120,
       requires_illumination: false,
       tracks_live_target: false,
+      source_tracking: "none",
     },
     {
       id: "environmental_danger",
@@ -2268,10 +2368,17 @@ const DEFAULT_SENSORY_PROFILE: RuntimeSensoryProfile = {
       range: 6,
       threshold: 0.18,
       sensitivity: 1,
+      ignored_stimulus_tags: [],
+      stimulus_tag_multipliers: {},
+      repeated_sound_gain: 0,
+      positional_uncertainty: 0,
+      barrier_response: "normal",
       requires_los: false,
       requires_view_cone: false,
+      view_cone_degrees: 120,
       requires_illumination: false,
       tracks_live_target: false,
+      source_tracking: "none",
     },
   ],
 };
@@ -2283,7 +2390,14 @@ const sensoryProfileForEntity = (
   if (!authored?.channels?.length) {
     return {
       ...DEFAULT_SENSORY_PROFILE,
-      channels: DEFAULT_SENSORY_PROFILE.channels.map((channel) => ({ ...channel, stimulus_kinds: [...channel.stimulus_kinds] })),
+      channels: DEFAULT_SENSORY_PROFILE.channels.map((channel) => ({
+        ...channel,
+        stimulus_kinds: [...channel.stimulus_kinds],
+        ignored_stimulus_tags: [...channel.ignored_stimulus_tags],
+        stimulus_tag_multipliers: {
+          ...channel.stimulus_tag_multipliers,
+        },
+      })),
     };
   }
   return {
@@ -2294,13 +2408,22 @@ const sensoryProfileForEntity = (
       id: channel.id,
       stimulus_kinds: [...channel.stimulus_kinds],
       stimulus_tags: channel.stimulus_tags ? [...channel.stimulus_tags] : undefined,
+      ignored_stimulus_tags: [...(channel.ignored_stimulus_tags || [])],
+      stimulus_tag_multipliers: {
+        ...(channel.stimulus_tag_multipliers || {}),
+      },
       range: Math.max(0, channel.range),
       threshold: clamp(channel.threshold, 0, 1),
       sensitivity: Math.max(0, channel.sensitivity),
+      repeated_sound_gain: clamp(channel.repeated_sound_gain ?? 0, 0, 1),
+      positional_uncertainty: Math.max(0, channel.positional_uncertainty ?? 0),
+      barrier_response: channel.barrier_response ?? "normal",
       requires_los: channel.requires_los,
       requires_view_cone: channel.requires_view_cone,
+      view_cone_degrees: clamp(channel.view_cone_degrees ?? 120, 1, 360),
       requires_illumination: channel.requires_illumination,
       tracks_live_target: channel.tracks_live_target,
+      source_tracking: channel.source_tracking ?? "none",
     })),
   };
 };
@@ -2313,9 +2436,22 @@ const channelAcceptsStimulus = (
   stimulus: ImmersivePerceptionStimulus,
 ) => {
   if (!channel.stimulus_kinds.includes(stimulus.kind)) return false;
-  if (!channel.stimulus_tags?.length) return true;
   const tags = stimulusTags(stimulus);
+  if (channel.ignored_stimulus_tags.some((tag) => tags.has(tag))) return false;
+  if (!channel.stimulus_tags?.length) return true;
   return channel.stimulus_tags.some((tag) => tags.has(tag));
+};
+
+const channelStimulusTagMultiplier = (
+  channel: RuntimeSensoryChannel,
+  stimulus: ImmersivePerceptionStimulus,
+) => {
+  const tags = stimulusTags(stimulus);
+  return Object.entries(channel.stimulus_tag_multipliers).reduce(
+    (multiplier, [tag, tagMultiplier]) =>
+      tags.has(tag) ? multiplier * Math.max(0, tagMultiplier) : multiplier,
+    1,
+  );
 };
 
 const propagatedSoundIntensityAtActor = (
@@ -2325,17 +2461,97 @@ const propagatedSoundIntensityAtActor = (
   actorCell: [number, number],
 ): number | undefined => {
   let result: number | undefined;
-  Object.entries(save.map_deltas?.[mapId]?.environment_fields || {}).forEach(([key, fields]) => {
-    if (!sameCell(parseFineCoordKey(key), actorCell)) return;
-    fields.forEach((field) => {
-      if (field.kind !== "sound") return;
-      const origin = (field.origin_cell || parseFineCoordKey(key)) as [number, number];
-      const tag = field.frequency_tag || field.tag || "sound";
-      if (!sameCell(origin, stimulus.cell) || (stimulus.tag && tag !== stimulus.tag)) return;
-      result = Math.max(result || 0, field.intensity);
-    });
+  // Expanded propagation already materializes the listener cell, so looking
+  // up that exact bucket avoids scanning every field on the map per listener.
+  const fields =
+    save.map_deltas?.[mapId]?.environment_fields?.[cellKey(actorCell)] || [];
+  fields.forEach((field) => {
+    if (field.kind !== "sound") return;
+    if (
+      field.expires_at_tick !== undefined &&
+      field.expires_at_tick <= Number(save.clock_minutes || 0)
+    ) {
+      return;
+    }
+    const origin = (field.origin_cell || actorCell) as [number, number];
+    const tag = field.frequency_tag || field.tag || "sound";
+    if (!sameCell(origin, stimulus.cell) || (stimulus.tag && tag !== stimulus.tag)) return;
+    if (
+      stimulus.sequence !== undefined &&
+      field.stimulus_sequence !== undefined &&
+      stimulus.sequence !== field.stimulus_sequence
+    ) {
+      return;
+    }
+    result = Math.max(result || 0, field.intensity);
   });
   return result;
+};
+
+const soundBarrierCellsForMap = (
+  gamePackage: GamePackage,
+  save: PlaySave,
+  mapId: string,
+) => {
+  const map = gamePackage.maps.find((candidate) => candidate.id === mapId);
+  const delta = save.map_deltas?.[mapId];
+  const objectById = new Map(
+    gamePackage.object_library.map((object) => [object.id, object]),
+  );
+  const blockers = new Set<string>();
+  applyPlacementDeltas(map?.custom_object_placements, delta).forEach(
+    (placement) => {
+      const object = objectById.get(placement.object_id);
+      if (!placementBlocksFogLineOfSight(placement, object, delta)) return;
+      placementFootprintForPackage(gamePackage, placement, object).forEach(
+        (cell) => blockers.add(cellKey(cell)),
+      );
+    },
+  );
+  return blockers;
+};
+
+const compactSoundIntensityAtActor = (
+  stimulus: ImmersivePerceptionStimulus,
+  actorCell: [number, number],
+  cellsByKey: Map<string, ImmersiveTileLayerCellState>,
+  placementBarrierCells: Set<string>,
+  barrierResponse: RuntimeSensoryChannel["barrier_response"],
+  authoredBarrierReduction: number,
+) => {
+  const distance = manhattan(stimulus.cell, actorCell);
+  const radius = Math.max(1, stimulus.radius);
+  const openIntensity =
+    stimulus.intensity * Math.max(0, 1 - distance / (radius + 1));
+  if (openIntensity <= 0 || barrierResponse === "ignore") {
+    return openIntensity;
+  }
+
+  const responseMultiplier = barrierResponse === "reduced" ? 0.5 : 1;
+  const barrierReduction = authoredBarrierReduction * responseMultiplier;
+  const actorTile = cellsByKey.get(cellKey(actorCell));
+  if (!actorTile) return 0;
+  const rayCells = lineCellsBetween(stimulus.cell, actorCell);
+  // The listener itself is an occupant and therefore makes its own Stage2
+  // cell movement-blocking. It is not an acoustic barrier. Only intermediate
+  // cells participate in barrier attenuation; listener terrain is separate.
+  let occlusion = actorTile.terrain === "water" ? 0.1 : 0;
+  for (const rayCell of rayCells) {
+    const key = cellKey(rayCell);
+    const tile = cellsByKey.get(key);
+    if (!tile) {
+      occlusion = 1;
+      break;
+    }
+    if (
+      tile.blocks_vision ||
+      tile.blocks_movement ||
+      placementBarrierCells.has(key)
+    ) {
+      occlusion += barrierReduction;
+    }
+  }
+  return openIntensity * (1 - clamp(occlusion, 0, 0.92));
 };
 
 const scoreStimulusAtActor = (
@@ -2347,16 +2563,47 @@ const scoreStimulusAtActor = (
   actorCell: [number, number],
   actorFacing: [number, number],
   cellsByKey: Map<string, ImmersiveTileLayerCellState>,
-): { score: number; acquisition?: ImmersiveVisualAcquisitionResult } => {
-  if (!channelAcceptsStimulus(channel, stimulus)) return { score: 0 };
-  const dist = manhattan(stimulus.cell, actorCell);
+  placementBarrierCells: Set<string>,
+  soundBarrierReduction: number,
+  sourceTraceAllowed = false,
+): {
+  score: number;
+  raw_score: number;
+  acquisition?: ImmersiveVisualAcquisitionResult;
+  source_traced?: boolean;
+} => {
+  if (!channelAcceptsStimulus(channel, stimulus)) {
+    return { score: 0, raw_score: 0 };
+  }
+  const dist =
+    stimulus.kind === "visible_player" || stimulus.kind === "light"
+      ? Math.hypot(
+          stimulus.cell[0] - actorCell[0],
+          stimulus.cell[1] - actorCell[1],
+        )
+      : manhattan(stimulus.cell, actorCell);
   const channelRange = scaleMacroDistanceForPackage(gamePackage, channel.range);
-  const effectiveRange = Math.min(channelRange, stimulus.radius || channelRange);
-  if (dist > effectiveRange) return { score: 0 };
-  if (channel.requires_view_cone && !isInViewCone(actorCell, actorFacing, stimulus.cell)) {
-    return { score: 0 };
+  // A visible actor is not a radial field. Its authored stimulus radius used
+  // to silently cap every sight channel at eight tiles, even when the channel
+  // explicitly authored a longer range.
+  const effectiveRange =
+    stimulus.kind === "visible_player"
+      ? channelRange
+      : Math.min(channelRange, stimulus.radius || channelRange);
+  if (dist > effectiveRange) return { score: 0, raw_score: 0 };
+  if (
+    channel.requires_view_cone &&
+    !isInViewCone(
+      actorCell,
+      actorFacing,
+      stimulus.cell,
+      channel.view_cone_degrees,
+    )
+  ) {
+    return { score: 0, raw_score: 0 };
   }
   let acquisition: ImmersiveVisualAcquisitionResult | undefined;
+  let sourceTraced = false;
   if (channel.requires_los || channel.requires_illumination) {
     acquisition = queryImmersiveVisualAcquisition(gamePackage, save, {
       map_id: mapId,
@@ -2366,9 +2613,14 @@ const scoreStimulusAtActor = (
       max_range: channelRange,
       minimum_light: channel.requires_illumination ? 0.001 : 0,
     });
-    if (!acquisition.acquired) return { score: 0, acquisition };
+    if (!acquisition.acquired) {
+      if (!sourceTraceAllowed) {
+        return { score: 0, raw_score: 0, acquisition };
+      }
+      sourceTraced = true;
+    }
   } else if (channel.requires_los && !hasTileLineOfSight(cellsByKey, actorCell, stimulus.cell)) {
-    return { score: 0 };
+    return { score: 0, raw_score: 0 };
   }
   const falloff = 1 - dist / (effectiveRange + 1);
   const kindWeight =
@@ -2379,11 +2631,38 @@ const scoreStimulusAtActor = (
   const propagatedSound = stimulus.kind === "sound"
     ? propagatedSoundIntensityAtActor(save, mapId, stimulus, actorCell)
     : undefined;
+  const compactSound =
+    stimulus.kind === "sound" && stimulus.propagation_mode === "compact"
+      ? compactSoundIntensityAtActor(
+          stimulus,
+          actorCell,
+          cellsByKey,
+          placementBarrierCells,
+          channel.barrier_response,
+          soundBarrierReduction,
+        )
+      : undefined;
   const base = stimulus.kind === "visible_player" && acquisition
     ? acquisition.score
-    : propagatedSound ?? stimulus.intensity * falloff;
-  const score = Number(clamp(base * kindWeight * channel.sensitivity, 0, 1).toFixed(4));
-  return { score: score >= channel.threshold ? score : 0, acquisition };
+    : compactSound ?? propagatedSound ?? stimulus.intensity * falloff;
+  const traceMultiplier = sourceTraced ? 0.72 : 1;
+  const rawScore = Number(
+    clamp(
+      base *
+        kindWeight *
+        channel.sensitivity *
+        channelStimulusTagMultiplier(channel, stimulus) *
+        traceMultiplier,
+      0,
+      1,
+    ).toFixed(4),
+  );
+  return {
+    score: rawScore >= channel.threshold ? rawScore : 0,
+    raw_score: rawScore,
+    acquisition,
+    source_traced: sourceTraced,
+  };
 };
 
 const alertnessFromScore = (
@@ -2423,6 +2702,182 @@ const detectionCause = (
   return "environmental_danger";
 };
 
+const finiteOptionalNumber = (value: unknown): number | undefined => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+};
+
+const isFreshSoundEvidence = (
+  stimulus: ImmersivePerceptionStimulus,
+  state: Record<string, any>,
+) => {
+  const sequence = finiteOptionalNumber(stimulus.sequence);
+  const previousSequence = finiteOptionalNumber(
+    state.last_heard_sequence ?? state.last_stimulus?.sequence,
+  );
+  if (sequence !== undefined) {
+    return previousSequence === undefined || sequence > previousSequence;
+  }
+  const tick = finiteOptionalNumber(stimulus.tick);
+  const previousTick = finiteOptionalNumber(
+    state.last_heard_tick ??
+      (state.last_stimulus?.kind === "sound"
+        ? state.last_stimulus?.tick
+        : undefined),
+  );
+  return tick !== undefined && (previousTick === undefined || tick > previousTick);
+};
+
+const isRepeatedSoundEvidence = (
+  stimulus: ImmersivePerceptionStimulus,
+  state: Record<string, any>,
+) => {
+  const previous = state.last_stimulus;
+  if (!previous || previous.kind !== "sound") return false;
+  const category = stimulus.source_category || stimulus.tag || "sound";
+  const previousCategory = previous.source_category || previous.tag || "sound";
+  if (category !== previousCategory) return false;
+  const source =
+    stimulus.source_entity_id || stimulus.source_actor_id || stimulus.owner_id;
+  const previousSource =
+    previous.source_entity_id || previous.source_actor_id || previous.owner_id;
+  return !source || !previousSource || source === previousSource;
+};
+
+const scoreWithFreshRepeatedSound = (
+  stimulus: ImmersivePerceptionStimulus,
+  channel: RuntimeSensoryChannel,
+  rawScore: number,
+  state: Record<string, any>,
+) => {
+  if (stimulus.kind !== "sound" || rawScore <= 0) {
+    return rawScore >= channel.threshold ? rawScore : 0;
+  }
+  const repeated = isRepeatedSoundEvidence(stimulus, state);
+  const fresh = isFreshSoundEvidence(stimulus, state);
+  if (!fresh && repeated) {
+    // Re-evaluating the same still-active pulse must not add confidence again,
+    // but it should not erase confidence already earned from prior pulses.
+    const retained = Number(
+      clamp(
+        Math.max(rawScore, Number(state.alert_score || 0)),
+        0,
+        1,
+      ).toFixed(4),
+    );
+    return retained >= channel.threshold ? retained : 0;
+  }
+  if (!fresh || !repeated || channel.repeated_sound_gain <= 0) {
+    return rawScore >= channel.threshold ? rawScore : 0;
+  }
+  const accumulated = Number(
+    clamp(
+      rawScore +
+        Math.max(0, Number(state.alert_score || 0)) *
+          channel.repeated_sound_gain,
+      0,
+      1,
+    ).toFixed(4),
+  );
+  return accumulated >= channel.threshold ? accumulated : 0;
+};
+
+const soundRepeatCountForEvidence = (
+  stimulus: ImmersivePerceptionStimulus,
+  state: Record<string, any>,
+): number | undefined => {
+  if (stimulus.kind !== "sound") return undefined;
+  const previousCount = Math.max(
+    0,
+    Math.floor(Number(state.perception_sound_repeat_count || 0)),
+  );
+  if (!isFreshSoundEvidence(stimulus, state)) return previousCount;
+  return isRepeatedSoundEvidence(stimulus, state) ? previousCount + 1 : 0;
+};
+
+const deterministicStringHash = (value: string) => {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+};
+
+const estimatedSoundPosition = (
+  gamePackage: GamePackage,
+  actorId: string,
+  stimulus: ImmersivePerceptionStimulus,
+  positionalUncertainty: number,
+  cellsByKey: Map<string, ImmersiveTileLayerCellState>,
+  barrierUncertaintyCells = 0,
+): [number, number] => {
+  if (positionalUncertainty <= 0 && barrierUncertaintyCells <= 0) {
+    return cloneCell(stimulus.cell);
+  }
+  const radius = Math.max(
+    1,
+    Math.min(
+      64,
+      Math.ceil(
+        scaleMacroDistanceForPackage(gamePackage, positionalUncertainty) +
+          Math.max(0, barrierUncertaintyCells),
+      ),
+    ),
+  );
+  const identity = `${actorId}:${stimulus.sequence ?? stimulus.tick ?? 0}:${stimulus.source_id || stimulus.tag || "sound"}`;
+  const attempts = Math.min(48, Math.max(12, radius * 4));
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const xHash = deterministicStringHash(`${identity}:x:${attempt}`);
+    const dx = (xHash % (radius * 2 + 1)) - radius;
+    const remaining = radius - Math.abs(dx);
+    const yHash = deterministicStringHash(`${identity}:y:${attempt}`);
+    const dy = (yHash % (remaining * 2 + 1)) - remaining;
+    if (dx === 0 && dy === 0) continue;
+    const candidate: [number, number] = [
+      stimulus.cell[0] + dx,
+      stimulus.cell[1] + dy,
+    ];
+    const tile = cellsByKey.get(cellKey(candidate));
+    if (tile && !tile.blocks_movement) return candidate;
+  }
+  return cloneCell(stimulus.cell);
+};
+
+const soundBarrierUncertaintyBetween = (
+  stimulus: ImmersivePerceptionStimulus,
+  actorCell: [number, number],
+  cellsByKey: Map<string, ImmersiveTileLayerCellState>,
+  placementBarrierCells: Set<string>,
+  response: RuntimeSensoryChannel["barrier_response"],
+) => {
+  if (response === "ignore") return 0;
+  const responseMultiplier = response === "reduced" ? 0.5 : 1;
+  const barriers = lineCellsBetween(stimulus.cell, actorCell).filter((cell) => {
+    const key = cellKey(cell);
+    const tile = cellsByKey.get(key);
+    return Boolean(
+      !tile ||
+        tile.blocks_vision ||
+        tile.blocks_movement ||
+        placementBarrierCells.has(key),
+    );
+  }).length;
+  // A barrier makes the heard location less exact, but the uncertainty stays
+  // bounded so investigation remains local rather than turning omniscient or
+  // aimless. Authored positional uncertainty is added separately above.
+  return Math.min(3, barriers) * responseMultiplier;
+};
+
+const evidenceDriverForStimulus = (
+  stimulus: ImmersivePerceptionStimulus,
+): NonNullable<ImmersivePerceptionAlertRecord["evidence_driver"]> => {
+  if (stimulus.kind === "sound") return "hearing";
+  if (stimulus.kind === "visible_player") return "sight";
+  if (stimulus.kind === "light") return "source";
+  return "environment";
+};
+
 export const createImmersivePerceptionSnapshotFromV1 = (
   gamePackage: GamePackage,
   save: PlaySave,
@@ -2434,6 +2889,14 @@ export const createImmersivePerceptionSnapshotFromV1 = (
   const map = gamePackage.maps.find((candidate) => candidate.id === mapId);
   const entityById = new Map(gamePackage.entities.map((entity) => [entity.id, entity]));
   const cellsByKey = new Map(stage2.tile_layers.cells.map((cell) => [cellKey(cell.cell), cell]));
+  const placementBarrierCells = soundBarrierCellsForMap(
+    gamePackage,
+    save,
+    mapId,
+  );
+  const soundBarrierReduction = resolveMovementHearingSettings(
+    gamePackage,
+  ).barrier_reduction;
   const alerts: ImmersivePerceptionAlertRecord[] = [];
   (map?.entity_placements || []).forEach((placement, index) => {
     if ((save.party_members || []).includes(placement.entity_id)) return;
@@ -2442,23 +2905,53 @@ export const createImmersivePerceptionSnapshotFromV1 = (
     const state = save.entity_states?.[key] || save.entity_states?.[placement.entity_id] || {};
     if (state.hidden || state.dead) return;
     const actorCell = (state.cell || placement.cell) as [number, number];
-    const actorFacing = normalizeFacing((state.facing || placement.facing) as [number, number] | undefined);
+    // Preserve authored vector proportions for angular sight. Grid movement
+    // helpers may sign-normalize directions, but doing that here rotates valid
+    // non-cardinal facings such as [2, 1] toward 45 degrees.
+    const actorFacing = (state.facing || placement.facing || [0, -1]) as [
+      number,
+      number,
+    ];
     const hostile = !entity?.is_npc;
     const profile = sensoryProfileForEntity(entity);
     const scored = stimuli
       .filter(
         (stimulus) =>
-          hostile ||
-          (stimulus.kind !== "visible_player" &&
-            stimulus.kind !== "light" &&
-            !(
-              stimulus.kind === "sound" &&
-              stimulus.source_actor_id === "player" &&
-              stimulus.tag === "footstep"
-            )),
+          !(
+            stimulus.kind === "sound" &&
+            (stimulus.source_actor_id === key ||
+              stimulus.source_actor_id === placement.entity_id)
+          ) &&
+          !(
+            stimulus.kind === "light" &&
+            (stimulus.source_actor_id === key ||
+              stimulus.source_actor_id === placement.entity_id)
+          ) &&
+          (hostile ||
+            (stimulus.kind !== "visible_player" &&
+              stimulus.kind !== "light" &&
+              !(
+                stimulus.kind === "sound" &&
+                stimulus.source_actor_id === "player" &&
+                stimulus.tag === "footstep"
+              ))),
       )
       .flatMap((stimulus) =>
         profile.channels.map((channel) => {
+          const traceExpiresAt = Number(
+            state.perception_source_trace_expires_at_tick,
+          );
+          const sourceTraceAllowed =
+            channel.source_tracking === "lock_after_acquisition" &&
+            channel.tracks_live_target &&
+            state.last_sense_id === channel.id &&
+            stimulus.kind === "light" &&
+            stimulus.mobility === "carried" &&
+            Boolean(stimulus.source_id && stimulus.source_actor_id) &&
+            state.perception_tracked_source_id === stimulus.source_id &&
+            state.target_actor_id === stimulus.source_actor_id &&
+            Number.isFinite(traceExpiresAt) &&
+            traceExpiresAt > stage2.generated_at_tick;
           const result = scoreStimulusAtActor(
             gamePackage,
             save,
@@ -2468,16 +2961,96 @@ export const createImmersivePerceptionSnapshotFromV1 = (
             actorCell,
             actorFacing,
             cellsByKey,
+            placementBarrierCells,
+            soundBarrierReduction,
+            sourceTraceAllowed,
           );
-          return { stimulus, channel, score: result.score, acquisition: result.acquisition };
+          const score = scoreWithFreshRepeatedSound(
+            stimulus,
+            channel,
+            result.raw_score,
+            state,
+          );
+          return {
+            stimulus,
+            channel,
+            score,
+            acquisition: result.acquisition,
+            source_traced: result.source_traced,
+            sound_repeat_count: soundRepeatCountForEvidence(stimulus, state),
+            fresh_sound_evidence:
+              stimulus.kind === "sound" &&
+              isFreshSoundEvidence(stimulus, state),
+          };
         }),
       )
       .filter((entry) => entry.score > 0)
-      .sort((a, b) => b.score - a.score || a.stimulus.cell[0] - b.stimulus.cell[0] || a.stimulus.cell[1] - b.stimulus.cell[1]);
+      .sort((a, b) => {
+        // Direct visual confirmation is more certain than hearing and must
+        // replace an uncertain sound estimate when both are available. Other
+        // specialized evidence (such as an acquired Glass source) retains its
+        // authored score priority.
+        if (
+          a.stimulus.kind === "visible_player" &&
+          b.stimulus.kind === "sound"
+        ) {
+          return -1;
+        }
+        if (
+          b.stimulus.kind === "visible_player" &&
+          a.stimulus.kind === "sound"
+        ) {
+          return 1;
+        }
+        if (a.stimulus.kind === "sound" && b.stimulus.kind === "sound") {
+          const freshDifference =
+            Number(b.fresh_sound_evidence) -
+            Number(a.fresh_sound_evidence);
+          if (freshDifference) return freshDifference;
+          if (a.fresh_sound_evidence && b.fresh_sound_evidence) {
+            const sequenceDifference =
+              (b.stimulus.sequence || 0) - (a.stimulus.sequence || 0);
+            if (sequenceDifference) return sequenceDifference;
+          }
+        }
+        return (
+          b.score - a.score ||
+          (b.stimulus.sequence || 0) - (a.stimulus.sequence || 0) ||
+          a.stimulus.cell[0] - b.stimulus.cell[0] ||
+          a.stimulus.cell[1] - b.stimulus.cell[1]
+        );
+      });
     const best = scored[0];
     if (!best) return;
     const alertness = alertnessFromScore(best.score, best.stimulus, hostile);
     if (alertness === "oblivious") return;
+    const tracksVisiblePlayer =
+      best.stimulus.kind === "visible_player" &&
+      best.channel.tracks_live_target;
+    const tracksCarriedSource =
+      best.stimulus.kind === "light" &&
+      best.stimulus.mobility === "carried" &&
+      Boolean(best.stimulus.source_id && best.stimulus.source_actor_id) &&
+      best.channel.tracks_live_target &&
+      best.channel.source_tracking === "lock_after_acquisition" &&
+      (best.source_traced === true || best.acquisition?.acquired === true);
+    const targetCell =
+      best.stimulus.kind === "sound"
+        ? estimatedSoundPosition(
+            gamePackage,
+            key,
+            best.stimulus,
+            best.channel.positional_uncertainty,
+            cellsByKey,
+            soundBarrierUncertaintyBetween(
+              best.stimulus,
+              actorCell,
+              cellsByKey,
+              placementBarrierCells,
+              best.channel.barrier_response,
+            ),
+          )
+        : cloneCell(best.stimulus.cell);
     alerts.push({
       actor_id: key,
       entity_id: placement.entity_id,
@@ -2485,13 +3058,23 @@ export const createImmersivePerceptionSnapshotFromV1 = (
       alertness,
       score: best.score,
       stimulus: { ...best.stimulus, cell: cloneCell(best.stimulus.cell) },
-      target_cell: cloneCell(best.stimulus.cell),
+      target_cell: targetCell,
       sensory_profile_id: profile.id,
       sense_id: best.channel.id,
       cause: detectionCause(best.stimulus, best.acquisition),
       evidence_tick: best.stimulus.tick ?? stage2.generated_at_tick,
-      tracks_live_target: best.stimulus.kind === "visible_player" && best.channel.tracks_live_target,
-      target_actor_id: best.stimulus.kind === "visible_player" ? "player" : undefined,
+      tracks_live_target: tracksVisiblePlayer || tracksCarriedSource,
+      target_actor_id: tracksVisiblePlayer
+        ? "player"
+        : tracksCarriedSource
+          ? best.stimulus.source_actor_id
+          : undefined,
+      tracked_source_id: tracksCarriedSource
+        ? best.stimulus.source_id
+        : undefined,
+      source_traced: tracksCarriedSource && best.source_traced === true,
+      evidence_driver: evidenceDriverForStimulus(best.stimulus),
+      sound_repeat_count: best.sound_repeat_count,
     });
   });
   return {
@@ -2533,6 +3116,13 @@ const taskForPerceptionAlert = (
   created_at_tick: tick,
   updated_at_tick: tick,
   expires_at_tick: tick + Math.max(1, searchTicks),
+  ...(alert.stimulus.kind === "sound"
+    ? {
+        search_origin_cell: cloneCell(alert.target_cell),
+        search_step: 0,
+        search_steps: Math.max(1, Math.min(4, Math.floor(searchTicks))),
+      }
+    : {}),
 });
 
 export const advanceImmersivePerceptionForSave = (
@@ -2582,6 +3172,11 @@ export const advanceImmersivePerceptionForSave = (
       detection_cause: alert.cause,
       evidence_tick: alert.evidence_tick,
       tracks_live_target: alert.tracks_live_target === true,
+      target_actor_id: alert.target_actor_id,
+      tracked_source_id: alert.tracked_source_id,
+      source_traced: alert.source_traced === true,
+      evidence_driver: alert.evidence_driver,
+      sound_repeat_count: alert.sound_repeat_count,
     },
   }));
   const alertedActorIds = new Set(snapshot.alerts.map((alert) => alert.actor_id));
@@ -2598,11 +3193,20 @@ export const advanceImmersivePerceptionForSave = (
       const memoryExpired = Number.isFinite(Number(state.perception_memory_expires_at_tick)) &&
         Number(state.perception_memory_expires_at_tick) <= snapshot.generated_at_tick;
       if (!previousAlertness || previousAlertness === "oblivious" || previousScore <= 0) {
-        if (!state.perception_tracks_live_target && (!memoryExpired || !state.last_known_position)) return [];
+        if (
+          !state.perception_tracks_live_target &&
+          !state.perception_tracked_source_id &&
+          (!memoryExpired || !state.last_known_position)
+        ) return [];
         return [[key, {
           ...state,
           perception_tracks_live_target: false,
+          perception_tracked_source_id: undefined,
+          perception_source_trace_expires_at_tick: undefined,
           target_actor_id: undefined,
+          perception_evidence_driver: memoryExpired
+            ? undefined
+            : state.perception_evidence_driver,
           last_known_position: memoryExpired ? undefined : state.last_known_position,
           investigation_target_cell: memoryExpired ? undefined : state.investigation_target_cell,
         }]];
@@ -2639,6 +3243,9 @@ export const advanceImmersivePerceptionForSave = (
         cause: state.last_detection_cause as ImmersiveDetectionCause | undefined,
         evidence_tick: Number(state.last_evidence_tick || state.last_stimulus?.tick || snapshot.generated_at_tick),
         tracks_live_target: false,
+        evidence_driver: state.perception_evidence_driver as
+          | ImmersivePerceptionAlertRecord["evidence_driver"]
+          | undefined,
       };
       decayedAlerts.push(decayedAlert);
       if (state.perception_tracks_live_target && nextAlertness !== "oblivious") {
@@ -2650,7 +3257,13 @@ export const advanceImmersivePerceptionForSave = (
         alert_score: nextScore,
         alert_decay_tick: snapshot.generated_at_tick,
         perception_tracks_live_target: false,
+        perception_tracked_source_id: undefined,
+        perception_source_trace_expires_at_tick: undefined,
         target_actor_id: undefined,
+        perception_evidence_driver:
+          nextAlertness === "oblivious" || memoryExpired
+            ? undefined
+            : state.perception_evidence_driver,
         last_known_position: memoryExpired ? undefined : cloneCell(targetCell),
         investigation_target_cell: nextAlertness === "oblivious" || memoryExpired ? undefined : cloneCell(targetCell),
       }]];
@@ -2733,21 +3346,79 @@ export const advanceImmersivePerceptionForSave = (
       ...Object.fromEntries(snapshot.alerts.map((alert) => {
         const profile = profileForAlert(alert);
         const evidenceTick = alert.evidence_tick ?? alert.stimulus.tick ?? snapshot.generated_at_tick;
+        const previousState = workingSave.entity_states?.[alert.actor_id] || {};
+        const hearingEvidence = alert.stimulus.kind === "sound";
+        const sightEvidence = alert.stimulus.kind === "visible_player";
+        // Hearing can identify an event or actor when explicitly authored, but
+        // it never grants a live target lock. New sound pulses are the only way
+        // for a hidden mover to update last-heard position.
+        const tracksLiveTarget =
+          !hearingEvidence && alert.tracks_live_target === true;
+        const previousTraceExpiry = Number(
+          previousState.perception_source_trace_expires_at_tick,
+        );
+        const sourceTraceExpiry = alert.tracked_source_id
+          ? alert.source_traced && Number.isFinite(previousTraceExpiry)
+            ? previousTraceExpiry
+            : evidenceTick + Math.max(1, profile.memory_ticks)
+          : undefined;
         return [alert.actor_id, {
-          ...(workingSave.entity_states?.[alert.actor_id] || {}),
+          ...previousState,
           alertness: alert.alertness,
           alert_score: alert.score,
           sensory_profile_id: alert.sensory_profile_id || profile.id,
           last_sense_id: alert.sense_id,
           last_detection_cause: alert.cause,
           last_evidence_tick: evidenceTick,
-          perception_tracks_live_target: alert.tracks_live_target === true,
-          target_actor_id: alert.tracks_live_target ? alert.target_actor_id : undefined,
+          perception_evidence_driver:
+            alert.evidence_driver || evidenceDriverForStimulus(alert.stimulus),
+          perception_tracks_live_target: tracksLiveTarget,
+          target_actor_id: tracksLiveTarget ? alert.target_actor_id : undefined,
+          perception_tracked_source_id: alert.tracked_source_id,
+          perception_source_trace_expires_at_tick: sourceTraceExpiry,
+          last_heard_position: hearingEvidence
+            ? cloneCell(alert.target_cell)
+            : previousState.last_heard_position,
+          last_heard_tick: hearingEvidence
+            ? evidenceTick
+            : previousState.last_heard_tick,
+          last_heard_sequence: hearingEvidence
+            ? alert.stimulus.sequence
+            : previousState.last_heard_sequence,
+          perception_sound_repeat_count: hearingEvidence
+            ? Math.max(0, Number(alert.sound_repeat_count || 0))
+            : previousState.perception_sound_repeat_count,
+          last_seen_position: sightEvidence
+            ? cloneCell(alert.target_cell)
+            : previousState.last_seen_position,
+          last_seen_tick: sightEvidence
+            ? evidenceTick
+            : previousState.last_seen_tick,
           last_stimulus: {
             kind: alert.stimulus.kind,
             cell: cloneCell(alert.stimulus.cell),
             tick: evidenceTick,
             source_id: alert.stimulus.source_id,
+            source_actor_id:
+              hearingEvidence && !alert.stimulus.reveals_identity
+                ? undefined
+                : alert.stimulus.source_actor_id,
+            source_action: alert.stimulus.source_action,
+            source_category: alert.stimulus.source_category,
+            source_entity_id:
+              hearingEvidence && !alert.stimulus.reveals_identity
+                ? undefined
+                : alert.stimulus.source_entity_id,
+            source_faction_id: alert.stimulus.source_faction_id,
+            owner_id:
+              hearingEvidence && !alert.stimulus.reveals_identity
+                ? undefined
+                : alert.stimulus.owner_id,
+            reveals_identity: alert.stimulus.reveals_identity === true,
+            propagation_mode: alert.stimulus.propagation_mode,
+            sequence: alert.stimulus.sequence,
+            tag: alert.stimulus.tag,
+            mobility: alert.stimulus.mobility,
             tags: alert.stimulus.tags ? [...alert.stimulus.tags] : undefined,
           },
           last_known_position: cloneCell(alert.target_cell),
@@ -2768,6 +3439,7 @@ export const advanceImmersivePerceptionForSave = (
         strongest_cause: highestAlert?.cause,
         strongest_sense_id: highestAlert?.sense_id,
         strongest_profile_id: highestAlert?.sensory_profile_id,
+        strongest_evidence_driver: highestAlert?.evidence_driver,
         strongest_evidence_cell: highestAlert ? cloneCell(highestAlert.target_cell) : undefined,
       },
     },

@@ -25,9 +25,14 @@ decorative rendering effect:
 - Carried lights follow their carrier; placed or thrown lights illuminate from
   their saved world position. Persistent dropped lights survive the existing
   JSON save round-trip. Configured sources can be toggled off or expire.
-- Walls and closed/LOS-blocking geometry stop light and sight. Smoke, steam,
-  poison gas, acid fumes, and authored smoke cells attenuate visual
-  transmission.
+- Walls and closed/explicitly LOS-blocking geometry stop light and sight.
+  Movement collision is independent: terminals and crates can stop movement
+  without casting a false vision shadow, while non-colliding objects tagged
+  `blocks_los` can still obstruct sight. Rotated footprints are respected.
+- Smoke, steam, poison gas, acid fumes, and authored smoke cells attenuate
+  visual transmission. Fine-grid expansion preserves the authored optical
+  depth instead of multiplying opacity three times per macro tile, and authored
+  smoke is rendered as haze so a real visual obstruction is never invisible.
 - Ordinary sight requires range, line of sight, the configured view cone, and
   sufficient illumination. Mere proximity in darkness no longer authorizes
   visual acquisition or alert-gated combat.
@@ -43,6 +48,13 @@ decorative rendering effect:
   point lights, darkness/fog overlays distinguish unseen from discovered and
   currently visible space, and unseen actors, items, badges, and perception
   tethers are withheld. There is no unconditional player-following light.
+- Visibility prepares blocker/smoke state once, caches repeated ray results,
+  bounds each light solve to its radius, and advances on macro-tile movement.
+  Player presentation still moves at fine resolution. On the 3,969-cell QA
+  map, the exact carried-lamp visibility solve measures about 16 ms locally,
+  down from roughly 60–80 ms, and runs once per macro tile rather than once per
+  fine-grid step. Unseen walls use instanced black proxies and off-screen
+  instances remain eligible for frustum culling.
 - Hostile perception is assembled from data-authored sensory channels rather
   than one universal sight rule. The current stimulus vocabulary is `light`,
   `sound`, `fire`, `smoke`, `danger_gas`, and `visible_player`.
@@ -145,11 +157,10 @@ forms are not claimed by this batch.
 The 3D renderer consumes authoritative visibility as a three-state mask:
 
 - **Visible** cells render normally.
-- **Explored** cells retain readable geography beneath a dim memory haze, but
-  do not reveal live actors or items.
-- **Unseen** cells omit terrain and static-object geometry beneath an opaque
-  ground shroud with tall, feathered boundary curtains, so walls and props
-  cannot protrude through what was previously only a flat fog plane.
+- **Explored** static geometry remains present as a near-black memory
+  silhouette beneath a dim haze, but does not reveal live actors or items.
+- **Unseen** static geometry remains present but renders black with emission
+  suppressed beneath the opaque shroud. Fog never deletes a wall mesh.
 
 Visual light emitters are filtered against the authoritative visible
 contributions. A lamp hidden behind an occluder therefore cannot brighten the
@@ -168,11 +179,13 @@ tactical overlay above all fog states and therefore remains legible even at
 zero illumination.
 
 Each macro terrain or wall mesh aggregates fog state across its exact covered
-fine-cell block: one visible edge retains the whole mesh, one discovered edge
-retains it as explored memory, and visibility from a neighboring macro tile
-cannot leak across the boundary. Walls intentionally faded between the camera
-and player retain a readable silhouette above the fog overlay but below actors,
-so camera clearance never turns a known wall into an apparent opening.
+fine-cell block: one visible edge makes the whole mesh visible, one discovered
+edge retains it as explored memory, and visibility from a neighboring macro
+tile cannot leak across the boundary. Geometry and overlays consume the same
+precomputed macro presentation plan, so a mesh and its fog treatment cannot
+disagree. Camera fading applies only to currently visible walls; explored and
+unseen walls retain their dark material so clearance never cuts a bright hole
+through the shroud.
 
 Static-world visibility deliberately does not reuse the actor-acquisition score
 floor. A lit wall in the viewer's physical LOS remains `terrain_visible` even
@@ -180,11 +193,13 @@ when an actor at the same distance would not yet be acquired; a wall behind a
 real occluder remains hidden. Live actors and items continue to use exact-fine
 `currently_visible` gating.
 
-Fog planes and curtains aggregate to the same macro footprint as static art.
-Only currently terrain-visible structures enter a protected post-fog render
-pass (below tactical rings and sprites); explored structures stay beneath the
-memory mask and unseen structures are culled. This prevents neighboring or
-unseen fine subcells from painting black over a visible wall.
+Fog haze and feathered boundary curtains aggregate to the same macro footprint
+as static art. Haze is anchored to the floor/base elevation and depth-tests
+against ordinary opaque geometry; it is never positioned from a wall's cap and
+cannot act as a floating substitute wall. Static geometry remains in one normal
+opaque pass, with visible/explored/unseen material states of authored color,
+near-black, and black respectively. This prevents neighboring dark cells from
+painting across a lit wall in screen space while retaining the soft 3D edge.
 
 Wall lighting samples the maximum authoritative illumination across the exact
 fine-cell footprint rather than the usually blocked center cell. A restrained,
@@ -220,6 +235,33 @@ The presets write explicit package data. Fine-grained channel edits beyond the
 preset and timing controls can be made in package data; a full per-channel form
 is later authoring polish, not part of this batch's claim.
 
+### AI perception follow-up
+
+The runtime now treats a dominant sense as a specialty rather than the
+creature's only faculty. The three QA archetypes retain weaker secondary senses,
+while explicitly authored single-sense profiles remain valid.
+
+- Sight uses a configurable angular field of view instead of a cardinal lane.
+  The sight-dominant QA watcher has a 150-degree field, honors its full authored
+  range, excludes targets directly behind it, and updates its facing after
+  movement.
+- Hearing is systemic. Sound fields retain their origin, source actor, action,
+  frequency, material, attenuation, and expiry. A hearing channel scores the
+  propagated intensity at the listener; it records and investigates the sound's
+  last-known origin without tracking the player's later hidden position or
+  starting combat. Push, pull, drag, and break actions now emit physical sound
+  through this same path.
+- A carried Glass/light source supports guarded
+  `lock_after_acquisition` tracing. The observer must first acquire that exact
+  active source through ordinary LOS. It may then follow the same source ID and
+  carrier briefly behind cover as searching evidence. The lock survives save
+  serialization, but extinguishing, dropping, replacing, leaving range, or
+  reaching its finite expiry breaks live tracing. It never grants visual
+  perception or combat by itself.
+- Non-footstep environment sound changes invalidate perception immediately.
+  Ordinary fine-step footfalls keep their coarser cadence to avoid restoring the
+  previous walking hitch.
+
 ## 4. Acceptance map: `qa_perception_lab`
 
 The QA suite includes a plot-neutral, 21 by 21 perception chamber with
@@ -254,16 +296,22 @@ npm run test:package-roundtrip
 npm run build
 ```
 
-`npm run test:perception` is the focused 27-check Batch 2 contract. It checks
+`npm run test:perception` is the focused 44-check Batch 2 contract. It checks
 the dark acceptance room and its three profiles, unlit visual failure,
 the lamp's authored/resolved macro and fine radii, carried-source movement,
 persistent dropped-source save round-trip,
 carried-light exposure, extinguishing, wall and smoke obstruction, distinct
 visibility layers, terrain-versus-actor visibility, edge-lit macro-wall
-sampling, emissive-fill bounds, last-known evidence, loss of live tracking,
-finite search, and alert-gated combat. The broader commands guard the existing
-engine, QA suite, fog render-state contract, save/package behavior, and
-production build against regressions.
+sampling, collision-versus-LOS semantics, fine-grid smoke optical-depth
+equivalence, exact shared macro-presentation coverage, static fog-material policy,
+emissive-fill bounds, angular peripheral sight, authored sight range, carried
+source acquisition/tracing/cancellation and save round-trip, physical object
+noise, last-known evidence, loss of live tracking, finite search, and
+alert-gated combat. These automated checks cover state and material-policy
+invariants; actual Three.js depth/compositing and High-versus-Performance parity
+remain browser acceptance checks. The broader commands guard the existing
+engine, QA suite, save/package behavior, and production build against
+regressions.
 
 `npm run test:all` includes the focused perception contract and may be used for
 the complete repository regression pass.
@@ -292,9 +340,17 @@ already present, then open that map in Play.
   both High and Performance: visible wall caps/faces must retain their material
   color, no macro wall may disappear because one of its fine subcells is
   unseen, and truly occluded wall blocks must remain masked.
+- [ ] Stand on one side of the terminal or crate with open floor behind it.
+  Both objects must still block movement, but neither may cut a hard black
+  wedge through otherwise illuminated open space. Authored smoke must remain a
+  visible haze and attenuate sight without becoming a fine-grid black wall.
 - [ ] Throw/place the lamp into a remote bay. The remote area should illuminate
   from the dropped source, while the player is no longer the lamp origin; the
   Light/Glass watcher should react to the qualifying emission.
+- [ ] Let the east watcher directly acquire the carried Glass QA Lamp, then step
+  behind the divider. It should investigate the moving source briefly without
+  entering combat. A fresh occluded lamp must not be detected through the wall;
+  extinguishing or dropping an acquired lamp must break the live trace.
 - [ ] Push, throw at, or strike the west crate, or use Yell. The hearing hunter
   should investigate the sound evidence around the baffle without learning the
   player's later hidden position.
@@ -307,7 +363,9 @@ already present, then open that map in Play.
 - [ ] Compare a visible bay, an explored bay, and an unseen bay in 3D. Visible
   geometry should be normal, explored geography should sit beneath memory
   haze, and unseen terrain, walls, props, and hidden light emitters must not
-  protrude through or illuminate the volumetric shroud.
+  protrude through or illuminate the volumetric shroud. No horizontal haze or
+  curtain may float from a wall cap or remain after its supporting wall changes
+  state.
 
 The batch passes user acceptance when darkness and light feel reciprocal and
 the three sensory profiles require meaningfully different play.

@@ -111,6 +111,20 @@ export const logicalCellToMacro = (
   return [macro[0], macro[1]];
 };
 
+// Fog presentation is keyed by rendered macro cells, while a runtime object
+// can sit between macro centers after a one-fine-cell push. Normalize an
+// arbitrary rendered point through logical space before looking up its owning
+// fog cell so those fractional placements do not fall through to "unseen".
+export const worldPointToWorldMacroCell = (
+  x: number,
+  z: number,
+  gridSpace: RendererGridSpace,
+  fineRatio = FINE_PER_MACRO,
+): [number, number] => {
+  const logical = worldPointToLogicalCell(x, z, gridSpace, fineRatio);
+  return logicalCellToMacro(logical, gridSpace);
+};
+
 const positiveModulo = (value: number, divisor: number) =>
   ((value % divisor) + divisor) % divisor;
 

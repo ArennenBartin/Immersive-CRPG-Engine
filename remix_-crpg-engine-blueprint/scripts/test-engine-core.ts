@@ -147,6 +147,11 @@ import {
 } from "../src/schema/game";
 import { resolvePlayModeMap } from "../src/utils/playModeMap";
 import {
+  getNormalizedMovementRepeatIntervalMs,
+  resolveHeldMovementIntent,
+  shouldDriveDemandFrames,
+} from "../src/utils/playInput";
+import {
   normalizePackageImportPayload,
   serializePackageForExport,
 } from "../src/store/engineStore";
@@ -207,6 +212,117 @@ const ok = (cond: boolean, label: string) => {
     failures++;
   }
 };
+
+console.log("engine-core: Play input cadence + demand frames");
+{
+  const baseIntervalMs = 50;
+  const cardinalIntervals = ([
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1],
+  ] as const).map(([dx, dz]) =>
+    getNormalizedMovementRepeatIntervalMs(baseIntervalMs, dx, dz),
+  );
+  const diagonalInterval = getNormalizedMovementRepeatIntervalMs(
+    baseIntervalMs,
+    1,
+    -1,
+  );
+
+  ok(
+    cardinalIntervals.every((interval) => interval === baseIntervalMs) &&
+      getNormalizedMovementRepeatIntervalMs(baseIntervalMs, 0, 0) ===
+        baseIntervalMs,
+    "cardinal and wait-like input retain the base repeat cadence",
+  );
+  ok(
+    Math.abs(diagonalInterval - baseIntervalMs * Math.SQRT2) < 0.000001,
+    "diagonal input scales its repeat interval by resolved world distance",
+  );
+  const cardinalWorldSpeed = 1 / (baseIntervalMs / 1000);
+  const diagonalWorldSpeed = Math.SQRT2 / (diagonalInterval / 1000);
+  ok(
+    Math.abs(cardinalWorldSpeed - diagonalWorldSpeed) < 0.000001,
+    "cardinal and diagonal holds cover equal world distance per second",
+  );
+  const quickChordKeys = new Set(["w", "d"]);
+  const quickChordIntent = resolveHeldMovementIntent(
+    quickChordKeys,
+    new Set(["w", "d"]),
+  );
+  ok(
+    quickChordIntent.ax === 0 &&
+      quickChordIntent.az === 0 &&
+      !quickChordIntent.wait,
+    "consumed chord keys remain inert until every participating key releases",
+  );
+  const waitChordIntent = resolveHeldMovementIntent(
+    new Set(["z", "arrowright"]),
+    new Set(),
+  );
+  ok(
+    waitChordIntent.wait && waitChordIntent.ax === 1,
+    "wait remains explicit when a direction is held in the same quick chord",
+  );
+
+  const demandTruthTable = [
+    {
+      input: {
+        pageVisible: false,
+        performanceMode: true,
+        bottomPanelOpen: false,
+      },
+      expected: false,
+    },
+    {
+      input: {
+        pageVisible: false,
+        performanceMode: false,
+        bottomPanelOpen: true,
+      },
+      expected: false,
+    },
+    {
+      input: {
+        pageVisible: true,
+        performanceMode: false,
+        bottomPanelOpen: false,
+      },
+      expected: true,
+    },
+    {
+      input: {
+        pageVisible: true,
+        performanceMode: true,
+        bottomPanelOpen: false,
+      },
+      expected: true,
+    },
+    {
+      input: {
+        pageVisible: true,
+        performanceMode: false,
+        bottomPanelOpen: true,
+      },
+      expected: true,
+    },
+    {
+      input: {
+        pageVisible: true,
+        performanceMode: true,
+        bottomPanelOpen: true,
+      },
+      expected: true,
+    },
+  ];
+  ok(
+    demandTruthTable.every(
+      ({ input, expected }) => shouldDriveDemandFrames(input) === expected,
+    ),
+    "the bounded demand-frame clock runs for every visible play scene",
+  );
+}
 
 console.log("engine-core: 3D render-space adapter");
 {
@@ -306,18 +422,18 @@ console.log("engine-core: 3D render-space adapter");
   const unseenWall = resolveStructureFogCompositePolicy("unseen", true);
   ok(
     visibleSolidWall.render &&
-      visibleSolidWall.postFog &&
+      !visibleSolidWall.postFog &&
       !visibleSolidWall.cameraFaded &&
       visibleFadedWall.render &&
-      visibleFadedWall.postFog &&
+      !visibleFadedWall.postFog &&
       visibleFadedWall.cameraFaded &&
       exploredWall.render &&
       !exploredWall.postFog &&
       !exploredWall.cameraFaded &&
-      !unseenWall.render &&
+      unseenWall.render &&
       !unseenWall.postFog &&
       !unseenWall.cameraFaded,
-    "only currently visible walls composite or camera-fade above fog",
+    "all walls retain one opaque mesh and only visible walls camera-fade",
   );
   const fineCopies = Array.from({ length: 9 }, (_, index) => ({
     x: index % 3,
@@ -1121,10 +1237,10 @@ console.log("engine-core: v1 package/save grid adapter");
     "emit_sound writes propagated sound fields with frequency metadata",
   );
   ok(
-    (soundPulse.save.map_deltas?.[demoMap.id]?.npc_tasks || []).some(
-      (task) => task.task_type === "investigate" && task.source_kind === "sound",
+    !(soundPulse.save.map_deltas?.[demoMap.id]?.npc_tasks || []).some(
+      (task) => task.source_kind === "sound",
     ),
-    "emit_sound begins Simulation S5 by queueing NPC investigation tasks",
+    "emit_sound leaves NPC response to sensory-profile perception",
   );
   const soundEvent = soundPulse.events.find((event) => event.type === "sound_propagated");
   const propagatedSoundFields = Object.values(
@@ -1317,7 +1433,11 @@ console.log("engine-core: v1 package/save grid adapter");
       extinguishedFields.some((field) => field.kind === "smoke" && field.action === "extinguish"),
     "extinguish_fire removes fire and leaves doused smoke",
   );
-  const taskSnapshot = createSimulationSnapshotFromV1(gamePackage, soundPulse.save, demoMap.id);
+  const taskSnapshot = createSimulationSnapshotFromV1(
+    oilFirePackage,
+    spreadingFire.save,
+    demoMap.id,
+  );
   ok(
     taskSnapshot.totals.npc_tasks > 0 &&
       taskSnapshot.overlays.some((overlay) => overlay.id === "npc_tasks" && overlay.count > 0),
@@ -3398,6 +3518,29 @@ console.log("engine-core: v1 package/save grid adapter");
       !hasFogLineOfSight([-1, -4], [-3, -4], (x, z) => closedDoorFogBlockers.has(fogCellKey(x, z))) &&
       hasFogLineOfSight([-1, -4], [-3, -4], (x, z) => openDoorFogBlockers.has(fogCellKey(x, z))),
     "fog of war treats closed doors as LOS walls until opened",
+  );
+  const terminalPlacement = {
+    object_id: "obj_terminal",
+    cell: [8, -4] as [number, number],
+    facing: [0, 1] as [number, number],
+  };
+  const reedPlacement = {
+    object_id: "obj_reed_clump",
+    cell: [12, -4] as [number, number],
+    facing: [0, 1] as [number, number],
+  };
+  const semanticObjectFogBlockers = createFogLineOfSightBlockers(
+    [terminalPlacement, reedPlacement],
+    objectById,
+  );
+  ok(
+    !semanticObjectFogBlockers.has(
+      fogCellKey(terminalPlacement.cell[0], terminalPlacement.cell[1]),
+    ) &&
+      semanticObjectFogBlockers.has(
+        fogCellKey(reedPlacement.cell[0], reedPlacement.cell[1]),
+      ),
+    "fog LOS follows explicit sight semantics rather than movement collision",
   );
   const closedDoorVisibility = computeFogVisibleCells({
     map: demoMap,

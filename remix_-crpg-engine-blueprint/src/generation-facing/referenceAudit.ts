@@ -7,6 +7,10 @@ import {
 } from "../schema/game";
 import { SFX } from "../data/builtinAudio";
 import { CHEM_MATERIALS } from "../engine-core/chemistry";
+import {
+  BUILTIN_DIALOGUE_KEYWORDS,
+  validateKeywordDialoguePackage,
+} from "../engine-core/keywordDialogue";
 import { normalizeGeneratedIdToken } from "./deterministicIds";
 
 export type ReferenceAuditSeverity = "error" | "warning" | "info";
@@ -129,6 +133,11 @@ export const auditGamePackageReferences = (
     abilities: new Set(pkg.abilities.map((entry) => entry.id)),
     encounters: new Set(pkg.encounters.map((entry) => entry.id)),
     shops: new Set(pkg.shops.map((entry) => entry.id)),
+    keywords: new Set([
+      ...BUILTIN_DIALOGUE_KEYWORDS.map((entry) => entry.id),
+      ...pkg.keywords.map((entry) => entry.id),
+    ]),
+    dynamicTopics: new Set(pkg.dynamic_topics.map((entry) => entry.id)),
     factions: factionIds,
     endings: endingIds,
     barks: new Set(pkg.barks.map((entry) => entry.id)),
@@ -157,6 +166,10 @@ export const auditGamePackageReferences = (
     ]),
     music: new Set(Object.keys(asRecord(settings.music_tracks) ?? {})),
   };
+  const keywordDefinitions = new Map([
+    ...BUILTIN_DIALOGUE_KEYWORDS.map((entry) => [entry.id, entry] as const),
+    ...pkg.keywords.map((entry) => [entry.id, entry] as const),
+  ]);
 
   const reference = (
     target: Set<string>,
@@ -184,6 +197,8 @@ export const auditGamePackageReferences = (
     ["abilities", pkg.abilities.map((entry, index) => ({ id: entry.id, path: `$.abilities[${index}].id` }))],
     ["encounters", pkg.encounters.map((entry, index) => ({ id: entry.id, path: `$.encounters[${index}].id` }))],
     ["shops", pkg.shops.map((entry, index) => ({ id: entry.id, path: `$.shops[${index}].id` }))],
+    ["keywords", pkg.keywords.map((entry, index) => ({ id: entry.id, path: `$.keywords[${index}].id` }))],
+    ["dynamic_topics", pkg.dynamic_topics.map((entry, index) => ({ id: entry.id, path: `$.dynamic_topics[${index}].id` }))],
     ["factions", (pkg.factions as unknown[]).flatMap((entry, index) => {
       const id = stringField(entry, "id");
       return id ? [{ id, path: `$.factions[${index}].id` }] : [];
@@ -238,6 +253,37 @@ export const auditGamePackageReferences = (
     });
   }
 
+  // Keyword conversations have validation rules that are shared by runtime,
+  // package import, and Studio. Surface the same deterministic diagnostics in
+  // the canonical reference audit so authoring never gets a weaker check than
+  // Play mode.
+  validateKeywordDialoguePackage(pkg).forEach((issue) => {
+    const jsonPath = issue.path.startsWith("$")
+      ? issue.path
+      : `$.${issue.path.replace(/(?:^|\.)(\d+)(?=\.|$)/g, "[$1]")}`;
+    add({
+      severity: issue.severity,
+      code: issue.code,
+      path: jsonPath,
+      message: issue.message,
+    });
+  });
+
+  const authoredDynamicRecordOwners = new Map<string, string>();
+  pkg.dynamic_topics.forEach((topic, index) => {
+    const path = `$.dynamic_topics[${index}]`;
+    const prior = authoredDynamicRecordOwners.get(topic.record_id);
+    if (prior) {
+      add({
+        severity: "error",
+        code: "DIALOGUE_DUPLICATE_DYNAMIC_RECORD",
+        path: `${path}.record_id`,
+        message: `Dynamic topic record identity ${topic.record_id} is already bound at ${prior}.`,
+        reference: topic.record_id,
+      });
+    } else authoredDynamicRecordOwners.set(topic.record_id, `${path}.record_id`);
+  });
+
   reference(indexes.maps, pkg.metadata.start_map_id, "$.metadata.start_map_id", "REF_START_MAP_MISSING", "map");
   const startMap = pkg.maps.find((map) => map.id === pkg.metadata.start_map_id);
   if (startMap && !startMap.spawns.some((spawn) => spawn.id === pkg.metadata.start_spawn_id)) {
@@ -252,6 +298,123 @@ export const auditGamePackageReferences = (
   }
   reference(indexes.sprites, stringField(settings, "player_sprite_id"), "$.settings.player_sprite_id", "REF_SPRITE_MISSING", "sprite");
 
+  // Campaign lifecycle policy is authored in package settings so old packages
+  // remain schema-compatible. Audit it as strongly as first-class content:
+  // reset semantics must never silently point at a missing stable identity.
+  const worldStatePolicy = asRecord(settings.world_state_policy);
+  if (worldStatePolicy) {
+    const campaignSwitchIds = new Set(
+      Array.isArray(worldStatePolicy.campaign_switch_ids)
+        ? worldStatePolicy.campaign_switch_ids.filter((id): id is string => typeof id === "string")
+        : [],
+    );
+    const expeditionSwitchIds = new Set(
+      Array.isArray(worldStatePolicy.expedition_switch_ids)
+        ? worldStatePolicy.expedition_switch_ids.filter((id): id is string => typeof id === "string")
+        : [],
+    );
+    [...campaignSwitchIds].forEach((id, index) =>
+      reference(indexes.switches, id, `$.settings.world_state_policy.campaign_switch_ids[${index}]`, "REF_PERSISTENCE_SWITCH_MISSING", "switch"),
+    );
+    [...expeditionSwitchIds].forEach((id, index) =>
+      reference(indexes.switches, id, `$.settings.world_state_policy.expedition_switch_ids[${index}]`, "REF_PERSISTENCE_SWITCH_MISSING", "switch"),
+    );
+    [...campaignSwitchIds].filter((id) => expeditionSwitchIds.has(id)).forEach((id) =>
+      add({
+        severity: "error",
+        code: "REF_PERSISTENCE_SCOPE_CONFLICT",
+        path: "$.settings.world_state_policy",
+        message: `Switch ${id} is assigned to both campaign and expedition scope.`,
+        reference: id,
+      }),
+    );
+
+    const placementPolicyKinds = [
+      ["persistent_door_ids", "custom_object_placements"],
+      ["persistent_object_ids", "custom_object_placements"],
+      ["persistent_item_ids", "item_placements"],
+      ["persistent_container_ids", "container_placements"],
+    ] as const;
+    placementPolicyKinds.forEach(([policyKey, collectionKey]) => {
+      const byMap = asRecord(worldStatePolicy[policyKey]);
+      if (!byMap) return;
+      Object.entries(byMap).forEach(([mapId, rawIds]) => {
+        const map = pkg.maps.find((candidate) => candidate.id === mapId);
+        if (!map) {
+          add({
+            severity: "error",
+            code: "REF_PERSISTENCE_MAP_MISSING",
+            path: `$.settings.world_state_policy.${policyKey}.${mapId}`,
+            message: `Persistence policy refers to missing map ${mapId}.`,
+            reference: mapId,
+          });
+          return;
+        }
+        const stableIds = new Set(map[collectionKey].map((entry) => entry.id).filter((id): id is string => Boolean(id)));
+        (Array.isArray(rawIds) ? rawIds : []).forEach((rawId, index) => {
+          if (typeof rawId !== "string" || stableIds.has(rawId)) return;
+          add({
+            severity: "error",
+            code: "REF_PERSISTENCE_PLACEMENT_MISSING",
+            path: `$.settings.world_state_policy.${policyKey}.${mapId}[${index}]`,
+            message: `Persistence policy refers to missing stable placement ${rawId} on ${mapId}.`,
+            reference: rawId,
+            mapId,
+          });
+        });
+      });
+    });
+  }
+
+  const succession = asRecord(settings.intercessor_succession);
+  if (succession && succession.enabled !== false) {
+    const hubMapId = stringField(succession, "hub_map_id") || pkg.metadata.start_map_id;
+    const hubSpawnId = stringField(succession, "hub_spawn_id") || pkg.metadata.start_spawn_id;
+    reference(indexes.maps, hubMapId, "$.settings.intercessor_succession.hub_map_id", "REF_SUCCESSION_HUB_MAP_MISSING", "map");
+    const hubMap = pkg.maps.find((map) => map.id === hubMapId);
+    if (hubMap && !hubMap.spawns.some((spawn) => spawn.id === hubSpawnId)) {
+      add({
+        severity: "error",
+        code: "REF_SUCCESSION_HUB_SPAWN_MISSING",
+        path: "$.settings.intercessor_succession.hub_spawn_id",
+        message: `Successor hub spawn ${hubSpawnId} is absent from map ${hubMapId}.`,
+        reference: hubSpawnId,
+        mapId: hubMapId,
+      });
+    }
+    for (const poolKey of ["name_prefixes", "name_roots"] as const) {
+      if (Array.isArray(succession[poolKey]) && succession[poolKey].length === 0) {
+        add({
+          severity: "error",
+          code: "REF_SUCCESSION_NAME_POOL_EMPTY",
+          path: `$.settings.intercessor_succession.${poolKey}`,
+          message: `${poolKey} cannot be empty when explicitly authored. Remove it to use defaults or add at least one value.`,
+        });
+      }
+    }
+    const historyKeywordId = stringField(succession, "history_keyword_id");
+    if (historyKeywordId) {
+      const keyword = keywordDefinitions.get(historyKeywordId);
+      if (!keyword) {
+        add({
+          severity: "error",
+          code: "REF_SUCCESSION_HISTORY_TOPIC_MISSING",
+          path: "$.settings.intercessor_succession.history_keyword_id",
+          message: `Missing history keyword ${historyKeywordId}.`,
+          reference: historyKeywordId,
+        });
+      } else if (!keyword.dynamic_capable) {
+        add({
+          severity: "error",
+          code: "REF_SUCCESSION_HISTORY_TOPIC_STATIC",
+          path: "$.settings.intercessor_succession.history_keyword_id",
+          message: `History keyword ${historyKeywordId} must be dynamic-capable so each Intercessor binds to an exact record.`,
+          reference: historyKeywordId,
+        });
+      }
+    }
+  }
+
   const auditCondition = (condition: ConditionData | undefined, path: string) => {
     if (!condition) return;
     reference(indexes.switches, condition.switch, `${path}.switch`, "REF_SWITCH_UNDECLARED", "switch", "warning");
@@ -259,6 +422,46 @@ export const auditGamePackageReferences = (
     reference(indexes.items, condition.has_item, `${path}.has_item`, "REF_ITEM_MISSING", "item");
     reference(indexes.entities, condition.party_contains, `${path}.party_contains`, "REF_ENTITY_MISSING", "entity");
     reference(indexes.factions, condition.faction, `${path}.faction`, "REF_FACTION_MISSING", "faction");
+    reference(indexes.maps, condition.current_map, `${path}.current_map`, "REF_MAP_MISSING", "map");
+    reference(indexes.documents, condition.read_document, `${path}.read_document`, "REF_DOCUMENT_MISSING", "document");
+    if (condition.known_topic) {
+      const known = indexes.keywords.has(condition.known_topic) || indexes.dynamicTopics.has(condition.known_topic);
+      if (!known) add({
+        severity: "error",
+        code: "DIALOGUE_CONDITION_TOPIC_INVALID",
+        path: `${path}.known_topic`,
+        message: `Missing known-topic reference: ${condition.known_topic}`,
+        reference: condition.known_topic,
+      });
+    }
+    if (condition.topic_asked) {
+      const dynamicId = condition.topic_asked.startsWith("dynamic:")
+        ? condition.topic_asked.slice("dynamic:".length)
+        : undefined;
+      const known = dynamicId
+        ? indexes.dynamicTopics.has(dynamicId)
+        : indexes.keywords.has(condition.topic_asked);
+      if (!known) add({
+        severity: "error",
+        code: "DIALOGUE_CONDITION_ASKED_TOPIC_INVALID",
+        path: `${path}.topic_asked`,
+        message: `Missing asked-topic reference: ${condition.topic_asked}`,
+        reference: condition.topic_asked,
+      });
+    }
+    if (
+      condition.topic_asked_dialogue &&
+      !indexes.dialogue.has(condition.topic_asked_dialogue) &&
+      !indexes.entities.has(condition.topic_asked_dialogue)
+    ) {
+      add({
+        severity: "error",
+        code: "DIALOGUE_CONDITION_PARTICIPANT_INVALID",
+        path: `${path}.topic_asked_dialogue`,
+        message: `Missing dialogue or participant reference: ${condition.topic_asked_dialogue}`,
+        reference: condition.topic_asked_dialogue,
+      });
+    }
     auditCondition(condition.not, `${path}.not`);
     condition.all?.forEach((entry, index) => auditCondition(entry, `${path}.all[${index}]`));
     condition.any?.forEach((entry, index) => auditCondition(entry, `${path}.any[${index}]`));
@@ -278,6 +481,16 @@ export const auditGamePackageReferences = (
     reference(indexes.factions, action.faction_id, `${path}.faction_id`, "REF_FACTION_MISSING", "faction");
     reference(indexes.abilities, action.skill_id, `${path}.skill_id`, "REF_SKILL_MISSING", "skill");
     reference(indexes.endings, action.ending_id, `${path}.ending_id`, "REF_ENDING_MISSING", "ending");
+    reference(indexes.keywords, action.topic_id, `${path}.topic_id`, "DIALOGUE_ACTION_TOPIC_INVALID", "dialogue topic");
+    reference(indexes.dynamicTopics, action.dynamic_topic_id, `${path}.dynamic_topic_id`, "DIALOGUE_ACTION_DYNAMIC_TOPIC_INVALID", "dynamic dialogue topic");
+    if (action.type === "unlock_topic" && !action.topic_id && !action.dynamic_topic_id) {
+      add({
+        severity: "error",
+        code: "DIALOGUE_ACTION_TOPIC_MISSING",
+        path,
+        message: "unlock_topic requires a stable topic_id or dynamic_topic_id.",
+      });
+    }
     auditCondition(action.condition, `${path}.condition`);
     if (action.type === "start_combat" || action.type === "custom") {
       add({
@@ -324,6 +537,12 @@ export const auditGamePackageReferences = (
 
   pkg.maps.forEach((map, mapIndex) => {
     const path = `$.maps[${mapIndex}]`;
+    map.discover_topic_ids?.forEach((id, topicIndex) =>
+      reference(indexes.keywords, id, `${path}.discover_topic_ids[${topicIndex}]`, "DIALOGUE_DISCOVERY_TOPIC_INVALID", "dialogue topic"),
+    );
+    map.discover_dynamic_topic_ids?.forEach((id, topicIndex) =>
+      reference(indexes.dynamicTopics, id, `${path}.discover_dynamic_topic_ids[${topicIndex}]`, "DIALOGUE_DISCOVERY_DYNAMIC_TOPIC_INVALID", "dynamic dialogue topic"),
+    );
     const authoredCells = new Set(map.cells.map((cell) => cellKey([cell.x, cell.z])));
     const localIds: Array<{ id?: string; path: string }> = [];
     const cellReference = (rawCell: readonly unknown[], cellPath: string) => {
@@ -602,10 +821,38 @@ export const auditGamePackageReferences = (
     reference(indexes.dialogue, entity.combat_attend_dialogue_id, `${path}.combat_attend_dialogue_id`, "REF_DIALOGUE_MISSING", "dialogue");
     reference(indexes.entities, entity.combat_attend_pacify_entity_id, `${path}.combat_attend_pacify_entity_id`, "REF_ENTITY_MISSING", "entity");
     reference(indexes.cutscenes, entity.on_defeat_cutscene_id, `${path}.on_defeat_cutscene_id`, "REF_CUTSCENE_MISSING", "cutscene");
+    entity.discover_topic_ids?.forEach((id, topicIndex) => reference(indexes.keywords, id, `${path}.discover_topic_ids[${topicIndex}]`, "DIALOGUE_DISCOVERY_TOPIC_INVALID", "dialogue topic"));
+    entity.discover_dynamic_topic_ids?.forEach((id, topicIndex) => reference(indexes.dynamicTopics, id, `${path}.discover_dynamic_topic_ids[${topicIndex}]`, "DIALOGUE_DISCOVERY_DYNAMIC_TOPIC_INVALID", "dynamic dialogue topic"));
   });
   pkg.items.forEach((item, index) => {
-    reference(indexes.sprites, item.sprite_id, `$.items[${index}].sprite_id`, "REF_SPRITE_MISSING", "sprite");
-    reference(indexes.blueprints, item.blueprint_id, `$.items[${index}].blueprint_id`, "REF_BLUEPRINT_MISSING", "blueprint");
+    const path = `$.items[${index}]`;
+    reference(indexes.sprites, item.sprite_id, `${path}.sprite_id`, "REF_SPRITE_MISSING", "sprite");
+    reference(indexes.blueprints, item.blueprint_id, `${path}.blueprint_id`, "REF_BLUEPRINT_MISSING", "blueprint");
+    item.discover_topic_ids?.forEach((id, topicIndex) => reference(indexes.keywords, id, `${path}.discover_topic_ids[${topicIndex}]`, "DIALOGUE_DISCOVERY_TOPIC_INVALID", "dialogue topic"));
+    item.discover_dynamic_topic_ids?.forEach((id, topicIndex) => reference(indexes.dynamicTopics, id, `${path}.discover_dynamic_topic_ids[${topicIndex}]`, "DIALOGUE_DISCOVERY_DYNAMIC_TOPIC_INVALID", "dynamic dialogue topic"));
+  });
+  pkg.documents.forEach((document, index) => {
+    const path = `$.documents[${index}]`;
+    document.discover_topic_ids?.forEach((id, topicIndex) => reference(indexes.keywords, id, `${path}.discover_topic_ids[${topicIndex}]`, "DIALOGUE_DISCOVERY_TOPIC_INVALID", "dialogue topic"));
+    document.discover_dynamic_topic_ids?.forEach((id, topicIndex) => reference(indexes.dynamicTopics, id, `${path}.discover_dynamic_topic_ids[${topicIndex}]`, "DIALOGUE_DISCOVERY_DYNAMIC_TOPIC_INVALID", "dynamic dialogue topic"));
+  });
+  pkg.dynamic_topics.forEach((topic, topicIndex) => {
+    const path = `$.dynamic_topics[${topicIndex}].response_associations`;
+    Object.entries(topic.response_associations).forEach(([dialogueId, responseIds]) => {
+      reference(indexes.dialogue, dialogueId, `${path}.${dialogueId}`, "DIALOGUE_DYNAMIC_ASSOCIATION_DIALOGUE_INVALID", "dialogue");
+      const responseIdsInDialogue = new Set(
+        pkg.dialogue.find((dialogue) => dialogue.id === dialogueId)?.responses?.map((response) => response.id) || [],
+      );
+      responseIds.forEach((responseId, responseIndex) => {
+        if (!responseIdsInDialogue.has(responseId)) add({
+          severity: "error",
+          code: "DIALOGUE_DYNAMIC_ASSOCIATION_RESPONSE_INVALID",
+          path: `${path}.${dialogueId}[${responseIndex}]`,
+          message: `Dynamic topic ${topic.id} associates missing response ${responseId} in ${dialogueId}.`,
+          reference: responseId,
+        });
+      });
+    });
   });
   pkg.abilities.forEach((ability, index) => {
     ability.payloads.forEach((payload, payloadIndex) => reference(indexes.entities, payload.entity_id, `$.abilities[${index}].payloads[${payloadIndex}].entity_id`, "REF_ENTITY_MISSING", "summoned entity"));
@@ -628,6 +875,41 @@ export const auditGamePackageReferences = (
       reference(indexes.cutscenes, option.trigger_cutscene, `${owner}.trigger_cutscene`, "REF_CUTSCENE_MISSING", "cutscene");
       auditCondition(option.condition, `${owner}.condition`);
     }));
+    dialogue.initial_topic_ids?.forEach((id, topicIndex) => reference(indexes.keywords, id, `${path}.initial_topic_ids[${topicIndex}]`, "DIALOGUE_INITIAL_TOPIC_INVALID", "dialogue topic"));
+    dialogue.initial_dynamic_topic_ids?.forEach((id, topicIndex) => reference(indexes.dynamicTopics, id, `${path}.initial_dynamic_topic_ids[${topicIndex}]`, "DIALOGUE_INITIAL_DYNAMIC_TOPIC_INVALID", "dynamic dialogue topic"));
+    dialogue.action_topic_ids?.forEach((id, topicIndex) => {
+      reference(indexes.keywords, id, `${path}.action_topic_ids[${topicIndex}]`, "DIALOGUE_ACTION_TOPIC_INVALID", "dialogue action topic");
+      const definition = keywordDefinitions.get(id);
+      if (definition && !definition.action_kind) add({
+        severity: "warning",
+        code: "DIALOGUE_ACTION_KIND_MISSING",
+        path: `${path}.action_topic_ids[${topicIndex}]`,
+        message: `Action topic ${id} has no action_kind and will behave as an ordinary subject.`,
+        reference: id,
+      });
+    });
+    dialogue.responses?.forEach((response, responseIndex) => {
+      const owner = `${path}.responses[${responseIndex}]`;
+      response.context_topic_ids.forEach((id, topicIndex) => reference(indexes.keywords, id, `${owner}.context_topic_ids[${topicIndex}]`, "DIALOGUE_CONTEXT_TOPIC_INVALID", "dialogue topic"));
+      response.context_dynamic_topic_ids.forEach((id, topicIndex) => reference(indexes.dynamicTopics, id, `${owner}.context_dynamic_topic_ids[${topicIndex}]`, "DIALOGUE_CONTEXT_DYNAMIC_TOPIC_INVALID", "dynamic dialogue topic"));
+      reference(indexes.items, response.shown_item_id, `${owner}.shown_item_id`, "DIALOGUE_SHOWN_ITEM_INVALID", "item");
+      reference(indexes.quests, response.set_quest_id, `${owner}.set_quest_id`, "DIALOGUE_EFFECT_QUEST_INVALID", "quest");
+      reference(indexes.cutscenes, response.trigger_cutscene_id, `${owner}.trigger_cutscene_id`, "DIALOGUE_EFFECT_CUTSCENE_INVALID", "cutscene");
+      response.set_switches.forEach((entry, switchIndex) => reference(indexes.switches, entry.switch_id, `${owner}.set_switches[${switchIndex}].switch_id`, "REF_SWITCH_UNDECLARED", "switch", "warning"));
+      auditCondition(response.condition, `${owner}.condition`);
+      if (response.set_quest_id && !response.set_quest_state) add({
+        severity: "error",
+        code: "DIALOGUE_EFFECT_QUEST_STATE_MISSING",
+        path: `${owner}.set_quest_state`,
+        message: `Response ${response.id} sets a quest without a target state.`,
+      });
+      if (!response.set_quest_id && response.set_quest_state) add({
+        severity: "error",
+        code: "DIALOGUE_EFFECT_QUEST_MISSING",
+        path: `${owner}.set_quest_id`,
+        message: `Response ${response.id} sets a quest state without a quest ID.`,
+      });
+    });
   });
   pkg.quests.forEach((quest, questIndex) => quest.objectives.forEach((objective, objectiveIndex) => {
     const path = `$.quests[${questIndex}].objectives[${objectiveIndex}].target_id`;

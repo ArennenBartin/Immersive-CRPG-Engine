@@ -105,6 +105,58 @@ export function DocumentEditor() {
                   placeholder="Once upon a time..."
                 />
               </div>
+
+              <div className="rounded-lg border border-indigo-500/25 bg-indigo-950/15 p-4">
+                <h3 className="text-sm font-semibold text-indigo-100">Topics learned by reading</h3>
+                <p className="mt-1 text-xs text-neutral-500">
+                  Reading marks these stable subjects as known using each topic&apos;s authored scope.
+                </p>
+                <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                  {gamePackage.keywords?.map((topic) => {
+                    const selected = (activeDocument.discover_topic_ids || []).includes(topic.id);
+                    return (
+                      <label key={topic.id} className="flex items-center gap-2 rounded border border-neutral-800 bg-neutral-950/70 px-3 py-2 text-xs text-neutral-300">
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          onChange={(event) =>
+                            handleUpdate({
+                              discover_topic_ids: event.target.checked
+                                ? Array.from(new Set([...(activeDocument.discover_topic_ids || []), topic.id]))
+                                : (activeDocument.discover_topic_ids || []).filter((id) => id !== topic.id),
+                            })
+                          }
+                        />
+                        <span className="min-w-0 flex-1 truncate">{topic.display_label}</span>
+                        <span className="text-[10px] uppercase text-neutral-600">{topic.scope}</span>
+                      </label>
+                    );
+                  })}
+                  {gamePackage.dynamic_topics?.map((topic) => {
+                    const selected = (activeDocument.discover_dynamic_topic_ids || []).includes(topic.id);
+                    return (
+                      <label key={topic.id} className="flex items-center gap-2 rounded border border-violet-500/20 bg-violet-950/10 px-3 py-2 text-xs text-violet-100">
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          onChange={(event) =>
+                            handleUpdate({
+                              discover_dynamic_topic_ids: event.target.checked
+                                ? Array.from(new Set([...(activeDocument.discover_dynamic_topic_ids || []), topic.id]))
+                                : (activeDocument.discover_dynamic_topic_ids || []).filter((id) => id !== topic.id),
+                            })
+                          }
+                        />
+                        <span className="min-w-0 flex-1 truncate">{topic.display_name}</span>
+                        <span className="text-[10px] uppercase text-violet-300/45">dynamic</span>
+                      </label>
+                    );
+                  })}
+                  {!(gamePackage.keywords?.length || gamePackage.dynamic_topics?.length) && (
+                    <p className="col-span-full text-xs italic text-neutral-600">Create conversation topics in Dialogue Studio first.</p>
+                  )}
+                </div>
+              </div>
             </div>
           </div>
         ) : (

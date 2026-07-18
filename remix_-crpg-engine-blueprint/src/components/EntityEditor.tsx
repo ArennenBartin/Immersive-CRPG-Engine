@@ -24,12 +24,54 @@ type SensoryPresetId =
   | "standard"
   | "sight-dominant"
   | "hearing-dominant"
-  | "light-glass-sensitive";
+  | "light-glass-sensitive"
+  | "deaf";
+
+type EditableSensoryChannel = SensoryChannelData & {
+  ignored_stimulus_tags?: string[];
+  stimulus_tag_multipliers?: Record<string, number>;
+  repeated_sound_gain?: number;
+  positional_uncertainty?: number;
+  barrier_response?: "normal" | "reduced" | "ignore";
+};
+
+const SENSORY_STIMULUS_KINDS: SensoryChannelData["stimulus_kinds"] = [
+  "visible_player",
+  "sound",
+  "light",
+  "fire",
+  "smoke",
+  "danger_gas",
+];
+
+const sensoryCsv = (values: string[] | undefined) => (values || []).join(", ");
+
+const parseSensoryCsv = (value: string) =>
+  [...new Set(value.split(",").map((entry) => entry.trim()).filter(Boolean))];
+
+const sensoryMultiplierText = (values: Record<string, number> | undefined) =>
+  Object.entries(values || {})
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([tag, multiplier]) => `${tag}=${multiplier}`)
+    .join(", ");
+
+const parseSensoryMultipliers = (value: string) =>
+  Object.fromEntries(
+    value
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .flatMap((entry) => {
+        const [tag, rawMultiplier] = entry.split("=").map((part) => part.trim());
+        const multiplier = Number(rawMultiplier);
+        return tag && Number.isFinite(multiplier) ? [[tag, Math.max(0, multiplier)]] : [];
+      }),
+  );
 
 const sensoryChannel = (
   id: string,
   stimulusKinds: SensoryChannelData["stimulus_kinds"],
-  overrides: Partial<SensoryChannelData> = {},
+  overrides: Partial<EditableSensoryChannel> = {},
 ): SensoryChannelData => ({
   id,
   stimulus_kinds: stimulusKinds,
@@ -38,10 +80,17 @@ const sensoryChannel = (
   sensitivity: 1,
   requires_los: false,
   requires_view_cone: false,
+  view_cone_degrees: 120,
   requires_illumination: false,
   tracks_live_target: false,
+  source_tracking: "none",
+  ignored_stimulus_tags: [],
+  stimulus_tag_multipliers: {},
+  repeated_sound_gain: 0,
+  positional_uncertainty: 0,
+  barrier_response: "normal",
   ...overrides,
-});
+} as SensoryChannelData);
 
 const SENSORY_PRESETS: Record<SensoryPresetId, SensoryProfileData> = {
   standard: {
@@ -69,8 +118,16 @@ const SENSORY_PRESETS: Record<SensoryPresetId, SensoryProfileData> = {
         sensitivity: 1.15,
         requires_los: true,
         requires_view_cone: true,
+        view_cone_degrees: 150,
         requires_illumination: true,
         tracks_live_target: true,
+      }),
+      sensoryChannel("hearing", ["sound"], {
+        range: 7,
+        threshold: 0.24,
+        sensitivity: 0.8,
+        repeated_sound_gain: 0.08,
+        positional_uncertainty: 1.5,
       }),
     ],
   },
@@ -83,6 +140,24 @@ const SENSORY_PRESETS: Record<SensoryPresetId, SensoryProfileData> = {
         range: 12,
         threshold: 0.12,
         sensitivity: 1.35,
+        stimulus_tag_multipliers: {
+          footstep: 1.35,
+          object_push: 1.2,
+          impact: 1.2,
+        },
+        repeated_sound_gain: 0.2,
+        positional_uncertainty: 0.5,
+        barrier_response: "reduced",
+      }),
+      sensoryChannel("sight", ["visible_player"], {
+        range: 7,
+        threshold: 0.22,
+        sensitivity: 0.8,
+        requires_los: true,
+        requires_view_cone: true,
+        view_cone_degrees: 110,
+        requires_illumination: true,
+        tracks_live_target: true,
       }),
     ],
   },
@@ -97,6 +172,42 @@ const SENSORY_PRESETS: Record<SensoryPresetId, SensoryProfileData> = {
         threshold: 0.1,
         sensitivity: 1.25,
         requires_los: true,
+        tracks_live_target: true,
+        source_tracking: "lock_after_acquisition",
+      }),
+      sensoryChannel("sight", ["visible_player"], {
+        range: 7,
+        threshold: 0.22,
+        sensitivity: 0.8,
+        requires_los: true,
+        requires_view_cone: true,
+        view_cone_degrees: 110,
+        requires_illumination: true,
+        tracks_live_target: true,
+      }),
+      sensoryChannel("hearing", ["sound"], {
+        range: 6,
+        threshold: 0.28,
+        sensitivity: 0.7,
+        ignored_stimulus_tags: ["glass"],
+        repeated_sound_gain: 0.06,
+        positional_uncertainty: 2,
+      }),
+    ],
+  },
+  deaf: {
+    id: "deaf",
+    memory_ticks: 90,
+    search_ticks: 80,
+    channels: [
+      sensoryChannel("sight", ["visible_player"], {
+        range: 9,
+        threshold: 0.18,
+        sensitivity: 1,
+        requires_los: true,
+        requires_view_cone: true,
+        requires_illumination: true,
+        tracks_live_target: true,
       }),
     ],
   },
@@ -106,11 +217,16 @@ const sensoryProfileForPreset = (id: SensoryPresetId): SensoryProfileData => {
   const profile = SENSORY_PRESETS[id];
   return {
     ...profile,
-    channels: profile.channels.map((channel) => ({
-      ...channel,
-      stimulus_kinds: [...channel.stimulus_kinds],
-      stimulus_tags: channel.stimulus_tags ? [...channel.stimulus_tags] : undefined,
-    })),
+    channels: profile.channels.map((channel) => {
+      const editable = channel as EditableSensoryChannel;
+      return {
+        ...channel,
+        stimulus_kinds: [...channel.stimulus_kinds],
+        stimulus_tags: channel.stimulus_tags ? [...channel.stimulus_tags] : undefined,
+        ignored_stimulus_tags: [...(editable.ignored_stimulus_tags || [])],
+        stimulus_tag_multipliers: { ...(editable.stimulus_tag_multipliers || {}) },
+      };
+    }),
   };
 };
 
@@ -349,6 +465,46 @@ export function EntityEditor() {
                 </Field>
               </div>
 
+              <div className="rounded-lg border border-indigo-500/20 bg-indigo-950/10 p-3">
+                <div className="text-xs font-semibold text-indigo-100">Topics learned by meeting this entity</div>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {gamePackage.keywords?.map((topic) => {
+                    const selected = (activeEntity.discover_topic_ids || []).includes(topic.id);
+                    return (
+                      <label key={topic.id} className="flex items-center gap-1.5 rounded border border-neutral-800 bg-neutral-900 px-2 py-1 text-[11px] text-neutral-300">
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          onChange={(event) => handleUpdate({
+                            discover_topic_ids: event.target.checked
+                              ? Array.from(new Set([...(activeEntity.discover_topic_ids || []), topic.id]))
+                              : (activeEntity.discover_topic_ids || []).filter((id) => id !== topic.id),
+                          })}
+                        />
+                        {topic.display_label}
+                      </label>
+                    );
+                  })}
+                  {gamePackage.dynamic_topics?.map((topic) => {
+                    const selected = (activeEntity.discover_dynamic_topic_ids || []).includes(topic.id);
+                    return (
+                      <label key={topic.id} className="flex items-center gap-1.5 rounded border border-violet-500/20 bg-violet-950/10 px-2 py-1 text-[11px] text-violet-100">
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          onChange={(event) => handleUpdate({
+                            discover_dynamic_topic_ids: event.target.checked
+                              ? Array.from(new Set([...(activeEntity.discover_dynamic_topic_ids || []), topic.id]))
+                              : (activeEntity.discover_dynamic_topic_ids || []).filter((id) => id !== topic.id),
+                          })}
+                        />
+                        {topic.display_name}
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+
               <Field label="Entity Sprite">
                 <select
                   className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500"
@@ -386,108 +542,7 @@ export function EntityEditor() {
               </div>
             </section>
 
-            <section className="space-y-4 border-t border-neutral-800 pt-6">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <h3 className="text-sm font-semibold text-neutral-300">Sensory Profile</h3>
-                  <p className="text-xs text-neutral-500 mt-1">
-                    Choose which evidence this actor can detect. Presets write explicit channels that
-                    remain editable in exported project data.
-                  </p>
-                </div>
-                {activeEntity.sensory_profile && (
-                  <button
-                    type="button"
-                    onClick={() => handleUpdate({ sensory_profile: undefined })}
-                    className="shrink-0 rounded-md border border-neutral-700 px-2 py-1 text-xs text-neutral-400 hover:text-white hover:border-neutral-500 transition-colors"
-                  >
-                    Use default
-                  </button>
-                )}
-              </div>
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-                <Field label="Profile preset">
-                  <select
-                    className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500"
-                    value={
-                      activeEntity.sensory_profile
-                        ? Object.prototype.hasOwnProperty.call(SENSORY_PRESETS, activeEntity.sensory_profile.id)
-                          ? activeEntity.sensory_profile.id
-                          : "custom"
-                        : ""
-                    }
-                    onChange={(event) => {
-                      const value = event.target.value;
-                      if (!value) {
-                        handleUpdate({ sensory_profile: undefined });
-                        return;
-                      }
-                      if (value === "custom") return;
-                      handleUpdate({ sensory_profile: sensoryProfileForPreset(value as SensoryPresetId) });
-                    }}
-                  >
-                    <option value="">Engine default</option>
-                    <option value="standard">Standard sight + hearing</option>
-                    <option value="sight-dominant">Sight-dominant</option>
-                    <option value="hearing-dominant">Hearing-dominant</option>
-                    <option value="light-glass-sensitive">Light / Glass-sensitive</option>
-                    {activeEntity.sensory_profile &&
-                      !Object.prototype.hasOwnProperty.call(SENSORY_PRESETS, activeEntity.sensory_profile.id) && (
-                        <option value="custom">Custom: {activeEntity.sensory_profile.id}</option>
-                      )}
-                  </select>
-                </Field>
-                <Field label="Memory ticks">
-                  <input
-                    type="number"
-                    min={0}
-                    className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500"
-                    value={activeEntity.sensory_profile?.memory_ticks ?? 90}
-                    onChange={(event) => {
-                      const base = activeEntity.sensory_profile || sensoryProfileForPreset("standard");
-                      handleUpdate({
-                        sensory_profile: {
-                          ...base,
-                          memory_ticks: Math.max(0, parseInt(event.target.value, 10) || 0),
-                        },
-                      });
-                    }}
-                  />
-                </Field>
-                <Field label="Search ticks">
-                  <input
-                    type="number"
-                    min={0}
-                    className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500"
-                    value={activeEntity.sensory_profile?.search_ticks ?? 90}
-                    onChange={(event) => {
-                      const base = activeEntity.sensory_profile || sensoryProfileForPreset("standard");
-                      handleUpdate({
-                        sensory_profile: {
-                          ...base,
-                          search_ticks: Math.max(0, parseInt(event.target.value, 10) || 0),
-                        },
-                      });
-                    }}
-                  />
-                </Field>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {(activeEntity.sensory_profile?.channels || []).map((channel) => (
-                  <span
-                    key={channel.id}
-                    className="rounded-sm border border-neutral-800 bg-neutral-900 px-2 py-1 text-[11px] text-neutral-300"
-                  >
-                    {channel.id}: {channel.stimulus_kinds.join(" + ")} · r{channel.range}
-                  </span>
-                ))}
-                {!activeEntity.sensory_profile && (
-                  <span className="text-xs text-neutral-500">
-                    No authored override; runtime compatibility defaults apply.
-                  </span>
-                )}
-              </div>
-            </section>
+            <SensoryProfileSection entity={activeEntity} onUpdate={handleUpdate} />
 
             <section className="space-y-4 border-t border-neutral-800 pt-6">
               <div>
@@ -768,13 +823,29 @@ export function EntityEditor() {
                           id: { type: "STRING" },
                           stimulus_kinds: { type: "ARRAY", items: { type: "STRING" } },
                           stimulus_tags: { type: "ARRAY", items: { type: "STRING" } },
+                          ignored_stimulus_tags: { type: "ARRAY", items: { type: "STRING" } },
+                          stimulus_tag_multipliers: {
+                            type: "OBJECT",
+                            additionalProperties: { type: "NUMBER" },
+                          },
                           range: { type: "NUMBER" },
                           threshold: { type: "NUMBER" },
                           sensitivity: { type: "NUMBER" },
+                          repeated_sound_gain: { type: "NUMBER" },
+                          positional_uncertainty: { type: "NUMBER" },
+                          barrier_response: {
+                            type: "STRING",
+                            enum: ["normal", "reduced", "ignore"],
+                          },
                           requires_los: { type: "BOOLEAN" },
                           requires_view_cone: { type: "BOOLEAN" },
+                          view_cone_degrees: { type: "NUMBER" },
                           requires_illumination: { type: "BOOLEAN" },
                           tracks_live_target: { type: "BOOLEAN" },
+                          source_tracking: {
+                            type: "STRING",
+                            enum: ["none", "lock_after_acquisition"],
+                          },
                         },
                       },
                     },
@@ -802,6 +873,336 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <span className="text-xs text-neutral-500 font-medium tracking-wide">{label}</span>
       {children}
     </label>
+  );
+}
+
+function SensoryProfileSection({
+  entity,
+  onUpdate,
+}: {
+  entity: EntityData;
+  onUpdate: (updates: Partial<EntityData>) => void;
+}) {
+  const profile = entity.sensory_profile;
+  const authoredChannels = (profile?.channels || []) as EditableSensoryChannel[];
+  const makeCustomProfile = (base: SensoryProfileData) => ({
+    ...base,
+    id: Object.prototype.hasOwnProperty.call(SENSORY_PRESETS, base.id)
+      ? `custom-${entity.id}`
+      : base.id,
+  });
+  const patchProfile = (updates: Partial<SensoryProfileData>) => {
+    const base = profile || sensoryProfileForPreset("standard");
+    onUpdate({ sensory_profile: { ...makeCustomProfile(base), ...updates } });
+  };
+  const updateChannel = (index: number, updates: Partial<EditableSensoryChannel>) => {
+    const base = profile || sensoryProfileForPreset("standard");
+    patchProfile({
+      channels: base.channels.map((channel, channelIndex) =>
+        channelIndex === index ? { ...channel, ...updates } : channel,
+      ),
+    });
+  };
+  const addChannel = () => {
+    const base = profile || sensoryProfileForPreset("standard");
+    const usedIds = new Set(base.channels.map((channel) => channel.id));
+    let suffix = base.channels.length + 1;
+    while (usedIds.has(`channel-${suffix}`)) suffix += 1;
+    patchProfile({
+      channels: [...base.channels, sensoryChannel(`channel-${suffix}`, ["sound"])],
+    });
+  };
+
+  return (
+    <section className="space-y-4 border-t border-neutral-800 pt-6">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold text-neutral-300">Sensory Profile</h3>
+          <p className="text-xs text-neutral-500 mt-1">
+            Author independent sight, hearing, light, and hazard channels. Hearing options affect
+            mechanical sound only; speaker volume does not change detection.
+          </p>
+        </div>
+        {profile && (
+          <button
+            type="button"
+            onClick={() => onUpdate({ sensory_profile: undefined })}
+            className="shrink-0 rounded-md border border-neutral-700 px-2 py-1 text-xs text-neutral-400 hover:text-white hover:border-neutral-500 transition-colors"
+          >
+            Use default
+          </button>
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+        <Field label="Profile preset">
+          <select
+            className={inputCls}
+            value={
+              profile
+                ? Object.prototype.hasOwnProperty.call(SENSORY_PRESETS, profile.id)
+                  ? profile.id
+                  : "custom"
+                : ""
+            }
+            onChange={(event) => {
+              const value = event.target.value;
+              if (!value) {
+                onUpdate({ sensory_profile: undefined });
+                return;
+              }
+              if (value === "custom") return;
+              onUpdate({ sensory_profile: sensoryProfileForPreset(value as SensoryPresetId) });
+            }}
+          >
+            <option value="">Engine default</option>
+            <option value="standard">Standard sight + hearing</option>
+            <option value="sight-dominant">Sight-dominant</option>
+            <option value="hearing-dominant">Hearing-dominant</option>
+            <option value="light-glass-sensitive">Light / Glass-sensitive</option>
+            <option value="deaf">Deaf — sight only</option>
+            {profile && !Object.prototype.hasOwnProperty.call(SENSORY_PRESETS, profile.id) && (
+              <option value="custom">Custom: {profile.id}</option>
+            )}
+          </select>
+        </Field>
+        <Field label="Memory ticks">
+          <input
+            type="number"
+            min={0}
+            className={inputCls}
+            value={profile?.memory_ticks ?? 90}
+            onChange={(event) =>
+              patchProfile({ memory_ticks: Math.max(0, parseInt(event.target.value, 10) || 0) })
+            }
+          />
+        </Field>
+        <Field label="Search ticks">
+          <input
+            type="number"
+            min={0}
+            className={inputCls}
+            value={profile?.search_ticks ?? 90}
+            onChange={(event) =>
+              patchProfile({ search_ticks: Math.max(0, parseInt(event.target.value, 10) || 0) })
+            }
+          />
+        </Field>
+      </div>
+
+      {!profile && (
+        <p className="rounded-lg border border-dashed border-neutral-800 p-3 text-xs text-neutral-500">
+          No authored override. Choose a preset or add a channel to write an explicit profile.
+        </p>
+      )}
+
+      <div className="space-y-3">
+        {authoredChannels.map((channel, index) => {
+          const hasSound = channel.stimulus_kinds.includes("sound");
+          return (
+            <div
+              key={index}
+              className="space-y-4 rounded-xl border border-neutral-800 bg-neutral-900/55 p-4"
+            >
+              <div className="flex items-center gap-3">
+                <div className="min-w-0 flex-1">
+                  <Field label={`Channel ${index + 1} ID`}>
+                    <input
+                      className={inputCls}
+                      value={channel.id}
+                      onChange={(event) => updateChannel(index, { id: event.target.value })}
+                    />
+                  </Field>
+                </div>
+                <span
+                  className={`mt-5 rounded border px-2 py-1 text-[10px] font-semibold uppercase tracking-wide ${
+                    hasSound
+                      ? "border-amber-500/30 bg-amber-500/10 text-amber-300"
+                      : "border-cyan-500/20 bg-cyan-500/10 text-cyan-300"
+                  }`}
+                >
+                  {hasSound ? "hearing" : "non-auditory"}
+                </span>
+                <button
+                  type="button"
+                  title="Remove sensory channel"
+                  onClick={() =>
+                    patchProfile({ channels: authoredChannels.filter((_, candidate) => candidate !== index) })
+                  }
+                  className="ml-auto mt-5 rounded-md p-2 text-neutral-500 hover:bg-red-500/10 hover:text-red-400"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </div>
+
+              <div>
+                <div className="mb-2 text-xs font-medium tracking-wide text-neutral-500">
+                  Stimulus kinds
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {SENSORY_STIMULUS_KINDS.map((kind) => (
+                    <label
+                      key={kind}
+                      className="flex items-center gap-1.5 rounded border border-neutral-800 bg-neutral-950 px-2 py-1.5 text-[11px] text-neutral-300"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={channel.stimulus_kinds.includes(kind)}
+                        onChange={(event) =>
+                          updateChannel(index, {
+                            stimulus_kinds: event.target.checked
+                              ? [...channel.stimulus_kinds, kind]
+                              : channel.stimulus_kinds.filter((candidate) => candidate !== kind),
+                          })
+                        }
+                      />
+                      {kind.replaceAll("_", " ")}
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                <Field label="Required tags (comma-separated)">
+                  <input
+                    key={sensoryCsv(channel.stimulus_tags)}
+                    className={inputCls}
+                    defaultValue={sensoryCsv(channel.stimulus_tags)}
+                    placeholder="glass, lamp"
+                    onBlur={(event) =>
+                      updateChannel(index, {
+                        stimulus_tags: parseSensoryCsv(event.target.value),
+                      })
+                    }
+                  />
+                </Field>
+                <Field label="Ignored tags (comma-separated)">
+                  <input
+                    key={sensoryCsv(channel.ignored_stimulus_tags)}
+                    className={inputCls}
+                    defaultValue={sensoryCsv(channel.ignored_stimulus_tags)}
+                    placeholder="footstep, voice"
+                    onBlur={(event) =>
+                      updateChannel(index, {
+                        ignored_stimulus_tags: parseSensoryCsv(event.target.value),
+                      })
+                    }
+                  />
+                </Field>
+                <Field label="Tag sensitivity (tag=multiplier)">
+                  <input
+                    key={sensoryMultiplierText(channel.stimulus_tag_multipliers)}
+                    className={inputCls}
+                    defaultValue={sensoryMultiplierText(channel.stimulus_tag_multipliers)}
+                    placeholder="footstep=1.35, impact=1.2"
+                    onBlur={(event) =>
+                      updateChannel(index, {
+                        stimulus_tag_multipliers: parseSensoryMultipliers(event.target.value),
+                      })
+                    }
+                  />
+                </Field>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+                {(
+                  [
+                    ["range", "Range", 0, undefined, 0.5],
+                    ["threshold", "Threshold", 0, 1, 0.01],
+                    ["sensitivity", "Sensitivity", 0, undefined, 0.05],
+                    ["repeated_sound_gain", "Repeat gain", 0, 1, 0.01],
+                    ["positional_uncertainty", "Uncertainty", 0, undefined, 0.25],
+                    ["view_cone_degrees", "View cone °", 1, 360, 1],
+                  ] as const
+                ).map(([key, label, min, max, step]) => (
+                  <Field key={key} label={label}>
+                    <input
+                      type="number"
+                      min={min}
+                      max={max}
+                      step={step}
+                      disabled={key === "view_cone_degrees" && !channel.requires_view_cone}
+                      className={`${inputCls} disabled:opacity-40`}
+                      value={channel[key] ?? 0}
+                      onChange={(event) => {
+                        const value = Number(event.target.value);
+                        if (Number.isFinite(value)) updateChannel(index, { [key]: value });
+                      }}
+                    />
+                  </Field>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                <Field label="Barrier response (sound only)">
+                  <select
+                    className={inputCls}
+                    value={channel.barrier_response || "normal"}
+                    onChange={(event) =>
+                      updateChannel(index, {
+                        barrier_response: event.target.value as EditableSensoryChannel["barrier_response"],
+                      })
+                    }
+                  >
+                    <option value="normal">Normal attenuation</option>
+                    <option value="reduced">Reduced attenuation</option>
+                    <option value="ignore">Ignore barriers</option>
+                  </select>
+                </Field>
+                <Field label="Source tracking">
+                  <select
+                    className={inputCls}
+                    value={channel.source_tracking || "none"}
+                    onChange={(event) =>
+                      updateChannel(index, {
+                        source_tracking: event.target.value as SensoryChannelData["source_tracking"],
+                      })
+                    }
+                  >
+                    <option value="none">None</option>
+                    <option value="lock_after_acquisition">Lock after acquisition</option>
+                  </select>
+                </Field>
+              </div>
+
+              <div className="flex flex-wrap gap-x-5 gap-y-2">
+                {(
+                  [
+                    ["requires_los", "Requires line of sight"],
+                    ["requires_view_cone", "Requires view cone"],
+                    ["requires_illumination", "Requires illumination"],
+                    ["tracks_live_target", "Tracks live target"],
+                  ] as const
+                ).map(([key, label]) => (
+                  <label key={key} className="flex items-center gap-2 text-xs text-neutral-300">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(channel[key])}
+                      onChange={(event) => updateChannel(index, { [key]: event.target.checked })}
+                    />
+                    {label}
+                  </label>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <button
+        type="button"
+        onClick={addChannel}
+        className="inline-flex items-center gap-1.5 rounded-md border border-neutral-700 px-3 py-2 text-xs font-medium text-neutral-300 hover:border-emerald-500/50 hover:text-emerald-300"
+      >
+        <Plus className="h-3.5 w-3.5" />
+        Add sensory channel
+      </button>
+      {profile && authoredChannels.length === 0 && (
+        <p className="text-xs text-amber-300/80">
+          This actor currently has no sensory channels and cannot perceive any stimulus.
+        </p>
+      )}
+    </section>
   );
 }
 

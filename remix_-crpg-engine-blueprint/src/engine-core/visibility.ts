@@ -2,7 +2,12 @@ import type { GamePackage } from "../schema/game";
 import type { PlaySave, SimulationEnvironmentFieldRecord } from "../schema/save";
 import { entityPlacementStateKey } from "../utils/entityState";
 import { placementOriginKey } from "../utils/objectFootprint";
-import { FINE_PER_MACRO, coordKey, parseFineCoordKey } from "./gridCoordinates";
+import {
+  FINE_PER_MACRO,
+  coordKey,
+  fineCoordKey,
+  parseFineCoordKey,
+} from "./gridCoordinates";
 import { isFineExpandedPackage } from "./fineWorld";
 import {
   createSimulationSnapshotFromV1,
@@ -86,6 +91,13 @@ export interface ImmersiveViewerVisibilitySnapshot {
   max_range: number;
   minimum_light: number;
   discovered: [number, number][];
+  /**
+   * Cells inside the viewer's present geometric line of sight, independent of
+   * illumination. This is presentation-only support for expedition memory:
+   * darkness may show remembered architecture here without granting current
+   * actor, item, or hazard perception.
+   */
+  line_of_sight?: [number, number][];
   /** Static-world cells that satisfy physical sight without actor acquisition scoring. */
   terrain_visible: [number, number][];
   currently_visible: [number, number][];
@@ -141,12 +153,24 @@ interface LightSourceProfile {
 interface LightLineAnalysis {
   line_of_sight: boolean;
   smoke_transmission: number;
+  light_transmission: number;
 }
+
+interface PreparedVisionCell {
+  active: boolean;
+  structural_block: boolean;
+  smoke_opacity: number;
+  light_smoke_opacity: number;
+}
+
+type PreparedVisionMap = Map<string, PreparedVisionCell>;
+type LightLineCache = Map<string, LightLineAnalysis>;
 
 interface VisualAcquisitionContext {
   simulation: SimulationMapSnapshot;
   illumination: ImmersiveIlluminationSnapshot;
-  cellsByKey: Map<string, SimulationCellState>;
+  visionByKey: PreparedVisionMap;
+  lineCache: LightLineCache;
   illuminationByKey: Map<string, ImmersiveIlluminationCell>;
   sourceById: Map<string, ImmersiveResolvedLightSource>;
 }
@@ -155,6 +179,11 @@ const DEFAULT_AMBIENT_LIGHT = 0.08;
 const DEFAULT_MINIMUM_LIGHT = 0.06;
 const DEFAULT_VISUAL_RANGE_MACRO = 8;
 const MIN_CONTRIBUTION = 0.001;
+// Smoke is strong visual cover, not an opaque wall. Preserve its full optical
+// depth for actor acquisition while letting physical light diffuse through at
+// a much softer rate. This keeps lit terrain readable without revealing actors
+// concealed by the same field.
+const SMOKE_LIGHT_OPTICAL_DEPTH_SCALE = 0.12;
 
 const clamp01 = (value: number) =>
   Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
@@ -534,35 +563,6 @@ export const resolveImmersiveLightSources = (
   );
 };
 
-const traceGridLine = (
-  from: [number, number],
-  to: [number, number],
-): [number, number][] => {
-  let x = Math.round(from[0]);
-  let z = Math.round(from[1]);
-  const tx = Math.round(to[0]);
-  const tz = Math.round(to[1]);
-  const dx = Math.abs(tx - x);
-  const dz = Math.abs(tz - z);
-  const stepX = x < tx ? 1 : -1;
-  const stepZ = z < tz ? 1 : -1;
-  let error = dx - dz;
-  const cells: [number, number][] = [];
-  while (x !== tx || z !== tz) {
-    const twice = error * 2;
-    if (twice > -dz) {
-      error -= dz;
-      x += stepX;
-    }
-    if (twice < dx) {
-      error += dx;
-      z += stepZ;
-    }
-    cells.push([x, z]);
-  }
-  return cells;
-};
-
 const smokeOpacity = (cell: SimulationCellState | undefined) => {
   if (!cell) return 1;
   const opacity = cell.environment
@@ -586,6 +586,42 @@ const structuralVisionBlock = (cell: SimulationCellState | undefined) =>
     cell?.blocks_los ||
     cell?.occupants.some((occupant) => occupant.blocks_los),
   );
+
+const prepareVisionMap = (
+  simulation: SimulationMapSnapshot,
+  ratio: number,
+): PreparedVisionMap => {
+  const opticalStepScale = 1 / Math.max(1, ratio);
+  return new Map(
+    simulation.cells.map((cell) => {
+      const authoredOpacity = smokeOpacity(cell);
+      // A macro-authored field expands into `ratio` consecutive fine samples.
+      // Convert its optical depth to a per-fine-step value so crossing one
+      // physical tile has the same transmission at either grid resolution.
+      const scaledOpacity =
+        authoredOpacity <= 0
+          ? 0
+          : 1 - Math.pow(1 - authoredOpacity, opticalStepScale);
+      const scaledLightOpacity =
+        authoredOpacity <= 0
+          ? 0
+          : 1 -
+            Math.pow(
+              1 - authoredOpacity,
+              opticalStepScale * SMOKE_LIGHT_OPTICAL_DEPTH_SCALE,
+            );
+      return [
+        coordKey(cell.cell),
+        {
+          active: Boolean(cell.active),
+          structural_block: structuralVisionBlock(cell),
+          smoke_opacity: clamp01(scaledOpacity),
+          light_smoke_opacity: clamp01(scaledLightOpacity),
+        },
+      ];
+    }),
+  );
+};
 
 const AUTHORED_SMOKE_TERMS = /smoke|fog|mist|miasma|obscur/;
 
@@ -644,27 +680,69 @@ const createVisibilitySimulation = (
 );
 
 const analyzeLightLine = (
-  cellsByKey: Map<string, SimulationCellState>,
+  visionByKey: PreparedVisionMap,
   from: [number, number],
   to: [number, number],
+  cache?: LightLineCache,
 ): LightLineAnalysis => {
-  const line = traceGridLine(from, to);
+  const cacheKey = `${from[0]}:${from[1]}>${to[0]}:${to[1]}`;
+  const cached = cache?.get(cacheKey);
+  if (cached) return cached;
+
+  let x = Math.round(from[0]);
+  let z = Math.round(from[1]);
+  const tx = Math.round(to[0]);
+  const tz = Math.round(to[1]);
+  const dx = Math.abs(tx - x);
+  const dz = Math.abs(tz - z);
+  const stepX = x < tx ? 1 : -1;
+  const stepZ = z < tz ? 1 : -1;
+  let error = dx - dz;
   let smokeTransmission = 1;
-  for (let index = 0; index < line.length; index += 1) {
-    const lineCell = line[index];
-    const target = index === line.length - 1;
-    const state = cellsByKey.get(coordKey(lineCell));
-    if (!state || !state.active) return { line_of_sight: false, smoke_transmission: 0 };
-    if (!target && structuralVisionBlock(state)) {
-      return { line_of_sight: false, smoke_transmission: 0 };
+  let lightTransmission = 1;
+
+  while (x !== tx || z !== tz) {
+    const twice = error * 2;
+    if (twice > -dz) {
+      error -= dz;
+      x += stepX;
     }
-    const opacity = smokeOpacity(state);
-    smokeTransmission *= 1 - opacity;
+    if (twice < dx) {
+      error += dx;
+      z += stepZ;
+    }
+
+    const target = x === tx && z === tz;
+    const state = visionByKey.get(fineCoordKey(x, z));
+    if (!state?.active) {
+      const blocked = {
+        line_of_sight: false,
+        smoke_transmission: 0,
+        light_transmission: 0,
+      };
+      cache?.set(cacheKey, blocked);
+      return blocked;
+    }
+    if (!target && state.structural_block) {
+      const blocked = {
+        line_of_sight: false,
+        smoke_transmission: 0,
+        light_transmission: 0,
+      };
+      cache?.set(cacheKey, blocked);
+      return blocked;
+    }
+    smokeTransmission *= 1 - state.smoke_opacity;
+    lightTransmission *= 1 - state.light_smoke_opacity;
   }
-  return {
+
+  const result = {
     line_of_sight: true,
     smoke_transmission: round4(clamp01(smokeTransmission)),
+    light_transmission: round4(clamp01(lightTransmission)),
   };
+  cache?.set(cacheKey, result);
+  return result;
 };
 
 const illuminationFromSimulation = (
@@ -673,33 +751,113 @@ const illuminationFromSimulation = (
   mapId: string,
   simulation: SimulationMapSnapshot,
   sources: ImmersiveResolvedLightSource[],
+  preparedVision?: PreparedVisionMap,
+  sharedLineCache?: LightLineCache,
 ): ImmersiveIlluminationSnapshot => {
   const map = gamePackage.maps.find((candidate) => candidate.id === mapId);
   const authoredAmbient = Number((map as unknown as { ambient_light?: number } | undefined)?.ambient_light);
   const ambient = round4(
     clamp01(Number.isFinite(authoredAmbient) ? authoredAmbient : DEFAULT_AMBIENT_LIGHT),
   );
-  const cellsByKey = new Map(simulation.cells.map((cell) => [coordKey(cell.cell), cell]));
-  const cells = simulation.cells
-    .filter((cell) => cell.active)
-    .map((cell): ImmersiveIlluminationCell => {
-      const contributions = sources.flatMap((source): ImmersiveIlluminationContribution[] => {
-        const distance = Math.hypot(cell.cell[0] - source.cell[0], cell.cell[1] - source.cell[1]);
-        if (distance > source.radius) return [];
-        const line = analyzeLightLine(cellsByKey, source.cell, cell.cell);
-        if (!line.line_of_sight || line.smoke_transmission <= 0) return [];
-        const falloff = source.radius <= 0
-          ? distance === 0 ? 1 : 0
-          : Math.max(0, 1 - distance / (source.radius + 1));
-        const value = source.intensity * falloff * line.smoke_transmission;
-        if (value < MIN_CONTRIBUTION) return [];
-        return [{
+  const visionByKey =
+    preparedVision || prepareVisionMap(simulation, spatialRatio(gamePackage));
+  const lineCache = sharedLineCache || new Map<string, LightLineAnalysis>();
+  const contributionsByCell = new Map<
+    string,
+    ImmersiveIlluminationContribution[]
+  >();
+  const activeCells = simulation.cells.filter((cell) => cell.active);
+  const activeBounds = activeCells.reduce(
+    (bounds, cell) => ({
+      minX: Math.min(bounds.minX, cell.cell[0]),
+      maxX: Math.max(bounds.maxX, cell.cell[0]),
+      minZ: Math.min(bounds.minZ, cell.cell[1]),
+      maxZ: Math.max(bounds.maxZ, cell.cell[1]),
+    }),
+    {
+      minX: Infinity,
+      maxX: -Infinity,
+      minZ: Infinity,
+      maxZ: -Infinity,
+    },
+  );
+
+  // Iterate each source's bounded influence square. The previous cell-first
+  // pass visited every map cell for every source and allocated an empty array
+  // for nearly every out-of-range pair. Clamp authored radii to the active map
+  // bounds as well: a very large but valid radius must not create a square
+  // loop millions of cells wider than the map it can actually illuminate.
+  sources.forEach((source) => {
+    const sourceX = Number(source.cell[0]);
+    const sourceZ = Number(source.cell[1]);
+    const sourceRadius = Math.max(0, Number(source.radius));
+    if (
+      activeCells.length === 0 ||
+      !Number.isFinite(sourceX) ||
+      !Number.isFinite(sourceZ) ||
+      !Number.isFinite(sourceRadius) ||
+      !Number.isFinite(source.intensity)
+    ) {
+      return;
+    }
+    const minX = Math.max(
+      activeBounds.minX,
+      Math.ceil(sourceX - sourceRadius),
+    );
+    const maxX = Math.min(
+      activeBounds.maxX,
+      Math.floor(sourceX + sourceRadius),
+    );
+    const minZ = Math.max(
+      activeBounds.minZ,
+      Math.ceil(sourceZ - sourceRadius),
+    );
+    const maxZ = Math.min(
+      activeBounds.maxZ,
+      Math.floor(sourceZ + sourceRadius),
+    );
+    for (let z = minZ; z <= maxZ; z += 1) {
+      for (let x = minX; x <= maxX; x += 1) {
+        const key = fineCoordKey(x, z);
+        if (!visionByKey.get(key)?.active) continue;
+        const distance = Math.hypot(x - sourceX, z - sourceZ);
+        if (distance > sourceRadius) continue;
+        const line = analyzeLightLine(
+          visionByKey,
+          source.cell,
+          [x, z],
+          lineCache,
+        );
+        if (!line.line_of_sight || line.light_transmission <= 0) continue;
+        const falloff =
+          sourceRadius <= 0
+            ? distance === 0
+              ? 1
+              : 0
+            : Math.max(0, 1 - distance / (sourceRadius + 1));
+        const value = source.intensity * falloff * line.light_transmission;
+        if (value < MIN_CONTRIBUTION) continue;
+        const contributions = contributionsByCell.get(key) || [];
+        contributions.push({
           source_id: source.id,
           value: round4(value),
           distance: round4(distance),
-          transmission: line.smoke_transmission,
-        }];
-      }).sort((left, right) => right.value - left.value || left.source_id.localeCompare(right.source_id));
+          transmission: line.light_transmission,
+        });
+        contributionsByCell.set(key, contributions);
+      }
+    }
+  });
+
+  const cells = activeCells
+    .map((cell): ImmersiveIlluminationCell => {
+      const contributions = (
+        contributionsByCell.get(coordKey(cell.cell)) || []
+      ).sort(
+        (left, right) =>
+          right.value - left.value ||
+          left.source_id.localeCompare(right.source_id),
+      );
       const value = round4(clamp01(ambient + contributions.reduce((sum, entry) => sum + entry.value, 0)));
       return {
         cell: asCell(cell.cell),
@@ -752,14 +910,26 @@ const acquisitionFromContext = (
   query: ImmersiveVisualAcquisitionQuery,
   context: VisualAcquisitionContext,
 ): ImmersiveVisualAcquisitionResult => {
-  const { simulation, illumination, cellsByKey, illuminationByKey, sourceById } = context;
+  const {
+    simulation,
+    illumination,
+    visionByKey,
+    lineCache,
+    illuminationByKey,
+    sourceById,
+  } = context;
   const distance = Math.hypot(
     query.target_cell[0] - query.observer_cell[0],
     query.target_cell[1] - query.observer_cell[1],
   );
   const maxRange = Math.max(0, Number(query.max_range ?? DEFAULT_VISUAL_RANGE_MACRO));
   const minimumLight = clamp01(Number(query.minimum_light ?? DEFAULT_MINIMUM_LIGHT));
-  const line = analyzeLightLine(cellsByKey, query.observer_cell, query.target_cell);
+  const line = analyzeLightLine(
+    visionByKey,
+    query.observer_cell,
+    query.target_cell,
+    lineCache,
+  );
   const light = illuminationByKey.get(coordKey(query.target_cell)) || {
     cell: asCell(query.target_cell),
     value: illumination.ambient_light,
@@ -811,12 +981,13 @@ const acquisitionFromContext = (
 const createVisualAcquisitionContext = (
   simulation: SimulationMapSnapshot,
   illumination: ImmersiveIlluminationSnapshot,
+  visionByKey: PreparedVisionMap,
+  lineCache: LightLineCache,
 ): VisualAcquisitionContext => ({
   simulation,
   illumination,
-  cellsByKey: new Map(
-    simulation.cells.map((cell) => [coordKey(cell.cell), cell]),
-  ),
+  visionByKey,
+  lineCache,
   illuminationByKey: new Map(
     illumination.cells.map((cell) => [coordKey(cell.cell), cell]),
   ),
@@ -833,8 +1004,23 @@ export const queryImmersiveVisualAcquisition = (
   const mapId = query.map_id || save.current_map_id || gamePackage.metadata.start_map_id;
   const simulation = createVisibilitySimulation(gamePackage, save, mapId);
   const sources = resolveImmersiveLightSources(gamePackage, save, mapId);
-  const illumination = illuminationFromSimulation(gamePackage, save, mapId, simulation, sources);
-  const context = createVisualAcquisitionContext(simulation, illumination);
+  const visionByKey = prepareVisionMap(simulation, spatialRatio(gamePackage));
+  const lineCache = new Map<string, LightLineAnalysis>();
+  const illumination = illuminationFromSimulation(
+    gamePackage,
+    save,
+    mapId,
+    simulation,
+    sources,
+    visionByKey,
+    lineCache,
+  );
+  const context = createVisualAcquisitionContext(
+    simulation,
+    illumination,
+    visionByKey,
+    lineCache,
+  );
   return acquisitionFromContext(
     save,
     {
@@ -854,8 +1040,23 @@ export const createImmersiveViewerVisibilityFromV1 = (
 ): ImmersiveViewerVisibilitySnapshot => {
   const simulation = createVisibilitySimulation(gamePackage, save, mapId);
   const sources = resolveImmersiveLightSources(gamePackage, save, mapId);
-  const illumination = illuminationFromSimulation(gamePackage, save, mapId, simulation, sources);
-  const context = createVisualAcquisitionContext(simulation, illumination);
+  const visionByKey = prepareVisionMap(simulation, spatialRatio(gamePackage));
+  const lineCache = new Map<string, LightLineAnalysis>();
+  const illumination = illuminationFromSimulation(
+    gamePackage,
+    save,
+    mapId,
+    simulation,
+    sources,
+    visionByKey,
+    lineCache,
+  );
+  const context = createVisualAcquisitionContext(
+    simulation,
+    illumination,
+    visionByKey,
+    lineCache,
+  );
   const viewerCell = asCell(options.viewer_cell || save.player.cell);
   const maxRange = Math.max(
     0,
@@ -895,6 +1096,17 @@ export const createImmersiveViewerVisibilityFromV1 = (
     .filter(({ isViewerCell, acquisition }) => isViewerCell || acquisition?.acquired)
     .map(({ cell }) => asCell(cell))
     .sort(cellSort);
+  const lineOfSight = visibilityCandidates
+    .filter(({ isViewerCell, acquisition }) =>
+      isViewerCell ||
+      (
+        acquisition !== null &&
+        acquisition.distance <= maxRange &&
+        acquisition.line_of_sight
+      ),
+    )
+    .map(({ cell }) => asCell(cell))
+    .sort(cellSort);
   const terrainVisible = visibilityCandidates
     .filter(({ isViewerCell, acquisition }) =>
       isViewerCell ||
@@ -902,7 +1114,6 @@ export const createImmersiveViewerVisibilityFromV1 = (
         acquisition !== null &&
         acquisition.distance <= maxRange &&
         acquisition.line_of_sight &&
-        acquisition.smoke_transmission > 0.1 &&
         acquisition.illumination >= minimumLight
       ),
     )
@@ -930,6 +1141,7 @@ export const createImmersiveViewerVisibilityFromV1 = (
     max_range: maxRange,
     minimum_light: minimumLight,
     discovered: [...discoveredByKey.values()].sort(cellSort),
+    line_of_sight: lineOfSight,
     terrain_visible: terrainVisible,
     currently_visible: currentlyVisible,
     illuminated,

@@ -1,12 +1,94 @@
-import type { MapData, ObjectData, ObjectPlacementData } from "../schema/game";
+import type {
+  CellData,
+  MapData,
+  ObjectData,
+  ObjectPlacementData,
+} from "../schema/game";
 import type { MapDelta } from "../schema/save";
 import { fineCoordKey } from "../engine-core/gridCoordinates";
 import { doorPlacementKey, isBuildingDoorPlacement, isDoorPlacementOpen } from "./doorPlacement";
 import { getPlacementFootprint, placementHasCollision } from "./objectFootprint";
+import {
+  fineCellsCoveredByWorldMacroCell,
+  logicalCellToMacro,
+  type RendererGridSpace,
+} from "./renderSpace";
 
 export const fogCellKey = fineCoordKey;
 
 export type FogRenderState = "visible" | "explored" | "unseen";
+
+export interface AuthoritativeFogPresentationCell {
+  key: string;
+  world_cell: [number, number];
+  logical_center: [number, number];
+  fine_cells: [number, number][];
+  state: FogRenderState;
+}
+
+export type FogMemoryLabel = "Unknown" | "Remembered" | "Visible";
+
+export const fogMemoryLabel = (state: FogRenderState): FogMemoryLabel =>
+  state === "visible"
+    ? "Visible"
+    : state === "explored"
+      ? "Remembered"
+      : "Unknown";
+
+// Darkness may still communicate immediate physical proximity without
+// promoting an actor into current visual perception. This predicate is kept
+// presentation-only: it never changes visibility, discovery, AI, or combat
+// state, and it refuses to expose actors through a LOS blocker or in lit cells
+// where another acquisition rule is intentionally keeping them hidden.
+export const shouldRenderDarkAdjacentEntity = ({
+  entityCell,
+  viewerCell,
+  gridSpace,
+  fineRatio,
+  currentlyVisible,
+  terrainVisible,
+  lineOfSight,
+}: {
+  entityCell: readonly [number, number];
+  viewerCell: readonly [number, number];
+  gridSpace: RendererGridSpace;
+  fineRatio: number;
+  currentlyVisible: ReadonlySet<string>;
+  terrainVisible: ReadonlySet<string>;
+  lineOfSight: ReadonlySet<string>;
+}): boolean => {
+  const key = fogCellKey(entityCell[0], entityCell[1]);
+  if (
+    currentlyVisible.has(key) ||
+    terrainVisible.has(key) ||
+    !lineOfSight.has(key)
+  ) {
+    return false;
+  }
+
+  const distance = Math.max(
+    Math.abs(entityCell[0] - viewerCell[0]),
+    Math.abs(entityCell[1] - viewerCell[1]),
+  );
+  const adjacencyRadius = gridSpace === "fine" ? fineRatio : 1;
+  return distance > 0 && distance <= adjacencyRadius;
+};
+
+const MEMORY_STRUCTURE_TERMS =
+  /wall|floor|roof|architect|structure|landmark|cliff|bridge|stair|terrain|landform|ruin|spire|building|column/;
+const MEMORY_DYNAMIC_TERMS =
+  /door|container|chest|crate|interactable|movable|portable|temporary|hazard|item|loot|actor|npc|light/;
+
+export const isStableMemoryStructureObject = (
+  object: ObjectData | undefined,
+) => {
+  if (!object) return false;
+  const identity = `${object.id} ${object.category} ${(object.tags || []).join(" ")}`.toLowerCase();
+  return (
+    MEMORY_STRUCTURE_TERMS.test(identity) &&
+    !MEMORY_DYNAMIC_TERMS.test(identity)
+  );
+};
 
 export interface StructureFogCompositePolicy {
   render: boolean;
@@ -14,17 +96,39 @@ export interface StructureFogCompositePolicy {
   cameraFaded: boolean;
 }
 
-// Static structure geometry has a different compositing contract from actors.
-// Only a currently visible wall may enter the post-fog transparent pass; an
-// explored wall stays beneath memory haze and an unseen wall is omitted. A
-// camera fade is likewise forbidden for explored memory because raising that
-// copy would disclose geometry through the secrecy mask.
+export interface FogCurtainProfile {
+  height: number;
+  opacity: number;
+  full_height: boolean;
+}
+
+// Full-height curtains belong to real LOS-blocking structure edges. On open
+// walkable floor, a low mist skirt preserves the volumetric fog transition
+// without looking like an invisible wall the player can walk through.
+export const resolveFogCurtainProfile = (
+  state: Exclude<FogRenderState, "visible">,
+  edgeTouchesLosBlocker: boolean,
+): FogCurtainProfile => {
+  if (edgeTouchesLosBlocker) {
+    return state === "unseen"
+      ? { height: 2.8, opacity: 0.92, full_height: true }
+      : { height: 1.9, opacity: 0.42, full_height: true };
+  }
+  return state === "unseen"
+    ? { height: 0.42, opacity: 0.3, full_height: false }
+    : { height: 0.28, opacity: 0.18, full_height: false };
+};
+
+// Static structure geometry is never removed or promoted into a special
+// post-fog pass. Its material owns visible/explored/unseen darkness, preserving
+// wall topology and ordinary depth behavior. Camera fading remains a
+// readability treatment for currently visible geometry only.
 export const resolveStructureFogCompositePolicy = (
   state: FogRenderState,
   cameraOccluded: boolean,
 ): StructureFogCompositePolicy => ({
-  render: state !== "unseen",
-  postFog: state === "visible",
+  render: true,
+  postFog: false,
   cameraFaded: state === "visible" && cameraOccluded,
 });
 
@@ -36,33 +140,158 @@ export const classifyFogRenderState = (
   fogEnabled: boolean,
   currentlyVisible: ReadonlySet<string>,
   discovered: ReadonlySet<string>,
+  memoryLineOfSight?: ReadonlySet<string>,
 ): FogRenderState => {
   if (!fogEnabled || currentlyVisible.has(key)) return "visible";
-  if (discovered.has(key)) return "explored";
+  if (
+    discovered.has(key) &&
+    (!memoryLineOfSight || memoryLineOfSight.has(key))
+  ) {
+    return "explored";
+  }
   return "unseen";
 };
 
 // A single macro terrain mesh represents multiple authoritative fine cells.
-// Preserve the mesh when any covered cell is currently visible; otherwise it
-// remains explored memory when at least one covered cell was discovered.
+// Preserve the mesh when any covered cell is currently visible. Structural
+// memory is footprint-wide: the face learned earlier and the face reached by
+// the viewer's current LOS do not need to be the same fine sample. Requiring
+// an exact-key intersection made 3x3 floors appear as isolated indigo pixels
+// and made thick remembered walls blink black when approached from a new side.
 export const classifyFogRenderStateForCells = (
   cells: readonly (readonly [number, number])[],
   fogEnabled: boolean,
   currentlyVisible: ReadonlySet<string>,
   discovered: ReadonlySet<string>,
+  memoryLineOfSight?: ReadonlySet<string>,
 ): FogRenderState => {
-  let sawExplored = false;
+  if (!fogEnabled) return "visible";
+
+  let sawVisible = false;
+  let sawDiscovered = false;
+  let sawMemoryLineOfSight = memoryLineOfSight === undefined;
+  let sawLineOfSightWithoutPresentLight = false;
   for (const cell of cells) {
-    const state = classifyFogRenderState(
-      fogCellKey(cell[0], cell[1]),
-      fogEnabled,
-      currentlyVisible,
-      discovered,
-    );
-    if (state === "visible") return "visible";
-    if (state === "explored") sawExplored = true;
+    const key = fogCellKey(cell[0], cell[1]);
+    const visible = currentlyVisible.has(key);
+    const inMemoryLineOfSight = memoryLineOfSight?.has(key) ?? false;
+    if (visible) sawVisible = true;
+    if (discovered.has(key)) sawDiscovered = true;
+    if (inMemoryLineOfSight) {
+      sawMemoryLineOfSight = true;
+      if (!visible) sawLineOfSightWithoutPresentLight = true;
+    }
   }
-  return sawExplored ? "explored" : "unseen";
+
+  // Without the fine LOS field, retain the legacy macro behavior used by the
+  // editor and non-authoritative render paths. In Play, however, a single lit
+  // fine sample must not promote the whole 3x3 floor/wall mesh to ordinary
+  // authored color. Keep a partially lit known structure on its indigo memory
+  // base and let the exact fine-cell light layer reveal only the illuminated
+  // portion. This is presentation-only; `currentlyVisible` remains untouched.
+  if (sawVisible && !sawLineOfSightWithoutPresentLight) return "visible";
+  if (sawVisible && memoryLineOfSight !== undefined) return "explored";
+  return sawDiscovered && sawMemoryLineOfSight ? "explored" : "unseen";
+};
+
+// Discovery is recorded on fine simulation cells, while a stable floor or
+// wall is presented as one authored macro structure. Once any part of that
+// structure is known, every fine sample in its presentation footprint may
+// carry the same architectural memory. Current LOS is intentionally *not*
+// expanded here; it still clips the remembered silhouette precisely.
+export const expandStructuralMemoryAcrossPresentationFootprints = (
+  presentationCells: readonly Pick<
+    AuthoritativeFogPresentationCell,
+    "fine_cells"
+  >[],
+  discovered: ReadonlySet<string>,
+): Set<string> => {
+  const expanded = new Set(discovered);
+  presentationCells.forEach((presentationCell) => {
+    const footprintKnown = presentationCell.fine_cells.some((cell) =>
+      discovered.has(fogCellKey(cell[0], cell[1])),
+    );
+    if (!footprintKnown) return;
+    presentationCell.fine_cells.forEach((cell) =>
+      expanded.add(fogCellKey(cell[0], cell[1])),
+    );
+  });
+  return expanded;
+};
+
+// Authoritative visibility is resolved on the fine simulation grid while the
+// 3D terrain is rendered once per macro tile. Build that visual mapping once
+// and share it between geometry and fog overlays so a wall cannot be removed
+// by one pass while a different pass still draws its shadow or curtain.
+export const buildAuthoritativeFogPresentationPlan = ({
+  cells,
+  gridSpace,
+  fineRatio,
+  fogEnabled,
+  terrainVisible,
+  discovered,
+  memoryLineOfSight,
+}: {
+  cells: readonly CellData[];
+  gridSpace: RendererGridSpace;
+  fineRatio: number;
+  fogEnabled: boolean;
+  terrainVisible: ReadonlySet<string>;
+  discovered: ReadonlySet<string>;
+  memoryLineOfSight?: ReadonlySet<string>;
+}): AuthoritativeFogPresentationCell[] => {
+  const visualCells = new Map<
+    string,
+    Omit<AuthoritativeFogPresentationCell, "state">
+  >();
+
+  cells.forEach((cell) => {
+    const macro = logicalCellToMacro([cell.x, cell.z], gridSpace);
+    const worldCell: [number, number] =
+      gridSpace === "fine" ? [macro[0], macro[1]] : [cell.x, cell.z];
+    const key = fogCellKey(worldCell[0], worldCell[1]);
+    if (visualCells.has(key)) return;
+
+    const logicalCenter: [number, number] =
+      gridSpace === "fine"
+        ? [
+            macro[0] * fineRatio + Math.floor(fineRatio / 2),
+            macro[1] * fineRatio + Math.floor(fineRatio / 2),
+          ]
+        : [cell.x, cell.z];
+    const fineCells =
+      gridSpace === "fine"
+        ? fineCellsCoveredByWorldMacroCell(
+            worldCell[0],
+            worldCell[1],
+            fineRatio,
+          )
+        : ([logicalCenter] as [number, number][]);
+
+    visualCells.set(key, {
+      key,
+      world_cell: worldCell,
+      logical_center: logicalCenter,
+      fine_cells: fineCells,
+    });
+  });
+
+  return Array.from(visualCells.values())
+    .map((cell) => ({
+      ...cell,
+      state: classifyFogRenderStateForCells(
+        cell.fine_cells,
+        fogEnabled,
+        terrainVisible,
+        discovered,
+        memoryLineOfSight,
+      ),
+    }))
+    .sort(
+      (left, right) =>
+        left.world_cell[0] - right.world_cell[0] ||
+        left.world_cell[1] - right.world_cell[1],
+    );
 };
 
 const isDoorObject = (placement: ObjectPlacementData, objectDef?: ObjectData) =>
@@ -75,7 +304,20 @@ export const placementBlocksFogLineOfSight = (
   placement: ObjectPlacementData,
   objectDef: ObjectData | undefined,
   delta: MapDelta | undefined,
-) => placementHasCollision(placement, objectDef) && isDoorObject(placement, objectDef) && !isDoorOpenForFog(delta, placement);
+) => {
+  if (isDoorObject(placement, objectDef)) {
+    return (
+      placementHasCollision(placement, objectDef) &&
+      !isDoorOpenForFog(delta, placement)
+    );
+  }
+
+  // Collision and sight are deliberately independent. A terminal or crate can
+  // occupy a movement cell without casting a wall-sized vision shadow, while
+  // reeds and other soft obstacles may obscure sight without blocking travel.
+  const tags = new Set(objectDef?.tags || []);
+  return tags.has("blocks_los") || tags.has("wall");
+};
 
 export const createFogLineOfSightBlockers = (
   placements: ObjectPlacementData[],

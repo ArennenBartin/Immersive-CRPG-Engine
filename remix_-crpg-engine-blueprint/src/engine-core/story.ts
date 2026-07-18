@@ -43,22 +43,59 @@ export const CLOCK_PHASE_LABELS: Record<ClockPhaseId, string> = {
 
 export interface ConditionContext {
   flags: Record<string, unknown>;
+  variables?: Record<string, string | number | boolean>;
+  relationships?: Record<string, number>;
   quests: Record<string, unknown>;
   inventory: { id: string; count: number }[];
   party: string[];
   clockMinutes: number;
   factionRep: Record<string, number>;
+  currentMapId?: string;
+  currentExpeditionId?: string;
+  currentIntercessorId?: string;
+  priorIntercessorIds?: string[];
+  readDocuments?: string[];
+  knownTopics?: string[];
+  topicAskCounts?: Record<string, number>;
+  entityStates?: Record<string, Record<string, unknown>>;
 }
 
 export const buildConditionContext = (
   save: PlaySave | null | undefined,
+  overrides: Partial<ConditionContext> = {},
 ): ConditionContext => ({
   flags: save?.flags || {},
+  variables: save?.variables || {},
+  relationships: save?.relationships || {},
   quests: save?.quests || {},
   inventory: save?.inventory || [],
   party: save?.party_members || [],
   clockMinutes: save?.clock_minutes ?? 0,
   factionRep: save?.faction_rep || {},
+  currentMapId: save?.current_map_id,
+  currentExpeditionId: save?.dialogue_memory?.current_expedition_id,
+  currentIntercessorId: save?.dialogue_memory?.current_intercessor_id,
+  priorIntercessorIds: save?.dialogue_memory?.prior_intercessor_ids || [],
+  readDocuments: save?.read_documents || [],
+  knownTopics: [
+    ...Object.keys(save?.dialogue_memory?.campaign_topics || {}),
+    ...Object.keys(save?.dialogue_memory?.expedition_topics || {}),
+    ...Object.values(save?.dialogue_memory?.dynamic_topics || {}).flatMap((topic) =>
+      topic.known ? [topic.id, topic.keyword_id] : [],
+    ),
+  ],
+  topicAskCounts: Object.entries(save?.dialogue_memory?.npc_topics || {}).reduce(
+    (counts, [dialogueId, topics]) => {
+      Object.entries(topics).forEach(([topicId, history]) => {
+        counts[`${dialogueId}:${topicId}`] = history.ask_count || 0;
+        counts[topicId] = (counts[topicId] || 0) + (history.ask_count || 0);
+      });
+      return counts;
+    },
+    {} as Record<string, number>,
+  ),
+  entityStates: (save?.entity_states || {}) as Record<string, Record<string, unknown>>,
+  ...overrides,
 });
 
 const hourInRange = (hour: number, gte?: number, lt?: number) => {
@@ -132,6 +169,66 @@ export const evaluateCondition = (
   if (condition.hour_gte !== undefined || condition.hour_lt !== undefined) {
     if (!hourInRange(hour, condition.hour_gte, condition.hour_lt))
       return false;
+  }
+
+  if (condition.variable !== undefined) {
+    const value = (ctx.variables || {})[condition.variable];
+    if (
+      condition.variable_value !== undefined &&
+      value !== condition.variable_value
+    ) return false;
+    const numeric = Number(value);
+    if (condition.variable_gte !== undefined && numeric < condition.variable_gte) return false;
+    if (condition.variable_lte !== undefined && numeric > condition.variable_lte) return false;
+  }
+
+  if (condition.relationship !== undefined) {
+    const value = (ctx.relationships || {})[condition.relationship] ?? 0;
+    if (condition.relationship_gte !== undefined && value < condition.relationship_gte) return false;
+    if (condition.relationship_lte !== undefined && value > condition.relationship_lte) return false;
+  }
+
+  if (condition.current_map !== undefined && ctx.currentMapId !== condition.current_map) return false;
+  if (
+    condition.current_expedition !== undefined &&
+    ctx.currentExpeditionId !== condition.current_expedition
+  ) return false;
+  if (
+    condition.current_intercessor !== undefined &&
+    ctx.currentIntercessorId !== condition.current_intercessor
+  ) return false;
+  if (
+    condition.prior_intercessor !== undefined &&
+    !(ctx.priorIntercessorIds || []).includes(condition.prior_intercessor)
+  ) return false;
+  if (condition.read_document !== undefined && !(ctx.readDocuments || []).includes(condition.read_document)) return false;
+  if (condition.known_topic !== undefined && !(ctx.knownTopics || []).includes(condition.known_topic)) return false;
+
+  if (condition.topic_asked !== undefined) {
+    const key = condition.topic_asked_dialogue
+      ? `${condition.topic_asked_dialogue}:${condition.topic_asked}`
+      : condition.topic_asked;
+    const count = (ctx.topicAskCounts || {})[key] || 0;
+    if (condition.topic_ask_count_gte !== undefined && count < condition.topic_ask_count_gte) return false;
+    if (condition.topic_ask_count_lte !== undefined && count > condition.topic_ask_count_lte) return false;
+    if (
+      condition.topic_ask_count_gte === undefined &&
+      condition.topic_ask_count_lte === undefined &&
+      count < 1
+    ) return false;
+  }
+
+  if (condition.entity_state_id !== undefined) {
+    const state = (ctx.entityStates || {})[condition.entity_state_id] || {};
+    if (!condition.entity_state_field) return false;
+    if (
+      condition.entity_state_value !== undefined &&
+      state[condition.entity_state_field] !== condition.entity_state_value
+    ) return false;
+    if (
+      condition.entity_state_value === undefined &&
+      state[condition.entity_state_field] === undefined
+    ) return false;
   }
 
   return true;

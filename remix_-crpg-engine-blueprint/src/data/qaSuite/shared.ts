@@ -9,6 +9,8 @@ import { PEOPLE_HORROR_SPRITES, peopleHorrorSpriteId } from "../animatedSprites"
 export type MapData = GamePackage["maps"][number];
 export type EntityData = GamePackage["entities"][number];
 export type DialogueData = GamePackage["dialogue"][number];
+export type DialogueKeywordData = GamePackage["keywords"][number];
+export type DialogueDynamicTopicData = GamePackage["dynamic_topics"][number];
 export type CutsceneData = GamePackage["cutscenes"][number];
 export type ItemData = GamePackage["items"][number];
 export type SkillData = GamePackage["abilities"][number];
@@ -277,6 +279,7 @@ export const hostile = (
 // ── Dialogue ─────────────────────────────────────────────────────────────────
 type DialogueNode = DialogueData["nodes"][number];
 type DialogueOption = DialogueNode["options"][number];
+type DialogueResponse = NonNullable<DialogueData["responses"]>[number];
 
 export const dlg = (
   id: string,
@@ -291,6 +294,52 @@ export const say = (
   text: string,
   options: DialogueOption[] = [{ text: "Understood." }],
 ): DialogueData => dlg(id, speaker, [{ id: "start", speaker, text, options }]);
+
+// Native keyword-conversation builders. Keeping the schema defaults here makes
+// hand-authored QA conversations concise while still producing fully parsed
+// package records (the legacy `dlg` / `say` helpers remain migration fixtures).
+export const keywordResponse = (
+  input: Pick<DialogueResponse, "id" | "text"> & Partial<Omit<DialogueResponse, "id" | "text">>,
+): DialogueResponse => ({
+  id: input.id,
+  text: input.text,
+  role: "normal",
+  priority: 0,
+  mentions: [],
+  unlock_topic_ids: [],
+  unlock_dynamic_topic_ids: [],
+  context_topic_ids: [],
+  context_dynamic_topic_ids: [],
+  set_switches: [],
+  effects_repeatable: false,
+  end_conversation: false,
+  ...input,
+});
+
+export const keywordDlg = (
+  id: string,
+  display_name: string,
+  speaker: string,
+  responses: DialogueResponse[],
+  options: Pick<
+    DialogueData,
+    "initial_topic_ids" | "initial_dynamic_topic_ids" | "action_topic_ids"
+  > = {
+    initial_topic_ids: [],
+    initial_dynamic_topic_ids: [],
+    action_topic_ids: ["action:goodbye"],
+  },
+): DialogueData => ({
+  id,
+  display_name,
+  format: "keyword_v1",
+  speaker,
+  nodes: [],
+  responses,
+  initial_topic_ids: options.initial_topic_ids || [],
+  initial_dynamic_topic_ids: options.initial_dynamic_topic_ids || [],
+  action_topic_ids: options.action_topic_ids || ["action:goodbye"],
+});
 
 // ── Package assembly helpers ─────────────────────────────────────────────────
 export const mergeById = <T extends { id: string }>(base: T[], additions: T[]) => {
@@ -307,6 +356,8 @@ export const mergeSprites = (base: GamePackage["sprite_library"]) =>
 export interface QaWing {
   maps: MapData[];
   entities?: EntityData[];
+  keywords?: DialogueKeywordData[];
+  dynamicTopics?: DialogueDynamicTopicData[];
   dialogue?: DialogueData[];
   cutscenes?: CutsceneData[];
   documents?: DocumentData[];
@@ -325,6 +376,8 @@ export interface QaWing {
 export const mergeWings = (wings: QaWing[]): Required<QaWing> => ({
   maps: wings.flatMap((wing) => wing.maps),
   entities: wings.flatMap((wing) => wing.entities || []),
+  keywords: wings.flatMap((wing) => wing.keywords || []),
+  dynamicTopics: wings.flatMap((wing) => wing.dynamicTopics || []),
   dialogue: wings.flatMap((wing) => wing.dialogue || []),
   cutscenes: wings.flatMap((wing) => wing.cutscenes || []),
   documents: wings.flatMap((wing) => wing.documents || []),

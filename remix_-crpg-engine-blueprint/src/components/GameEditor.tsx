@@ -13,6 +13,7 @@ import {
   Landmark,
   MessagesSquare,
   Flag,
+  History,
   FlaskConical,
   Plus,
   Trash2,
@@ -21,12 +22,18 @@ import { useEngineStore } from "../store/engineStore";
 import type { ConditionData, GamePackage } from "../schema/game";
 import { ConditionEditor } from "./ConditionEditor";
 import { CHEM_MATERIALS } from "../engine-core/chemistry";
+import { previewIntercessorNames } from "../engine-core/intercessorSuccession";
+import {
+  DEFAULT_MOVEMENT_HEARING_SETTINGS,
+  resolveMovementHearingSettings,
+} from "../engine-core/hearingStealth";
 
 type Bark = GamePackage["barks"][number];
 
 const TABS = [
   { id: "basics", label: "Basics", icon: Settings2 },
   { id: "player", label: "Player", icon: User },
+  { id: "campaign", label: "Campaign", icon: History },
   { id: "audio", label: "Audio", icon: Music },
   { id: "portraits", label: "Portraits", icon: ImageIcon },
   { id: "switches", label: "Switches", icon: ToggleLeft },
@@ -293,6 +300,12 @@ export function GameEditor() {
               </div>
             </Section>
 
+            <MovementHearingSection
+              gamePackage={gamePackage}
+              settings={settings}
+              updateSettings={updateSettings}
+            />
+
             <Section title="Appearance">
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                 <Field label="Player sprite">
@@ -376,6 +389,14 @@ export function GameEditor() {
           </div>
         )}
 
+        {tab === "campaign" && (
+          <CampaignTab
+            gamePackage={gamePackage}
+            settings={settings}
+            updateSettings={updateSettings}
+          />
+        )}
+
         {tab === "audio" && (
           <AudioTab settings={settings} updateSettings={updateSettings} musicIds={musicIds} />
         )}
@@ -394,6 +415,429 @@ export function GameEditor() {
 
         {tab === "chemistry" && <ChemistryTab settings={settings} updateSettings={updateSettings} />}
       </div>
+    </div>
+  );
+}
+
+// ── Player movement, hearing, and stealth authoring ─────────────────────────
+function MovementHearingSection({
+  gamePackage,
+  settings,
+  updateSettings,
+}: {
+  gamePackage: GamePackage;
+  settings: Record<string, any>;
+  updateSettings: (updates: any) => void;
+}) {
+  const [newSurface, setNewSurface] = useState("");
+  const resolved = resolveMovementHearingSettings(gamePackage);
+  const authored = (settings.movement_hearing || {}) as Record<string, any>;
+  const patchMovement = (updates: Record<string, unknown>) =>
+    updateSettings({
+      movement_hearing: {
+        ...DEFAULT_MOVEMENT_HEARING_SETTINGS,
+        ...authored,
+        surface_noise_modifiers: {
+          ...DEFAULT_MOVEMENT_HEARING_SETTINGS.surface_noise_modifiers,
+          ...(authored.surface_noise_modifiers || {}),
+        },
+        ...updates,
+      },
+    });
+  const patchSurface = (surface: string, value: number) =>
+    patchMovement({
+      surface_noise_modifiers: {
+        ...resolved.surface_noise_modifiers,
+        [surface]: Math.max(0, value),
+      },
+    });
+  const numericField = (
+    key:
+      | "normal_movement_loudness"
+      | "stealth_noise_multiplier"
+      | "stealth_speed_multiplier"
+      | "running_noise_multiplier"
+      | "sound_attenuation_per_cell"
+      | "barrier_reduction",
+    label: string,
+    hint: string,
+    options: { min?: number; max?: number; step?: number } = {},
+  ) => (
+    <Field label={label} hint={hint}>
+      <input
+        type="number"
+        min={options.min ?? 0}
+        max={options.max}
+        step={options.step ?? 0.05}
+        className={inputCls}
+        value={resolved[key]}
+        onChange={(event) => {
+          const value = Number(event.target.value);
+          if (Number.isFinite(value)) patchMovement({ [key]: value });
+        }}
+      />
+    </Field>
+  );
+  const standardSurfaces = [
+    "default",
+    "floor",
+    "stone",
+    "soil",
+    "grass",
+    "water",
+    "metal",
+    "glass",
+    "debris",
+    "soft",
+  ];
+  const displayedSurfaces = [
+    ...standardSurfaces,
+    ...Object.keys(authored.surface_noise_modifiers || {}).filter(
+      (surface) => !standardSurfaces.includes(surface),
+    ),
+  ];
+
+  return (
+    <Section
+      title="Movement, hearing, and stealth"
+      hint="Mechanical sound is independent of speaker volume. These values are shared by Studio preview and Play."
+    >
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+        {numericField(
+          "normal_movement_loudness",
+          "Normal movement loudness",
+          "Base sound budget for an ordinary movement pulse.",
+          { min: 0.05 },
+        )}
+        {numericField(
+          "stealth_noise_multiplier",
+          "Stealth noise multiplier",
+          "Multiplies future movement sound while the stance is active.",
+          { max: 4 },
+        )}
+        {numericField(
+          "stealth_speed_multiplier",
+          "Stealth speed multiplier",
+          "Fraction of normal movement cadence while moving quietly.",
+          { min: 0.1, max: 1 },
+        )}
+        {numericField(
+          "running_noise_multiplier",
+          "Accelerated movement multiplier",
+          "Reserved for running or other accelerated movement modes.",
+          { max: 4 },
+        )}
+        {numericField(
+          "sound_attenuation_per_cell",
+          "Attenuation per cell",
+          "How quickly mechanical sound loses strength with distance.",
+          { min: 0.05 },
+        )}
+        {numericField(
+          "barrier_reduction",
+          "Barrier reduction",
+          "Fraction removed by each wall or closed-door obstruction (0–0.95).",
+          { max: 0.95, step: 0.01 },
+        )}
+      </div>
+
+      <div>
+        <div className="mb-2 text-xs font-medium tracking-wide text-neutral-400">
+          Surface noise multipliers
+        </div>
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+          {displayedSurfaces.map((surface) => (
+            <div
+              key={surface}
+              className="flex items-center gap-2 rounded-lg border border-neutral-800 bg-neutral-950/70 px-2.5 py-2"
+            >
+              <span className="min-w-0 flex-1 truncate text-xs capitalize text-neutral-300">
+                {surface}
+              </span>
+              <input
+                type="number"
+                min={0}
+                max={4}
+                step={0.05}
+                value={resolved.surface_noise_modifiers[surface] ?? 1}
+                onChange={(event) => {
+                  const value = Number(event.target.value);
+                  if (Number.isFinite(value)) patchSurface(surface, value);
+                }}
+                className="w-20 rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-right text-xs text-white outline-none focus:border-emerald-500"
+              />
+              {!standardSurfaces.includes(surface) && (
+                <button
+                  type="button"
+                  title={`Remove ${surface} modifier`}
+                  className="text-neutral-600 hover:text-red-400"
+                  onClick={() => {
+                    const next = { ...(authored.surface_noise_modifiers || {}) };
+                    delete next[surface];
+                    patchMovement({ surface_noise_modifiers: next });
+                  }}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+        <div className="mt-2 flex max-w-sm gap-2">
+          <input
+            className={inputCls}
+            value={newSurface}
+            placeholder="Add surface key…"
+            onChange={(event) => setNewSurface(event.target.value)}
+          />
+          <button
+            type="button"
+            className={`${smallBtn} inline-flex items-center gap-1.5`}
+            onClick={() => {
+              const surface = newSurface.trim().toLowerCase();
+              if (!surface) return;
+              patchSurface(surface, 1);
+              setNewSurface("");
+            }}
+          >
+            <Plus className="h-3.5 w-3.5" />
+            Add
+          </button>
+        </div>
+        <p className="mt-2 text-[11px] leading-snug text-neutral-600">
+          Below 1 is quieter; above 1 is louder. Terrain and material tags use the matching key when available.
+        </p>
+      </div>
+
+      <Field
+        label="Follower stealth rule"
+        hint="The first implementation uses one party-wide stance so followers cannot silently undermine the player."
+      >
+        <select
+          className={inputCls}
+          value={resolved.party_stealth_rule}
+          onChange={() => patchMovement({ party_stealth_rule: "collective" })}
+        >
+          <option value="collective">Collective — player and followers enter stealth together</option>
+        </select>
+      </Field>
+
+      <button
+        type="button"
+        className={smallBtn}
+        onClick={() => updateSettings({ movement_hearing: undefined })}
+      >
+        Restore engine defaults
+      </button>
+    </Section>
+  );
+}
+
+// ── Campaign lifecycle helpers ──────────────────────────────────────────────
+const csvValues = (value: string) =>
+  value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+const csvText = (value: unknown) =>
+  Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string").join(", ") : "";
+
+function CampaignTab({
+  gamePackage,
+  settings,
+  updateSettings,
+}: {
+  gamePackage: GamePackage;
+  settings: Record<string, any>;
+  updateSettings: (updates: any) => void;
+}) {
+  const policy = (settings.world_state_policy || {}) as Record<string, any>;
+  const succession = (settings.intercessor_succession || {}) as Record<string, any>;
+  const patchPolicy = (updates: Record<string, unknown>) =>
+    updateSettings({
+      world_state_policy: {
+        version: 1,
+        ...policy,
+        ...updates,
+      },
+    });
+  const patchSuccession = (updates: Record<string, unknown>) =>
+    updateSettings({
+      intercessor_succession: {
+        enabled: true,
+        ...succession,
+        ...updates,
+      },
+    });
+  const hubMapId = succession.hub_map_id || gamePackage.metadata.start_map_id;
+  const hubMap = gamePackage.maps.find((map) => map.id === hubMapId);
+  const campaignSwitches = new Set<string>(policy.campaign_switch_ids || []);
+  const expeditionSwitches = new Set<string>(policy.expedition_switch_ids || []);
+  const setSwitchScope = (id: string, scope: "campaign" | "expedition") => {
+    const nextCampaign = new Set(campaignSwitches);
+    const nextExpedition = new Set(expeditionSwitches);
+    nextCampaign.delete(id);
+    nextExpedition.delete(id);
+    (scope === "campaign" ? nextCampaign : nextExpedition).add(id);
+    patchPolicy({
+      campaign_switch_ids: [...nextCampaign].sort(),
+      expedition_switch_ids: [...nextExpedition].sort(),
+    });
+  };
+  const patchPerMapIds = (key: string, mapId: string, ids: string[]) => {
+    const current = (policy[key] || {}) as Record<string, string[]>;
+    patchPolicy({
+      [key]: {
+        ...current,
+        [mapId]: ids,
+      },
+    });
+  };
+  const namePreview = previewIntercessorNames(gamePackage, {
+    campaignSeed: "studio-preview",
+    count: 6,
+  });
+
+  return (
+    <div className="space-y-6">
+      <Section
+        title="World-state layers"
+        hint="Authored package data is immutable. Campaign facts survive expedition boundaries; tactical state is rebuilt from the authored baseline. A full New Game still clears the campaign."
+      >
+        <label className="flex items-center gap-2 text-sm text-neutral-300">
+          <input
+            type="checkbox"
+            checked={Boolean(policy.preserve_chemistry)}
+            onChange={(event) => patchPolicy({ preserve_chemistry: event.target.checked })}
+          />
+          Preserve live chemistry across expeditions
+        </label>
+        <p className="text-xs leading-relaxed text-neutral-500">
+          Leave this off for ordinary puddles, smoke, fire, foam, and temporary light. Permanent environmental changes should be represented by campaign switches or stable structural records.
+        </p>
+        <div className="space-y-2">
+          <div className="text-xs font-semibold uppercase tracking-wide text-neutral-400">Switch lifetime</div>
+          <div className="grid grid-cols-1 gap-1.5 md:grid-cols-2">
+            {Object.keys(gamePackage.switches || {}).sort().map((id) => (
+              <div key={id} className="flex items-center gap-2 rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2">
+                <span className="min-w-0 flex-1 truncate font-mono text-xs text-neutral-200">{id}</span>
+                <select
+                  className="rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-[11px] text-white"
+                  value={expeditionSwitches.has(id) ? "expedition" : "campaign"}
+                  onChange={(event) => setSwitchScope(id, event.target.value as "campaign" | "expedition")}
+                >
+                  <option value="campaign">campaign</option>
+                  <option value="expedition">expedition</option>
+                </select>
+              </div>
+            ))}
+          </div>
+        </div>
+      </Section>
+
+      <Section
+        title="Permanent map records"
+        hint="Use stable authored placement IDs. These records survive a new expedition; unlisted doors, moved objects, loose loot, and containers restore to their authored state."
+      >
+        <div className="space-y-4">
+          {gamePackage.maps.map((map) => (
+            <div key={map.id} className="rounded-lg border border-neutral-800 bg-neutral-900/60 p-3">
+              <div className="mb-3 text-sm font-medium text-neutral-200">{map.display_name || map.id}</div>
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                {([
+                  ["persistent_door_ids", "Door / shortcut IDs"],
+                  ["persistent_object_ids", "Moved / removed object IDs"],
+                  ["persistent_item_ids", "World item placement IDs"],
+                  ["persistent_container_ids", "Container placement IDs"],
+                ] as const).map(([key, label]) => (
+                  <Field key={key} label={label} hint="Comma-separated stable IDs">
+                    <input
+                      className={`${inputCls} font-mono text-xs`}
+                      value={csvText(policy[key]?.[map.id])}
+                      onChange={(event) => patchPerMapIds(key, map.id, csvValues(event.target.value))}
+                    />
+                  </Field>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+        <Field label="Persistent entity-state keys" hint="Stable placement-backed runtime keys, comma-separated.">
+          <input
+            className={`${inputCls} font-mono text-xs`}
+            value={csvText(policy.persistent_entity_state_ids)}
+            onChange={(event) => patchPolicy({ persistent_entity_state_ids: csvValues(event.target.value) })}
+          />
+        </Field>
+      </Section>
+
+      <Section
+        title="Intercessor succession"
+        hint="A death closes one life, records ghost and bundle requests, starts a fresh expedition, and returns the successor to this hub. The requests become world entities in later phases."
+      >
+        <label className="flex items-center gap-2 text-sm text-neutral-200">
+          <input
+            type="checkbox"
+            checked={succession.enabled !== false}
+            onChange={(event) => patchSuccession({ enabled: event.target.checked })}
+          />
+          Enable Intercessor succession
+        </label>
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <Field label="Successor hub map">
+            <select
+              className={inputCls}
+              value={hubMapId}
+              onChange={(event) => {
+                const map = gamePackage.maps.find((candidate) => candidate.id === event.target.value);
+                patchSuccession({ hub_map_id: event.target.value, hub_spawn_id: map?.spawns[0]?.id || "" });
+              }}
+            >
+              {gamePackage.maps.map((map) => <option key={map.id} value={map.id}>{map.display_name || map.id}</option>)}
+            </select>
+          </Field>
+          <Field label="Successor hub spawn">
+            <select
+              className={inputCls}
+              value={succession.hub_spawn_id || gamePackage.metadata.start_spawn_id}
+              onChange={(event) => patchSuccession({ hub_spawn_id: event.target.value })}
+            >
+              {(hubMap?.spawns || []).map((spawn) => <option key={spawn.id} value={spawn.id}>{spawn.id}</option>)}
+            </select>
+          </Field>
+          <Field label="First-name / prefix pool" hint="Comma-separated syllables or names.">
+            <input className={inputCls} value={csvText(succession.name_prefixes)} onChange={(event) => patchSuccession({ name_prefixes: csvValues(event.target.value) })} />
+          </Field>
+          <Field label="Root / family pool">
+            <input className={inputCls} value={csvText(succession.name_roots)} onChange={(event) => patchSuccession({ name_roots: csvValues(event.target.value) })} />
+          </Field>
+          <Field label="Suffix pool" hint="Optional punctuation or suffixes.">
+            <input className={inputCls} value={csvText(succession.name_suffixes)} onChange={(event) => patchSuccession({ name_suffixes: csvValues(event.target.value) })} />
+          </Field>
+          <Field label="Duplicate display names">
+            <select className={inputCls} value={succession.duplicate_name_policy || "avoid"} onChange={(event) => patchSuccession({ duplicate_name_policy: event.target.value })}>
+              <option value="avoid">Avoid where possible</option>
+              <option value="allow">Allow (IDs remain distinct)</option>
+            </select>
+          </Field>
+          <Field label="Banned names">
+            <input className={inputCls} value={csvText(succession.banned_names)} onChange={(event) => patchSuccession({ banned_names: csvValues(event.target.value) })} />
+          </Field>
+          <Field label="Reserved names">
+            <input className={inputCls} value={csvText(succession.reserved_names)} onChange={(event) => patchSuccession({ reserved_names: csvValues(event.target.value) })} />
+          </Field>
+        </div>
+        <div className="rounded-lg border border-indigo-800/60 bg-indigo-950/20 p-3">
+          <div className="text-[11px] font-semibold uppercase tracking-widest text-indigo-300">Name-pool preview</div>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {namePreview.map((name, index) => (
+              <span key={`${name}:${index}`} className="rounded border border-indigo-800/60 bg-black/25 px-2 py-1 font-serif text-sm text-indigo-100">{name}</span>
+            ))}
+          </div>
+          <p className="mt-2 text-[11px] text-neutral-500">The chosen runtime name and stable record ID are saved permanently; later pool edits never rename an existing Intercessor.</p>
+        </div>
+      </Section>
     </div>
   );
 }

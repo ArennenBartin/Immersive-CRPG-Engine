@@ -7,6 +7,7 @@ import {
   auditGamePackageReferences,
   type ReferenceAuditSeverity,
 } from "../generation-facing/referenceAudit";
+import { validateHearingStealthAuthoring } from "../engine-core/hearingStealth";
 
 export type StudioDiagnosticSeverity = ValidationSeverity | ReferenceAuditSeverity;
 export type StudioDiagnosticSource = "package" | "map";
@@ -56,6 +57,13 @@ export const validateStudioProject = (gamePackage: GamePackage): StudioValidatio
     mapId: issue.mapId,
     cells: issue.cell ? [issue.cell] : undefined,
   }));
+  validateHearingStealthAuthoring(gamePackage).forEach((issue) => {
+    issues.push({
+      ...issue,
+      source: "package",
+      blocking: issue.severity === "error",
+    });
+  });
 
   gamePackage.maps.forEach((map, mapIndex) => {
     const report = validateOrdinaryMap(map, { package: gamePackage });

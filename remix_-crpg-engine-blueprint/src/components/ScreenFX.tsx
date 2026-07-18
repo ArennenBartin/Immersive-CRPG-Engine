@@ -466,39 +466,50 @@ export function ScreenFX({ inCombat, mapId }: ScreenFXProps) {
   const caRef   = useRef<ChromaticAberrationEffect>(null);
   const visualPreset = useVisualSettingsStore((s) => s.preset);
   const visual = SCREEN_VISUAL_PRESETS[visualPreset];
+  const enableExpensiveWarp =
+    visualPreset === "high" || visualPreset === "ultra";
 
   // Performance is the reliable gameplay/debug preset. The old version only
   // reduced effect amplitudes while still paying for N8AO and the full
   // multi-sample warp pass every frame, which made dense QA maps needlessly
   // GPU-bound in embedded browsers.
-  if (visualPreset === "performance") return null;
+  // Balanced is the default play preset and must keep the authoritative world
+  // lighting responsive on ordinary hardware. The composer adds several
+  // full-screen framebuffer passes even though none of them participates in
+  // fog, illumination, or Senses. Reserve that cosmetic cost for High/Ultra.
+  if (visualPreset === "performance" || visualPreset === "balanced") return null;
 
   const underground =
     (mapId?.includes("network") || mapId?.includes("cave") || mapId?.includes("depth")) ?? false;
 
   return (
     <FXBoundary>
-      <ScreenFXDriver
-        warpRef={warpRef}
-        caRef={caRef}
-        inCombat={inCombat}
-        underground={underground}
-        visual={visual}
-      />
-      <EffectComposer multisampling={0} frameBufferType={UnsignedByteType}>
-        <N8AO
-          halfRes={visual.aoHalfRes}
-          depthAwareUpsampling
-          quality={visual.aoQuality}
-          aoRadius={(underground ? 2.4 : 2) * visual.aoRadiusScale}
-          aoSamples={visual.aoSamples}
-          denoiseSamples={visual.denoiseSamples}
-          denoiseRadius={visual.denoiseRadius}
-          distanceFalloff={underground ? 0.82 : 0.9}
-          intensity={(underground ? 1.18 : 0.92) * visual.aoIntensityScale}
-          color={underground ? "#07101a" : "#100c13"}
+      {enableExpensiveWarp && (
+        <ScreenFXDriver
+          warpRef={warpRef}
+          caRef={caRef}
+          inCombat={inCombat}
+          underground={underground}
+          visual={visual}
         />
-        <WarpFX effectRef={warpRef} />
+      )}
+      <EffectComposer multisampling={0} frameBufferType={UnsignedByteType}>
+        {/* High and Ultra retain the material-aware post-processing stack.
+            Performance and Balanced return before allocating the composer. */}
+        {(visualPreset === "high" || visualPreset === "ultra") && (
+          <N8AO
+            halfRes={visual.aoHalfRes}
+            depthAwareUpsampling
+            aoRadius={(underground ? 2.4 : 2) * visual.aoRadiusScale}
+            aoSamples={visual.aoSamples}
+            denoiseSamples={visual.denoiseSamples}
+            denoiseRadius={visual.denoiseRadius}
+            distanceFalloff={underground ? 0.82 : 0.9}
+            intensity={(underground ? 1.18 : 0.92) * visual.aoIntensityScale}
+            color={underground ? "#07101a" : "#100c13"}
+          />
+        )}
+        {enableExpensiveWarp && <WarpFX effectRef={warpRef} />}
         <BrightnessContrast
           brightness={underground ? 0.008 : 0.012}
           contrast={(underground ? 0.014 : 0.01) + visual.contrastBoost}
@@ -507,7 +518,7 @@ export function ScreenFX({ inCombat, mapId }: ScreenFXProps) {
           hue={0}
           saturation={(underground ? 0.045 : 0.026) + visual.saturationBoost}
         />
-        <ChromaticAberrationFX effectRef={caRef} />
+        {enableExpensiveWarp && <ChromaticAberrationFX effectRef={caRef} />}
         <Scanline
           density={underground ? 1.34 : 1.08}
           opacity={(underground ? 0.045 : 0.028) * visual.scanlineScale}

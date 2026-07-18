@@ -397,6 +397,49 @@ export function ItemEditor() {
               )}
             </div>
 
+            <div className="space-y-3 border-t border-neutral-800 pt-6">
+              <div>
+                <h3 className="text-sm font-semibold text-indigo-100">Topics learned on acquisition</h3>
+                <p className="mt-1 text-xs text-neutral-500">Receiving or recovering this item can add stable subjects to conversation memory.</p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {gamePackage.keywords?.map((topic) => {
+                  const selected = (activeItem.discover_topic_ids || []).includes(topic.id);
+                  return (
+                    <label key={topic.id} className="flex items-center gap-1.5 rounded border border-neutral-800 bg-neutral-950 px-2 py-1 text-[11px] text-neutral-300">
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={(event) => handleUpdate({
+                          discover_topic_ids: event.target.checked
+                            ? Array.from(new Set([...(activeItem.discover_topic_ids || []), topic.id]))
+                            : (activeItem.discover_topic_ids || []).filter((id) => id !== topic.id),
+                        })}
+                      />
+                      {topic.display_label}
+                    </label>
+                  );
+                })}
+                {gamePackage.dynamic_topics?.map((topic) => {
+                  const selected = (activeItem.discover_dynamic_topic_ids || []).includes(topic.id);
+                  return (
+                    <label key={topic.id} className="flex items-center gap-1.5 rounded border border-violet-500/20 bg-violet-950/10 px-2 py-1 text-[11px] text-violet-100">
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={(event) => handleUpdate({
+                          discover_dynamic_topic_ids: event.target.checked
+                            ? Array.from(new Set([...(activeItem.discover_dynamic_topic_ids || []), topic.id]))
+                            : (activeItem.discover_dynamic_topic_ids || []).filter((id) => id !== topic.id),
+                        })}
+                      />
+                      {topic.display_name}
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+
           </div>
         ) : (
           <div className="flex-1 flex flex-col items-center justify-center text-neutral-500 p-8">

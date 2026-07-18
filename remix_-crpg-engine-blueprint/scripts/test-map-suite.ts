@@ -72,7 +72,7 @@ console.log("suite: reference integrity");
   );
 
   ok(
-    "fresh Studio workspace is the canonical eleven-map QA suite",
+    "fresh Studio workspace is the canonical twelve-map QA suite",
     defaultPackage.maps.length === TEST_SUITE_MAP_IDS.length &&
       defaultPackage.maps.every((map) => TEST_SUITE_MAP_IDS.includes(map.id)),
   );
@@ -91,6 +91,14 @@ console.log("suite: reference integrity");
           : undefined;
         return sprite?.animated === true && sprite.data_url?.endsWith(".gif") === true;
       }),
+  );
+  const weakDialogueLabels = defaultPackage.keywords
+    .filter((topic) => /^(?:it|this|that|them|him|her|here|there|review topic \d+)$/i.test(topic.display_label.trim()))
+    .map((topic) => `${topic.id}=${topic.display_label}`);
+  ok(
+    "canonical QA dialogue exposes no pronoun-only or placeholder topic labels",
+    weakDialogueLabels.length === 0,
+    weakDialogueLabels.join(", "),
   );
 
   const editedQaPackage = {
@@ -135,9 +143,9 @@ console.log("suite: reference integrity");
 
   ok("suite start map exists", mapById.has(authored.metadata.start_map_id));
   ok(
-    "suite contains exactly the hub plus ten labs",
-    authored.maps.length === 11 &&
-      qaMaps.length === 11 &&
+    "suite contains exactly the hub plus eleven labs",
+    authored.maps.length === 12 &&
+      qaMaps.length === 12 &&
       authored.maps.every((map) => expectedMapIds.has(map.id)),
     `maps: ${authored.maps.map((m) => m.id).join(", ")}`,
   );
@@ -228,6 +236,133 @@ console.log("suite: reference integrity");
           mapExit.target_map_id === TEST_SUITE_START_MAP_ID &&
           mapExit.target_spawn_id === TEST_SUITE_START_SPAWN_ID,
       ),
+  );
+
+  const persistenceMap = mapById.get("qa_persistence_lab");
+  const persistenceDoor = persistenceMap?.custom_object_placements.find(
+    (placement) => placement.id === "qa_persistence_shortcut",
+  );
+  const persistenceHostile = persistenceMap?.entity_placements.find(
+    (placement) => placement.id === "qa_persistence_hostile_placement",
+  );
+  const worldStatePolicy = authored.settings.world_state_policy as {
+    campaign_switch_ids?: string[];
+    expedition_switch_ids?: string[];
+    persistent_door_ids?: Record<string, string[]>;
+    persistent_item_ids?: Record<string, string[]>;
+  } | undefined;
+  const succession = authored.settings.intercessor_succession as {
+    enabled?: boolean;
+    hub_map_id?: string;
+    hub_spawn_id?: string;
+    name_prefixes?: string[];
+    name_roots?: string[];
+    name_suffixes?: string[];
+    duplicate_name_policy?: string;
+    history_keyword_id?: string;
+  } | undefined;
+  const historyKeyword = authored.keywords.find(
+    (keyword) => keyword.id === succession?.history_keyword_id,
+  );
+
+  ok(
+    "persistence lab has a wall-divided annex and stable shortcut door",
+    persistenceMap?.cells
+      .filter((cell) => cell.z === 0 && cell.x >= -7 && cell.x <= 7 && cell.x !== 0)
+      .every((cell) => cell.blocks_los && !cell.walkable) === true &&
+      persistenceMap.cells.some(
+        (cell) => cell.x === 0 && cell.z === 0 && cell.walkable && !cell.blocks_los,
+      ) &&
+      persistenceDoor?.object_id === "obj_p_door",
+  );
+  ok(
+    "persistence lab authors resettable and campaign-scoped world fixtures",
+    persistenceMap?.item_placements.some(
+      (placement) => placement.id === "qa_persistence_artifact_placement",
+    ) === true &&
+      persistenceMap.item_placements.some(
+        (placement) => placement.id === "qa_persistence_ordinary_placement",
+      ) &&
+      persistenceHostile?.entity_id === "qa_persistence_hostile" &&
+      persistenceMap.custom_object_placements.some(
+        (placement) => placement.object_id === "obj_crate" && placement.cell[1] > 0,
+      ),
+  );
+  ok(
+    "persistence lab provides campaign, hazard, and lethal succession terminals",
+    [
+      "qa_trig_persistence_campaign",
+      "qa_trig_persistence_hazard",
+      "qa_trig_persistence_succession",
+    ].every((id) => persistenceMap?.triggers.some((trigger) => trigger.id === id)) &&
+      authored.cutscenes.some(
+        (cutscene) =>
+          cutscene.id === "qa_cut_persistence_campaign" &&
+          cutscene.actions.some(
+            (action) =>
+              action.type === "set_switch" &&
+              action.switch_id === "qa_persistence_major",
+          ),
+      ) &&
+      authored.cutscenes.some(
+        (cutscene) =>
+          cutscene.id === "qa_cut_persistence_hazard" &&
+          cutscene.actions.some((action) => action.type === "chem_spill") &&
+          cutscene.actions.some(
+            (action) =>
+              action.type === "set_switch" &&
+              action.switch_id === "qa_persistence_hazard",
+          ),
+      ) &&
+      authored.cutscenes.some(
+        (cutscene) =>
+          cutscene.id === "qa_cut_persistence_succession" &&
+          cutscene.actions.some(
+            (action) =>
+              action.type === "modify_player_stats" &&
+              (action.stats?.hp || 0) < 0,
+          ),
+      ),
+  );
+  ok(
+    "persistence lab returns to the canonical hub and is curator-accessible",
+    persistenceMap?.exits.some(
+      (mapExit) =>
+        mapExit.target_map_id === TEST_SUITE_START_MAP_ID &&
+        mapExit.target_spawn_id === TEST_SUITE_START_SPAWN_ID,
+    ) === true &&
+      authored.cutscenes.some(
+        (cutscene) =>
+          cutscene.id === "qa_cut_to_persistence" &&
+          cutscene.actions.some(
+            (action) =>
+              action.type === "teleport_player" &&
+              action.map_id === "qa_persistence_lab",
+          ),
+      ),
+  );
+  ok(
+    "QA world-state policy distinguishes campaign and expedition fixtures",
+    worldStatePolicy?.campaign_switch_ids?.includes("qa_persistence_major") === true &&
+      worldStatePolicy.expedition_switch_ids?.includes("qa_persistence_hazard") === true &&
+      worldStatePolicy.persistent_door_ids?.qa_persistence_lab?.includes(
+        "qa_persistence_shortcut",
+      ) === true &&
+      worldStatePolicy.persistent_item_ids?.qa_persistence_lab?.includes(
+        "qa_persistence_artifact_placement",
+      ) === true,
+  );
+  ok(
+    "QA succession policy names a valid hub and dynamic history topic",
+    succession?.enabled === true &&
+      succession.hub_map_id === TEST_SUITE_START_MAP_ID &&
+      succession.hub_spawn_id === TEST_SUITE_START_SPAWN_ID &&
+      Boolean(succession.name_prefixes?.length) &&
+      Boolean(succession.name_roots?.length) &&
+      Boolean(succession.name_suffixes?.length) &&
+      succession.duplicate_name_policy === "avoid" &&
+      historyKeyword?.dynamic_capable === true &&
+      historyKeyword.category === "intercessors",
   );
 
   const checkActions = (owner: string, actions: EventActionData[]) => {

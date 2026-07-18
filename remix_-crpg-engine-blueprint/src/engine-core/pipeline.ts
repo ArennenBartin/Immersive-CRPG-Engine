@@ -222,6 +222,8 @@ export interface PushableObjectRef {
   pushDifficulty?: number;
   pushEnergyCost?: number;
   requiresCooperation?: boolean;
+  soundLoudness?: number;
+  materialTag?: string;
 }
 
 export interface BreakableObjectRef extends PushableObjectRef {}
@@ -453,6 +455,20 @@ export interface DialogueChoiceOutcome {
   effects: DialogueChoiceEffectOutcome[];
 }
 
+export interface KeywordDialogueOutcome {
+  dialogueId: string;
+  responseId?: string;
+  responseText?: string;
+  topicKey?: string;
+  triggerCutsceneId?: string;
+  endsDialogue: boolean;
+  effectsApplied: boolean;
+  localTopicIds: string[];
+  localDynamicTopicIds: string[];
+  newlyDiscoveredTopicIds: string[];
+  newlyDiscoveredDynamicTopicIds: string[];
+}
+
 export interface ShopTransactionOutcome {
   shopId?: string;
   itemId: string;
@@ -463,6 +479,18 @@ export interface ShopTransactionOutcome {
   money: number;
   stockIndex?: number;
   mode: "buy" | "sell";
+}
+
+export interface MechanicalSoundMetadata {
+  sourceCategory?: string;
+  sourceEntityId?: string;
+  sourceFactionId?: string;
+  ownerId?: string;
+  sourceAction?: string;
+  revealsIdentity?: boolean;
+  durationTicks?: number;
+  tags?: string[];
+  compactPropagation?: boolean;
 }
 
 export interface InteractiveGridWorld extends GridWorld {
@@ -499,6 +527,7 @@ export interface InteractiveGridWorld extends GridWorld {
     tag: string,
     actorId?: string,
     materialTag?: string,
+    metadata?: MechanicalSoundMetadata,
   ): { origin: [number, number]; cells: number; loudness: number; tag: string };
   advanceNpcTasks?(ticks: number): NpcTaskAdvanceOutcome;
   canStartSimulationProcess?(options: SimulationProcessStartOptions): ValidationResult;
@@ -552,6 +581,23 @@ export interface InteractiveGridWorld extends GridWorld {
   endGame?(endingId?: string, title?: string): void;
   canChooseDialogueOption?(dialogueId: string, nodeId: string, optionIndex: number): ValidationResult;
   chooseDialogueOption?(dialogueId: string, nodeId: string, optionIndex: number): DialogueChoiceOutcome;
+  canSelectDialogueTopic?(
+    dialogueId: string,
+    topicKind: "static" | "dynamic" | "opening",
+    topicId: string | undefined,
+    participantKey: string | undefined,
+    shownItemId: string | undefined,
+    entryNodeId: string | undefined,
+  ): ValidationResult;
+  selectDialogueTopic?(
+    dialogueId: string,
+    topicKind: "static" | "dynamic" | "opening",
+    topicId: string | undefined,
+    participantKey: string | undefined,
+    shownItemId: string | undefined,
+    entryNodeId: string | undefined,
+    countAsk: boolean,
+  ): KeywordDialogueOutcome;
   canBuyShopItem?(shopId: string, stockIndex: number): ValidationResult;
   buyShopItem?(shopId: string, stockIndex: number): ShopTransactionOutcome;
   canSellInventoryItem?(shopId: string | undefined, itemId: string, count: number): ValidationResult;
@@ -829,6 +875,33 @@ const manipulationPayload = (
   requires_cooperation: ref.requiresCooperation,
 });
 
+const emitInteractionSound = (
+  world: InteractiveGridWorld,
+  ref: PushableObjectRef,
+  cell: [number, number],
+  action: "push" | "pull" | "drag" | "break",
+  actorId?: string,
+) => {
+  if (!world.emitSoundAt) return;
+  const actionMultiplier = action === "break" ? 1.25 : action === "drag" ? 0.9 : 1;
+  const propagated = world.emitSoundAt(
+    cell,
+    Math.max(1, (ref.soundLoudness ?? 3) * actionMultiplier),
+    `object_${action}`,
+    actorId,
+    ref.materialTag,
+  );
+  world.events.emit("sound_propagated", world.tick, {
+    actorIds: actorId ? [actorId] : undefined,
+    payload: {
+      ...propagated,
+      source_action: action,
+      source_id: ref.key,
+      material_tag: ref.materialTag,
+    },
+  });
+};
+
 const createObjectMoveHandler = (
   action: "push" | "pull" | "drag",
   eventType: "object_pushed" | "object_pulled" | "object_dragged",
@@ -868,6 +941,13 @@ const createObjectMoveHandler = (
             actorIds: actors.length ? actors : undefined,
             payload: manipulationPayload(ref, moved, action),
           });
+          emitInteractionSound(
+            tw,
+            ref,
+            moved.to,
+            action,
+            actors[0],
+          );
         },
       },
     ];
@@ -941,6 +1021,7 @@ export const BreakObjectHandler: CommandHandler = {
               cell: broken.cell,
             },
           });
+          emitInteractionSound(tw, ref, broken.cell, "break", cmd.actorId);
         },
       },
     ];
@@ -1107,12 +1188,52 @@ export const EmitSoundHandler: CommandHandler = {
     const loudness = Math.max(1, Number(cmd.params?.loudness ?? 1));
     const tag = typeof cmd.params?.tag === "string" ? cmd.params.tag : "sound";
     const materialTag = typeof cmd.params?.materialTag === "string" ? cmd.params.materialTag : undefined;
+    const metadata: MechanicalSoundMetadata = {
+      sourceCategory:
+        typeof cmd.params?.sourceCategory === "string"
+          ? cmd.params.sourceCategory
+          : undefined,
+      sourceEntityId:
+        typeof cmd.params?.sourceEntityId === "string"
+          ? cmd.params.sourceEntityId
+          : undefined,
+      sourceFactionId:
+        typeof cmd.params?.sourceFactionId === "string"
+          ? cmd.params.sourceFactionId
+          : undefined,
+      ownerId:
+        typeof cmd.params?.ownerId === "string" ? cmd.params.ownerId : undefined,
+      sourceAction:
+        typeof cmd.params?.sourceAction === "string"
+          ? cmd.params.sourceAction
+          : undefined,
+      revealsIdentity:
+        typeof cmd.params?.revealsIdentity === "boolean"
+          ? cmd.params.revealsIdentity
+          : undefined,
+      durationTicks: Number.isFinite(Number(cmd.params?.durationTicks))
+        ? Math.max(1, Math.floor(Number(cmd.params?.durationTicks)))
+        : undefined,
+      tags: Array.isArray(cmd.params?.tags)
+        ? cmd.params.tags.filter(
+            (tag): tag is string => typeof tag === "string" && tag.length > 0,
+          )
+        : undefined,
+      compactPropagation: cmd.params?.compactPropagation === true,
+    };
     return [
       {
         type: "emit_sound",
         apply(target) {
           const tw = target as InteractiveGridWorld;
-          const propagated = tw.emitSoundAt!(cell, loudness, tag, cmd.actorId, materialTag);
+          const propagated = tw.emitSoundAt!(
+            cell,
+            loudness,
+            tag,
+            cmd.actorId,
+            materialTag,
+            metadata,
+          );
           tw.events.emit("sound_propagated", tw.tick, {
             actorIds: cmd.actorId ? [cmd.actorId] : undefined,
             payload: propagated as unknown as Record<string, unknown>,
@@ -2038,6 +2159,44 @@ export const ChooseDialogueOptionHandler: CommandHandler = {
   },
 };
 
+export const SelectDialogueTopicHandler: CommandHandler = {
+  validate(cmd, world) {
+    const w = world as InteractiveGridWorld;
+    if (!w.canSelectDialogueTopic || !w.selectDialogueTopic) return { ok: false, reason: "unsupported" };
+    const dialogueId = typeof cmd.params?.dialogueId === "string" ? cmd.params.dialogueId : "";
+    const rawKind = cmd.params?.topicKind;
+    const topicKind = rawKind === "dynamic" || rawKind === "opening" ? rawKind : "static";
+    const topicId = typeof cmd.params?.topicId === "string" ? cmd.params.topicId : undefined;
+    const participantKey = typeof cmd.params?.participantKey === "string" ? cmd.params.participantKey : undefined;
+    const shownItemId = typeof cmd.params?.shownItemId === "string" ? cmd.params.shownItemId : undefined;
+    const entryNodeId = typeof cmd.params?.entryNodeId === "string" ? cmd.params.entryNodeId : undefined;
+    if (!dialogueId) return { ok: false, reason: "no dialogue" };
+    if (topicKind !== "opening" && !topicId) return { ok: false, reason: "no topic" };
+    return w.canSelectDialogueTopic(dialogueId, topicKind, topicId, participantKey, shownItemId, entryNodeId);
+  },
+  resolve(cmd) {
+    const dialogueId = cmd.params!.dialogueId as string;
+    const rawKind = cmd.params?.topicKind;
+    const topicKind: "static" | "dynamic" | "opening" = rawKind === "dynamic" || rawKind === "opening" ? rawKind : "static";
+    const topicId = typeof cmd.params?.topicId === "string" ? cmd.params.topicId : undefined;
+    const participantKey = typeof cmd.params?.participantKey === "string" ? cmd.params.participantKey : undefined;
+    const shownItemId = typeof cmd.params?.shownItemId === "string" ? cmd.params.shownItemId : undefined;
+    const entryNodeId = typeof cmd.params?.entryNodeId === "string" ? cmd.params.entryNodeId : undefined;
+    const countAsk = cmd.params?.countAsk !== false;
+    return [{
+      type: "select_dialogue_topic",
+      apply(target) {
+        const world = target as InteractiveGridWorld;
+        const outcome = world.selectDialogueTopic!(dialogueId, topicKind, topicId, participantKey, shownItemId, entryNodeId, countAsk);
+        world.events.emit("dialogue_topic_selected", world.tick, {
+          actorIds: cmd.actorId ? [cmd.actorId] : undefined,
+          payload: outcome as unknown as Record<string, unknown>,
+        });
+      },
+    }];
+  },
+};
+
 export const BuyShopItemHandler: CommandHandler = {
   validate(cmd, world) {
     const w = world as InteractiveGridWorld;
@@ -2350,6 +2509,7 @@ export function registerCoreCommands(engine: Engine): void {
   engine.commands.register("record_bark", RecordBarkHandler);
   engine.commands.register("game_end", GameEndHandler);
   engine.commands.register("choose_dialogue_option", ChooseDialogueOptionHandler);
+  engine.commands.register("select_dialogue_topic", SelectDialogueTopicHandler);
   engine.commands.register("buy_shop_item", BuyShopItemHandler);
   engine.commands.register("sell_inventory_item", SellInventoryItemHandler);
   engine.commands.register("melee_attack", MeleeAttackHandler);

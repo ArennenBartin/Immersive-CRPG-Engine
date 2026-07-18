@@ -6,8 +6,10 @@ import {
   FINE_PER_MACRO,
   advanceImmersivePerceptionForSave,
   createImmersiveIlluminationSnapshotFromV1,
+  createSimulationSnapshotFromV1,
   createImmersiveViewerVisibilityFromV1,
   dispatchV1EmitSound,
+  dispatchV1PushObject,
   dispatchV1UpdateCombatSession,
   expandGamePackageToFine,
   fineCenterOfMacro,
@@ -18,16 +20,27 @@ import {
 import type { PlaySave } from "../src/schema/save";
 import { entityPlacementStateKey } from "../src/utils/entityState";
 import {
+  buildAuthoritativeFogPresentationPlan,
   classifyFogRenderStateForCells,
   fogCellKey,
+  resolveFogCurtainProfile,
 } from "../src/utils/fogOfWar";
 import {
+  AUTHORITATIVE_GROUND_LIGHT_VISUAL_FLOOR,
   STRUCTURE_EMISSIVE_FILL_MAX,
   STRUCTURE_EMISSIVE_FILL_MIN,
+  resolveAuthoritativeGroundLightPresentationStrength,
+  hasAuthoritativePresentLight,
+  resolveStaticFogMaterialPolicy,
   resolveStructureEmissiveFillStrength,
   resolveStructureFootprintIllumination,
 } from "../src/utils/lightRendering";
-import { fineCellsCoveredByWorldMacroCell } from "../src/utils/renderSpace";
+import { applyPlacementDeltas } from "../src/utils/objectFootprint";
+import {
+  fineCellsCoveredByWorldMacroCell,
+  logicalCellToWorld,
+  worldPointToWorldMacroCell,
+} from "../src/utils/renderSpace";
 
 let passed = 0;
 let failed = 0;
@@ -124,10 +137,53 @@ console.log("perception contract: authored acceptance chamber");
           channel.stimulus_tags?.includes("glass"),
       ) === true,
   );
+  check(
+    "dominant profiles retain weaker baseline senses while preserving their specialty",
+    (profiles[0]?.channels.find((channel) => channel.id === "illuminated_sight")
+      ?.view_cone_degrees || 0) >= 140 &&
+      profiles[0]?.channels.some((channel) => channel.stimulus_kinds.includes("sound")) === true &&
+      profiles[1]?.channels.some((channel) => channel.stimulus_kinds.includes("visible_player")) === true &&
+      profiles[2]?.channels.some((channel) => channel.stimulus_kinds.includes("sound")) === true,
+  );
+  check(
+    "Glass sensitivity explicitly locks a carried source only after acquisition",
+    profiles[2]?.channels.some(
+      (channel) =>
+        channel.stimulus_kinds.includes("light") &&
+        channel.requires_los &&
+        channel.tracks_live_target &&
+        channel.source_tracking === "lock_after_acquisition",
+    ) === true,
+  );
 }
 
 console.log("perception contract: authoritative illumination");
 {
+  const presentationSamples = [0, 0.06, 0.18, 0.36, 0.54, 0.72, 0.9, 1].map(
+    resolveAuthoritativeGroundLightPresentationStrength,
+  );
+  check(
+    "ground-light presentation preserves the source while dissolving its weak tail into fog",
+    AUTHORITATIVE_GROUND_LIGHT_VISUAL_FLOOR === 0.06 &&
+      presentationSamples[0] === 0 &&
+      presentationSamples[1] === 0 &&
+      presentationSamples[2] < 0.01 &&
+      presentationSamples[3] < 0.1 &&
+      presentationSamples[5] > 0.55 &&
+      presentationSamples[6] > 0.9 &&
+      presentationSamples[7] === 1 &&
+      presentationSamples.every(
+        (value, index) => index === 0 || value >= presentationSamples[index - 1],
+      ),
+    `samples=${presentationSamples.map((value) => value.toFixed(3)).join(",")}`,
+  );
+  check(
+    "barely perceptible light retains the memory backdrop without changing Senses",
+    !hasAuthoritativePresentLight(0.08) &&
+      !hasAuthoritativePresentLight(0.2) &&
+      !hasAuthoritativePresentLight(0.3) &&
+      hasAuthoritativePresentLight(0.36),
+  );
   const wallFootprint = fineCellsCoveredByWorldMacroCell(-1, -2);
   const wallSamples = new Map(
     wallFootprint.map((cell, index) => [
@@ -359,6 +415,65 @@ console.log("perception contract: reciprocal sight, occlusion, and fog layers");
       !smokeBlocked.acquired,
   );
 
+  const smokeLightOrigin: [number, number] = [0, 1];
+  const smokeLightTarget: [number, number] = [4, 1];
+  const smokeLightSave = makeSave(smokeLightOrigin, {
+    inventory: [{ id: "qa_portable_lamp", count: 1 }],
+    map_deltas: {
+      [map.id]: { taken_items: [portableLampPlacement.id] },
+    },
+  });
+  const smokeLightSnapshot = createImmersiveIlluminationSnapshotFromV1(
+    gamePackage,
+    smokeLightSave,
+    map.id,
+  );
+  const smokeLightAtTarget = queryImmersiveIlluminationAtCell(
+    smokeLightSnapshot,
+    smokeLightTarget,
+  );
+  const smokeLightContribution = smokeLightAtTarget.contributions.find(
+    (entry) => entry.source_id.includes("light:carried:player"),
+  );
+  const smokeLightAcquisition = queryImmersiveVisualAcquisition(
+    gamePackage,
+    smokeLightSave,
+    {
+      map_id: map.id,
+      observer_cell: smokeLightOrigin,
+      target_cell: smokeLightTarget,
+      max_range: 20,
+    },
+  );
+  const smokeLightVisibility = createImmersiveViewerVisibilityFromV1(
+    gamePackage,
+    smokeLightSave,
+    map.id,
+    { viewer_cell: smokeLightOrigin, max_range: 20 },
+  );
+  const authoredSmokeCells = map.cells.filter(
+    (cell) =>
+      cell.x >= 1 &&
+      cell.x <= 3 &&
+      cell.z >= 0 &&
+      cell.z <= 2 &&
+      cell.tag === "smoke_obscurance",
+  );
+  check(
+    "walkable smoke hides actors without becoming a black illumination wall",
+    authoredSmokeCells.length === 9 &&
+      authoredSmokeCells.every((cell) => cell.walkable && !cell.blocks_los) &&
+      smokeLightAcquisition.line_of_sight &&
+      smokeLightAcquisition.smoke_transmission <= 0.1 &&
+      !smokeLightAcquisition.acquired &&
+      Boolean(smokeLightContribution) &&
+      smokeLightContribution!.transmission >= 0.45 &&
+      smokeLightAtTarget.value >= smokeLightVisibility.minimum_light &&
+      includesCell(smokeLightVisibility.terrain_visible, smokeLightTarget) &&
+      !includesCell(smokeLightVisibility.currently_visible, smokeLightTarget),
+    `sight=${smokeLightAcquisition.smoke_transmission} light=${smokeLightContribution?.transmission} illumination=${smokeLightAtTarget.value}`,
+  );
+
   const remoteLampCell: [number, number] = [7, 2];
   const discoveredOnlyCell: [number, number] = [9, -9];
   const sensedOnlyCell: [number, number] = [8, -8];
@@ -395,9 +510,9 @@ console.log("perception contract: reciprocal sight, occlusion, and fog layers");
     gamePackage,
     terrainViewerSave,
     map.id,
-    { viewer_cell: terrainViewerCell, max_range: 8 },
+    { viewer_cell: terrainViewerCell, max_range: 12 },
   );
-  const lowScoreLitWall: [number, number] = [4, -3];
+  const lowScoreLitWall: [number, number] = [1, -2];
   const occludedLitWall: [number, number] = [10, -3];
   const lowScoreWallAcquisition = queryImmersiveVisualAcquisition(
     gamePackage,
@@ -406,7 +521,7 @@ console.log("perception contract: reciprocal sight, occlusion, and fog layers");
       map_id: map.id,
       observer_cell: terrainViewerCell,
       target_cell: lowScoreLitWall,
-      max_range: 8,
+      max_range: 12,
     },
   );
   const occludedWallAcquisition = queryImmersiveVisualAcquisition(
@@ -416,7 +531,7 @@ console.log("perception contract: reciprocal sight, occlusion, and fog layers");
       map_id: map.id,
       observer_cell: terrainViewerCell,
       target_cell: occludedLitWall,
-      max_range: 8,
+      max_range: 12,
     },
   );
   check(
@@ -452,6 +567,118 @@ console.log("perception contract: reciprocal sight, occlusion, and fog layers");
   );
 
   const finePackage = expandGamePackageToFine(gamePackage);
+  const fineSpawnCell = fineCenterOfMacro([0, 8]);
+  const fineOpenFloorTarget = fineCenterOfMacro([4, 8]);
+  const fineTerminalSave = makeSave(
+    [fineSpawnCell[0], fineSpawnCell[1]],
+    {
+      inventory: [{ id: "qa_portable_lamp", count: 1 }],
+      map_deltas: {
+        [map.id]: { taken_items: [portableLampPlacement.id] },
+      },
+    },
+  );
+  const fineTerminalSimulation = createSimulationSnapshotFromV1(
+    finePackage,
+    fineTerminalSave,
+    map.id,
+  );
+  const terminalOccupants = fineTerminalSimulation.cells.flatMap((cell) =>
+    cell.occupants
+      .filter((occupant) => occupant.label === "Info Terminal")
+      .map((occupant) => ({ cell: cell.cell, occupant })),
+  );
+  const openFloorAcquisition = queryImmersiveVisualAcquisition(
+    finePackage,
+    fineTerminalSave,
+    {
+      map_id: map.id,
+      observer_cell: [fineSpawnCell[0], fineSpawnCell[1]],
+      target_cell: [fineOpenFloorTarget[0], fineOpenFloorTarget[1]],
+      max_range: 10 * FINE_PER_MACRO,
+    },
+  );
+  const fineTerminalVisibility = createImmersiveViewerVisibilityFromV1(
+    finePackage,
+    fineTerminalSave,
+    map.id,
+  );
+  const fineTargetCell = fineTerminalSimulation.cells.find(
+    (cell) => sameCell(cell.cell, fineOpenFloorTarget),
+  );
+  check(
+    "solid props block movement without becoming phantom LOS walls",
+    terminalOccupants.length === FINE_PER_MACRO * FINE_PER_MACRO &&
+      terminalOccupants.every(({ occupant }) =>
+        occupant.blocks_movement && !occupant.blocks_los,
+      ) &&
+      Boolean(fineTargetCell?.active) &&
+      Boolean(fineTargetCell?.walkable) &&
+      !fineTargetCell?.blocks_los &&
+      openFloorAcquisition.line_of_sight &&
+      openFloorAcquisition.illumination >=
+        fineTerminalVisibility.minimum_light &&
+      includesCell(
+        fineTerminalVisibility.terrain_visible,
+        [fineOpenFloorTarget[0], fineOpenFloorTarget[1]],
+      ),
+    `los=${openFloorAcquisition.line_of_sight} light=${openFloorAcquisition.illumination}`,
+  );
+
+  const fineSmokeObserver = fineCenterOfMacro([2, 3]);
+  const fineSmokeTarget = fineCenterOfMacro([2, -1]);
+  const fineSmokeSave = makeSave(
+    [fineSmokeTarget[0], fineSmokeTarget[1]],
+  );
+  const fineSmokeAcquisition = queryImmersiveVisualAcquisition(
+    finePackage,
+    fineSmokeSave,
+    {
+      map_id: map.id,
+      observer_cell: [fineSmokeObserver[0], fineSmokeObserver[1]],
+      target_cell: [fineSmokeTarget[0], fineSmokeTarget[1]],
+      max_range: 20 * FINE_PER_MACRO,
+    },
+  );
+  const fineSmokeLightOrigin = fineCenterOfMacro(smokeLightOrigin);
+  const fineSmokeLightTarget = fineCenterOfMacro(smokeLightTarget);
+  const fineSmokeLightSave = makeSave(
+    [fineSmokeLightOrigin[0], fineSmokeLightOrigin[1]],
+    {
+    inventory: [{ id: "qa_portable_lamp", count: 1 }],
+    map_deltas: {
+      [map.id]: { taken_items: [portableLampPlacement.id] },
+    },
+    },
+  );
+  const fineSmokeLightAtTarget = queryImmersiveIlluminationAtCell(
+    createImmersiveIlluminationSnapshotFromV1(
+      finePackage,
+      fineSmokeLightSave,
+      map.id,
+    ),
+    [fineSmokeLightTarget[0], fineSmokeLightTarget[1]],
+  );
+  const fineSmokeLightContribution = fineSmokeLightAtTarget.contributions.find(
+    (entry) => entry.source_id.includes("light:carried:player"),
+  );
+  check(
+    "fine-grid expansion preserves separate sight and light smoke optical depths",
+    smokeBlocked.line_of_sight &&
+      fineSmokeAcquisition.line_of_sight &&
+      Math.abs(
+        smokeBlocked.smoke_transmission -
+          fineSmokeAcquisition.smoke_transmission,
+      ) < 0.0001 &&
+      Boolean(smokeLightContribution) &&
+      Boolean(fineSmokeLightContribution) &&
+      Math.abs(
+        smokeLightContribution!.transmission -
+          fineSmokeLightContribution!.transmission,
+      ) < 0.0001,
+    `sight macro=${smokeBlocked.smoke_transmission} fine=${fineSmokeAcquisition.smoke_transmission}; light macro=${smokeLightContribution?.transmission} fine=${fineSmokeLightContribution?.transmission}`,
+  );
+
   const fineViewerCell = fineCenterOfMacro([0, 3]);
   const fineBoundarySave = makeSave(
     [fineViewerCell[0], fineViewerCell[1]],
@@ -467,6 +694,12 @@ console.log("perception contract: reciprocal sight, occlusion, and fog layers");
     fineBoundarySave,
     map.id,
   );
+  const finePerceptionMap = finePackage.maps.find(
+    (candidate) => candidate.id === map.id,
+  );
+  if (!finePerceptionMap) {
+    throw new Error("Fine QA package is missing qa_perception_lab");
+  }
   const boundaryWallCells = fineCellsCoveredByWorldMacroCell(1, -2);
   const boundaryVisibleKeys = new Set(
     fineBoundaryVisibility.terrain_visible.map((cell) =>
@@ -487,6 +720,335 @@ console.log("perception contract: reciprocal sight, occlusion, and fog layers");
         boundaryVisibleKeys,
         boundaryDiscoveredKeys,
       ) === "visible",
+  );
+  const fogPresentationPlan = buildAuthoritativeFogPresentationPlan({
+    cells: finePerceptionMap.cells,
+    gridSpace: "fine",
+    fineRatio: FINE_PER_MACRO,
+    fogEnabled: true,
+    terrainVisible: boundaryVisibleKeys,
+    discovered: boundaryDiscoveredKeys,
+  });
+  const boundaryWallPresentation = fogPresentationPlan.find(
+    (cell) => cell.world_cell[0] === 1 && cell.world_cell[1] === -2,
+  );
+  const plannedFineKeys = fogPresentationPlan.flatMap((cell) =>
+    cell.fine_cells.map((fineCell) => fogCellKey(fineCell[0], fineCell[1])),
+  );
+  const runtimeFineKeys = new Set(
+    finePerceptionMap.cells.map((cell) => fogCellKey(cell.x, cell.z)),
+  );
+  check(
+    "geometry and overlay share one complete macro fog presentation plan",
+    fogPresentationPlan.length === map.cells.length &&
+      plannedFineKeys.length === runtimeFineKeys.size &&
+      new Set(plannedFineKeys).size === runtimeFineKeys.size &&
+      plannedFineKeys.every((key) => runtimeFineKeys.has(key)) &&
+      // A single visible edge retains and promotes the whole authored wall
+      // mesh, matching the Phase 2–3 macro presentation contract.
+      boundaryWallPresentation?.state === "visible" &&
+      boundaryWallPresentation.fine_cells.length ===
+        FINE_PER_MACRO * FINE_PER_MACRO,
+    `plan=${fogPresentationPlan.length} wall=${boundaryWallPresentation?.state}`,
+  );
+
+  const visibleMaterial = resolveStaticFogMaterialPolicy("visible");
+  const exploredMaterial = resolveStaticFogMaterialPolicy("explored");
+  const unseenMaterial = resolveStaticFogMaterialPolicy("unseen");
+  check(
+    "static fog materials preserve lit color, retain dark memory, and black out unseen geometry",
+    visibleMaterial.brightness === 1 &&
+      visibleMaterial.preserveEmission &&
+      exploredMaterial.brightness > 0 &&
+      exploredMaterial.brightness < 0.2 &&
+      !exploredMaterial.preserveEmission &&
+      unseenMaterial.brightness === 0 &&
+      !unseenMaterial.preserveEmission,
+  );
+  const openUnseenCurtain = resolveFogCurtainProfile("unseen", false);
+  const wallUnseenCurtain = resolveFogCurtainProfile("unseen", true);
+  const openExploredCurtain = resolveFogCurtainProfile("explored", false);
+  const wallExploredCurtain = resolveFogCurtainProfile("explored", true);
+  check(
+    "open-floor fog uses a low mist skirt while real blocker edges retain full curtains",
+    !openUnseenCurtain.full_height &&
+      !openExploredCurtain.full_height &&
+      openUnseenCurtain.height <= 0.5 &&
+      openExploredCurtain.height <= 0.5 &&
+      wallUnseenCurtain.full_height &&
+      wallExploredCurtain.full_height &&
+      wallUnseenCurtain.height > openUnseenCurtain.height * 4 &&
+      wallExploredCurtain.height > openExploredCurtain.height * 4 &&
+      wallUnseenCurtain.opacity > openUnseenCurtain.opacity &&
+      wallExploredCurtain.opacity > openExploredCurtain.opacity,
+  );
+}
+
+console.log("perception contract: angular sight and carried-source tracing");
+{
+  const sightPlacementIndex = map.entity_placements.findIndex(
+    (placement) => placement.entity_id === "qa_sight_watcher",
+  );
+  const glassPlacementIndex = map.entity_placements.findIndex(
+    (placement) => placement.entity_id === "qa_light_glass_watcher",
+  );
+  if (sightPlacementIndex < 0 || glassPlacementIndex < 0) {
+    throw new Error("QA perception lab is missing a sight/source observer");
+  }
+  const sightActorKey = entityPlacementStateKey(
+    map.id,
+    map.entity_placements[sightPlacementIndex],
+    sightPlacementIndex,
+  );
+  const glassActorKey = entityPlacementStateKey(
+    map.id,
+    map.entity_placements[glassPlacementIndex],
+    glassPlacementIndex,
+  );
+  const carriedLampSave = (cell: [number, number], overrides: Partial<PlaySave> = {}) =>
+    makeSave(cell, {
+      inventory: [{ id: "qa_portable_lamp", count: 1 }],
+      map_deltas: {
+        [map.id]: { taken_items: [portableLampPlacement.id] },
+      },
+      ...overrides,
+    });
+
+  const offAxisSight = advanceImmersivePerceptionForSave(
+    gamePackage,
+    carriedLampSave([3, -3]),
+    map.id,
+  ).snapshot.alerts.find((alert) => alert.actor_id === sightActorKey);
+  const sideBlindSpot = advanceImmersivePerceptionForSave(
+    gamePackage,
+    carriedLampSave([3, -5]),
+    map.id,
+  ).snapshot.alerts.find((alert) => alert.actor_id === sightActorKey);
+  const authoredLongRange = advanceImmersivePerceptionForSave(
+    gamePackage,
+    carriedLampSave([0, 4]),
+    map.id,
+  ).snapshot.alerts.find((alert) => alert.actor_id === sightActorKey);
+  const directlyBehind = advanceImmersivePerceptionForSave(
+    gamePackage,
+    carriedLampSave([0, -8]),
+    map.id,
+  ).snapshot.alerts.find((alert) => alert.actor_id === sightActorKey);
+  check(
+    "sight uses an angular peripheral cone instead of a cardinal-only lane",
+    offAxisSight?.stimulus.kind === "visible_player" &&
+      offAxisSight.alertness === "combat" &&
+      sideBlindSpot === undefined &&
+      directlyBehind === undefined,
+  );
+  check(
+    "visible-player sight honors the channel's authored range beyond eight cells",
+    authoredLongRange?.stimulus.kind === "visible_player" &&
+      authoredLongRange.alertness === "combat",
+  );
+  const narrowVectorPackage = {
+    ...gamePackage,
+    entities: gamePackage.entities.map((entity) =>
+      entity.id === "qa_sight_watcher" && entity.sensory_profile
+        ? {
+            ...entity,
+            sensory_profile: {
+              ...entity.sensory_profile,
+              channels: entity.sensory_profile.channels.map((channel) =>
+                channel.id === "illuminated_sight"
+                  ? { ...channel, view_cone_degrees: 10 }
+                  : channel,
+              ),
+            },
+          }
+        : entity,
+    ),
+  } as typeof gamePackage;
+  const authoredVectorSight = advanceImmersivePerceptionForSave(
+    narrowVectorPackage,
+    carriedLampSave([2, -4], {
+      entity_states: { [sightActorKey]: { facing: [2, 1] } },
+    }),
+    map.id,
+  ).snapshot.alerts.find((alert) => alert.actor_id === sightActorKey);
+  check(
+    "angular sight preserves authored non-cardinal facing vectors",
+    authoredVectorSight?.stimulus.kind === "visible_player" &&
+      authoredVectorSight.alertness === "combat",
+  );
+
+  const directGlassContact = advanceImmersivePerceptionForSave(
+    gamePackage,
+    carriedLampSave([6, -5]),
+    map.id,
+  );
+  const directGlassState = directGlassContact.save.entity_states[glassActorKey];
+  const directGlassAlert = directGlassContact.snapshot.alerts.find(
+    (alert) => alert.actor_id === glassActorKey,
+  );
+  const serializedContact = JSON.parse(
+    JSON.stringify(directGlassContact.save),
+  ) as PlaySave;
+  const tracedGlassContact = advanceImmersivePerceptionForSave(
+    gamePackage,
+    {
+      ...serializedContact,
+      player: { ...serializedContact.player, cell: [3, -5] },
+    },
+    map.id,
+  );
+  const tracedGlassState = tracedGlassContact.save.entity_states[glassActorKey];
+  const tracedGlassAlert = tracedGlassContact.snapshot.alerts.find(
+    (alert) => alert.actor_id === glassActorKey,
+  );
+  const freshOccludedContact = advanceImmersivePerceptionForSave(
+    gamePackage,
+    carriedLampSave([3, -5]),
+    map.id,
+  ).snapshot.alerts.find((alert) => alert.actor_id === glassActorKey);
+  check(
+    "direct Glass contact records the exact carried source and carrier",
+    directGlassAlert?.cause === "glass_sensitivity" &&
+      directGlassAlert.source_traced === false &&
+      directGlassState?.perception_tracked_source_id ===
+        directGlassAlert.stimulus.source_id &&
+      directGlassState?.target_actor_id === "player" &&
+      directGlassState?.alertness === "searching",
+  );
+  check(
+    "a serialized source lock traces that same carried source behind LOS without granting combat",
+    tracedGlassAlert?.cause === "glass_sensitivity" &&
+      tracedGlassAlert.source_traced === true &&
+      tracedGlassAlert.alertness === "searching" &&
+      sameCell(tracedGlassAlert.target_cell, [3, -5]) &&
+      tracedGlassState?.perception_tracked_source_id ===
+        directGlassState?.perception_tracked_source_id &&
+      tracedGlassState?.target_actor_id === "player",
+  );
+  check(
+    "an occluded Glass source cannot be acquired through a wall without a prior lock",
+    freshOccludedContact === undefined,
+  );
+
+  const concealedCarrierPackage = {
+    ...gamePackage,
+    items: gamePackage.items.map((item) =>
+      item.id === "qa_portable_lamp" && item.light_source
+        ? {
+            ...item,
+            light_source: { ...item.light_source, exposes_carrier: false },
+          }
+        : item,
+    ),
+  } as typeof gamePackage;
+  const concealedCarrierContact = advanceImmersivePerceptionForSave(
+    concealedCarrierPackage,
+    carriedLampSave([6, -5]),
+    map.id,
+  );
+  const concealedCarrierAlert = concealedCarrierContact.snapshot.alerts.find(
+    (alert) => alert.actor_id === glassActorKey,
+  );
+  const concealedCarrierState =
+    concealedCarrierContact.save.entity_states[glassActorKey];
+  check(
+    "a perceptible carried light cannot identify or trace a carrier when exposes_carrier is disabled",
+    concealedCarrierAlert?.cause === "glass_sensitivity" &&
+      concealedCarrierAlert.stimulus.source_actor_id === undefined &&
+      concealedCarrierAlert.tracks_live_target === false &&
+      concealedCarrierAlert.tracked_source_id === undefined &&
+      concealedCarrierState?.perception_tracked_source_id === undefined &&
+      concealedCarrierState?.target_actor_id === undefined,
+  );
+
+  const extinguishedTrace = advanceImmersivePerceptionForSave(
+    gamePackage,
+    {
+      ...tracedGlassContact.save,
+      flags: {
+        ...tracedGlassContact.save.flags,
+        immersive_light_states: { "item:qa_portable_lamp": false },
+      },
+    },
+    map.id,
+  );
+  const extinguishedState = extinguishedTrace.save.entity_states[glassActorKey];
+  check(
+    "extinguishing the carried source breaks live tracing and keeps only last-known memory",
+    !extinguishedTrace.snapshot.alerts.some(
+      (alert) =>
+        alert.actor_id === glassActorKey &&
+        alert.tracked_source_id === directGlassState?.perception_tracked_source_id,
+    ) &&
+      extinguishedState?.perception_tracks_live_target === false &&
+      extinguishedState?.perception_tracked_source_id === undefined &&
+      extinguishedState?.target_actor_id === undefined &&
+      sameCell(extinguishedState?.last_known_position, [3, -5]),
+  );
+}
+
+console.log("perception contract: physical actions become hearing evidence");
+{
+  const crate = map.custom_object_placements.find(
+    (placement) => placement.id === "qa_noise_crate",
+  );
+  const hunterIndex = map.entity_placements.findIndex(
+    (placement) => placement.entity_id === "qa_sound_hunter",
+  );
+  if (!crate || hunterIndex < 0) {
+    throw new Error("QA perception lab is missing its noise crate or hearing hunter");
+  }
+  const hunterKey = entityPlacementStateKey(
+    map.id,
+    map.entity_placements[hunterIndex],
+    hunterIndex,
+  );
+  const pushed = dispatchV1PushObject({
+    gamePackage,
+    save: makeSave([-7, 5]),
+    actorId: "player",
+    x: crate.cell[0],
+    y: crate.cell[1],
+    dx: 0,
+    dy: -1,
+  });
+  const pushPayload = pushed.events.find(
+    (event) => event.type === "object_pushed",
+  )?.payload as { to?: [number, number] } | undefined;
+  const pushSound = Object.values(
+    pushed.save.map_deltas?.[map.id]?.environment_fields || {},
+  )
+    .flat()
+    .find(
+      (field) =>
+        field.kind === "sound" &&
+        field.frequency_tag === "object_push" &&
+        Boolean(
+          pushPayload?.to &&
+            sameCell(field.origin_cell || [Number.NaN, Number.NaN], pushPayload.to),
+        ),
+    );
+  const perceivedPush = advanceImmersivePerceptionForSave(
+    gamePackage,
+    pushed.save,
+    map.id,
+  );
+  const hunterState = perceivedPush.save.entity_states[hunterKey];
+  const hunterTask = perceivedPush.save.map_deltas?.[map.id]?.npc_tasks?.find(
+    (task) =>
+      task.actor_id === hunterKey &&
+      task.source_kind === "sound" &&
+      task.task_type === "investigate",
+  );
+  check(
+    "pushing the QA crate emits systemic sound and makes the hearing hunter investigate its origin",
+    pushed.ok &&
+      Boolean(pushPayload?.to) &&
+      Boolean(pushSound) &&
+      hunterState?.last_detection_cause === "heard" &&
+      sameCell(hunterState?.last_known_position, pushPayload!.to!) &&
+      Boolean(hunterTask) &&
+      sameCell(hunterTask!.target_cell, pushPayload!.to!),
   );
 }
 
@@ -679,6 +1241,150 @@ console.log("perception contract: combat requires detection");
     detected.ok &&
       detected.save.in_combat === true &&
       detected.events.some((event) => event.type === "combat_started"),
+  );
+}
+
+console.log("perception contract: pushed-object render visibility");
+{
+  const finePackage = expandGamePackageToFine(gamePackage);
+  const fineMap = finePackage.maps.find(
+    (candidate) => candidate.id === map.id,
+  );
+  if (!fineMap) throw new Error("Fine QA package is missing qa_perception_lab");
+  const crate = fineMap.custom_object_placements.find(
+    (placement) => placement.id === "qa_noise_crate",
+  );
+  if (!crate) throw new Error("Fine QA perception lab is missing its pushable crate");
+
+  const playerCell: [number, number] = [crate.cell[0] - 1, crate.cell[1]];
+  const pushed = dispatchV1PushObject({
+    gamePackage: finePackage,
+    save: {
+      ...makeSave(playerCell),
+      inventory: [{ id: "qa_portable_lamp", count: 1 }],
+      map_deltas: {
+        [map.id]: { taken_items: [portableLampPlacement.id] },
+      },
+    },
+    x: crate.cell[0],
+    y: crate.cell[1],
+    dx: 1,
+    dy: 0,
+  });
+  const destination: [number, number] = [crate.cell[0] + 1, crate.cell[1]];
+  const pushedDelta = pushed.save.map_deltas?.[map.id];
+  const effectiveCrate = applyPlacementDeltas(
+    fineMap.custom_object_placements,
+    pushedDelta,
+  ).find((placement) => placement.id === crate.id);
+  const visibility = createImmersiveViewerVisibilityFromV1(
+    finePackage,
+    pushed.save,
+    map.id,
+    { viewer_cell: playerCell },
+  );
+  const renderedDestination = logicalCellToWorld(
+    destination,
+    "fine",
+    FINE_PER_MACRO,
+  );
+  const destinationFogCell = worldPointToWorldMacroCell(
+    renderedDestination[0],
+    renderedDestination[1],
+    "fine",
+    FINE_PER_MACRO,
+  );
+  const visibilityKeys = new Set(
+    visibility.terrain_visible.map((cell) => fogCellKey(cell[0], cell[1])),
+  );
+  const discoveredKeys = new Set(
+    visibility.discovered.map((cell) => fogCellKey(cell[0], cell[1])),
+  );
+  const fogPlan = buildAuthoritativeFogPresentationPlan({
+    cells: fineMap.cells,
+    gridSpace: "fine",
+    fineRatio: FINE_PER_MACRO,
+    fogEnabled: true,
+    terrainVisible: visibilityKeys,
+    discovered: discoveredKeys,
+  });
+  const destinationFogState = new Map(
+    fogPlan.map((cell) => [cell.key, cell.state]),
+  ).get(fogCellKey(destinationFogCell[0], destinationFogCell[1]));
+  check(
+    "a fractional pushed prop resolves to its owning visible macro fog cell",
+    pushed.ok &&
+      Boolean(pushedDelta?.moved_objects?.[crate.id!]) &&
+      Boolean(effectiveCrate) &&
+      sameCell(effectiveCrate!.cell as [number, number], destination) &&
+      includesCell(visibility.terrain_visible, destination) &&
+      !Number.isInteger(renderedDestination[0]) &&
+      sameCell(destinationFogCell, [-7, 4]) &&
+      destinationFogState === "visible",
+    `ok=${pushed.ok} placement=${effectiveCrate?.cell.join(":")} world=${renderedDestination.join(":")} fog=${destinationFogCell.join(":")}:${destinationFogState}`,
+  );
+
+  const positiveInterior = logicalCellToWorld([5, 4], "fine", FINE_PER_MACRO);
+  const beforePositiveBoundary = logicalCellToWorld(
+    [2, 4],
+    "fine",
+    FINE_PER_MACRO,
+  );
+  const afterPositiveBoundary = logicalCellToWorld(
+    [3, 4],
+    "fine",
+    FINE_PER_MACRO,
+  );
+  check(
+    "render-space fog normalization handles positive fractions and macro-boundary pushes",
+    sameCell(
+      worldPointToWorldMacroCell(
+        positiveInterior[0],
+        positiveInterior[1],
+        "fine",
+        FINE_PER_MACRO,
+      ),
+      [1, 1],
+    ) &&
+      sameCell(
+        worldPointToWorldMacroCell(
+          beforePositiveBoundary[0],
+          beforePositiveBoundary[1],
+          "fine",
+          FINE_PER_MACRO,
+        ),
+        [0, 1],
+      ) &&
+      sameCell(
+        worldPointToWorldMacroCell(
+          afterPositiveBoundary[0],
+          afterPositiveBoundary[1],
+          "fine",
+          FINE_PER_MACRO,
+        ),
+        [1, 1],
+      ),
+    `interior=${positiveInterior.join(":")} before=${beforePositiveBoundary.join(":")} after=${afterPositiveBoundary.join(":")}`,
+  );
+
+  const restoredSave = JSON.parse(JSON.stringify(pushed.save)) as PlaySave;
+  const restoredDelta = restoredSave.map_deltas?.[map.id];
+  const restoredCrate = applyPlacementDeltas(
+    fineMap.custom_object_placements,
+    restoredDelta,
+  ).find((placement) => placement.id === crate.id);
+  const restoredVisibility = createImmersiveViewerVisibilityFromV1(
+    finePackage,
+    restoredSave,
+    map.id,
+    { viewer_cell: playerCell },
+  );
+  check(
+    "a pushed prop retains its moved render cell and visibility after a save JSON round-trip",
+    Boolean(restoredCrate) &&
+      sameCell(restoredCrate!.cell as [number, number], destination) &&
+      includesCell(restoredVisibility.terrain_visible, destination),
+    `placement=${restoredCrate?.cell.join(":")} visible=${includesCell(restoredVisibility.terrain_visible, destination)}`,
   );
 }
 

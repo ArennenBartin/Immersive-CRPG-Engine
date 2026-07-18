@@ -25,6 +25,10 @@ import { markMapManuallyModified } from "../generation-facing/mapContract";
 import { assertStudioRuntimeSupport } from "../engine-core/studioRuntimeSupport";
 import type { DungeonPackageBakeResult } from "../dungeonGen/packageBake";
 import { usePlayStore } from "./playStore";
+import {
+  migrateLegacyDialoguePackage,
+  validateKeywordDialoguePackage,
+} from "../engine-core/keywordDialogue";
 export type {
   MigrationChange,
   MigrationWarning,
@@ -200,20 +204,45 @@ const pickSelectedMapId = (pkg: GamePackage, currentId: string | null) => {
 const normalizeImportedPackage = (pkg: GamePackage): PackageMigrationResult => {
   const warnings: MigrationWarning[] = [];
   const changes: MigrationChange[] = [];
-  const startMap = pkg.maps.find((map) => map.id === pkg.metadata.start_map_id);
+  // Import is observational. We run a migration preview so authors receive a
+  // readable report, but the untouched legacy graph is loaded until they use
+  // Dialogue Studio's explicit Scan and migrate action. This keeps every line,
+  // edge, condition, and hook recoverable before confirmation.
+  const migrationPreview = migrateLegacyDialoguePackage(pkg);
+  const candidate = pkg;
+  if (migrationPreview.migratedDialogueIds.length) {
+    warnings.push({
+      code: "legacy_dialogue_detected",
+      path: "dialogue",
+      message: `Detected ${migrationPreview.migratedDialogueIds.length} legacy dialogue graph${migrationPreview.migratedDialogueIds.length === 1 ? "" : "s"}. Open Dialogue Studio → Migration to review and convert them; import preserved the original data unchanged.`,
+    });
+    migrationPreview.issues.forEach((issue) => warnings.push({
+      code: issue.code.toLowerCase(),
+      path: issue.path,
+      message: issue.message,
+    }));
+  }
+  validateKeywordDialoguePackage(candidate)
+    .filter((issue) => issue.severity === "warning")
+    .forEach((issue) => warnings.push({
+      code: issue.code.toLowerCase(),
+      path: issue.path,
+      message: issue.message,
+    }));
+  const startMap = candidate.maps.find((map) => map.id === candidate.metadata.start_map_id);
   if (startMap) {
-    if (!startMap.spawns.some((spawn) => spawn.id === pkg.metadata.start_spawn_id)) {
+    if (!startMap.spawns.some((spawn) => spawn.id === candidate.metadata.start_spawn_id)) {
       warnings.push({
         code: "invalid_start_spawn",
         path: "metadata",
-        message: `Start spawn ${pkg.metadata.start_spawn_id} does not exist on ${startMap.id}; package content was preserved unchanged.`,
+        message: `Start spawn ${candidate.metadata.start_spawn_id} does not exist on ${startMap.id}; package content was preserved unchanged.`,
       });
     }
-  } else if (pkg.maps.length) {
+  } else if (candidate.maps.length) {
     warnings.push({
       code: "invalid_start_map",
       path: "metadata.start_map_id",
-      message: `Start map ${pkg.metadata.start_map_id} does not exist; package content was preserved unchanged.`,
+      message: `Start map ${candidate.metadata.start_map_id} does not exist; package content was preserved unchanged.`,
     });
   } else {
     warnings.push({
@@ -226,7 +255,7 @@ const normalizeImportedPackage = (pkg: GamePackage): PackageMigrationResult => {
   // Schema parsing above may fill defaults for fields declared by Zod. Beyond
   // that, ordinary import is deliberately observational: it reports bad
   // references but never refreshes art, rewrites maps, or repairs metadata.
-  const result = finalizePackageMigration(pkg, pkg, { warnings, changes });
+  const result = finalizePackageMigration(pkg, candidate, { warnings, changes });
   assertUnconfirmedMapPreservation(pkg, result);
   return result;
 };
@@ -263,8 +292,9 @@ export const serializePackageForExport = (pkg: GamePackage): string => {
       .join("; ");
     throw new Error(`Current package is not exportable: ${issues}`);
   }
-  assertStudioRuntimeSupport(result.data);
-  return JSON.stringify(migrateGamePackageV1ToV2(result.data), null, 2);
+  const migrated = migrateLegacyDialoguePackage(result.data).package;
+  assertStudioRuntimeSupport(migrated);
+  return JSON.stringify(migrateGamePackageV1ToV2(migrated), null, 2);
 };
 
 const canUseIndexedDb = () => typeof window !== "undefined" && "indexedDB" in window;

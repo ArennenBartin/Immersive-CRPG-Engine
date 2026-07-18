@@ -261,6 +261,20 @@ export function AdaptiveQualityProbe({
   const lastFrameMsRef = useRef<number | null>(null);
   const lastCheckMsRef = useRef(0);
   const stableChecksRef = useRef(0);
+  const dprUpdateQueuedRef = useRef(false);
+
+  const queueDprUpdate = (direction: "lower" | "raise") => {
+    if (dprUpdateQueuedRef.current) return;
+    dprUpdateQueuedRef.current = true;
+    queueMicrotask(() => {
+      dprUpdateQueuedRef.current = false;
+      setDpr((current) =>
+        direction === "lower"
+          ? Math.max(minDpr, Number((current - 0.08).toFixed(2)))
+          : Math.min(maxDpr, Number((current + 0.04).toFixed(2))),
+      );
+    });
+  };
 
   useFrame((state) => {
     const now = state.clock.elapsedTime * 1000;
@@ -276,20 +290,24 @@ export function AdaptiveQualityProbe({
     const sorted = [...samples].sort((a, b) => a - b);
     const p95 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))];
     const max = sorted[sorted.length - 1];
-    // Compare against the renderer's intended cadence. Performance mode is
-    // deliberately capped below 60 fps; treating its ~22 ms interval as a
-    // missed 16.7 ms frame caused a DPR change and a full play-tree render
-    // every 1.5 seconds until the minimum was reached.
+    // Compare against the renderer's intended bounded cadence instead of the
+    // physical display refresh rate. This keeps adaptive DPR from chasing a
+    // ProMotion panel or repeatedly rebuilding the play tree at a stable cap.
     const overloadAverageMs = frameBudgetMs * 1.23;
     const overloadP95Ms = frameBudgetMs * 1.44;
     const recoveryAverageMs = frameBudgetMs * 1.12;
     const recoveryP95Ms = frameBudgetMs * 1.2;
+    // Close this sampling window before requesting a React update. The R3F
+    // frame callback must never re-enter PlayEngine with the same over-budget
+    // sample batch still live.
+    samplesRef.current = [];
+    lastCheckMsRef.current = now;
     if (
       (avg > overloadAverageMs || p95 > overloadP95Ms || max > 95) &&
       dpr > minDpr
     ) {
       stableChecksRef.current = 0;
-      setDpr((current) => Math.max(minDpr, Number((current - 0.08).toFixed(2))));
+      queueDprUpdate("lower");
     } else if (
       avg < recoveryAverageMs &&
       p95 < recoveryP95Ms &&
@@ -299,13 +317,11 @@ export function AdaptiveQualityProbe({
       stableChecksRef.current += 1;
       if (stableChecksRef.current >= 4) {
         stableChecksRef.current = 0;
-        setDpr((current) => Math.min(maxDpr, Number((current + 0.04).toFixed(2))));
+        queueDprUpdate("raise");
       }
     } else {
       stableChecksRef.current = 0;
     }
-    samplesRef.current = [];
-    lastCheckMsRef.current = now;
   });
 
   return null;

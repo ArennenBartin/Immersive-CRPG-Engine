@@ -11,6 +11,15 @@ const isBlank = (value: unknown) =>
   value === "" ||
   (Array.isArray(value) && value.length === 0);
 
+const parseScalar = (raw: string): string | number | boolean | undefined => {
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  if (trimmed === "true") return true;
+  if (trimmed === "false") return false;
+  const numeric = Number(trimmed);
+  return Number.isFinite(numeric) && String(numeric) === trimmed ? numeric : trimmed;
+};
+
 const cleanCondition = (condition: ConditionData): ConditionData | undefined => {
   const entries = Object.entries(condition).filter(([, value]) => !isBlank(value));
   if (entries.length === 0) return undefined;
@@ -45,6 +54,16 @@ const conditionSummary = (condition?: ConditionData) => {
   if (condition.hour_gte !== undefined || condition.hour_lt !== undefined) {
     parts.push(`hour ${condition.hour_gte ?? 0}-${condition.hour_lt ?? 24}`);
   }
+  if (condition.variable) parts.push(`variable ${condition.variable}`);
+  if (condition.relationship) parts.push(`relationship ${condition.relationship}`);
+  if (condition.current_map) parts.push(`map ${condition.current_map}`);
+  if (condition.current_expedition) parts.push(`expedition ${condition.current_expedition}`);
+  if (condition.current_intercessor) parts.push(`Intercessor ${condition.current_intercessor}`);
+  if (condition.prior_intercessor) parts.push(`past Intercessor ${condition.prior_intercessor}`);
+  if (condition.read_document) parts.push(`read ${condition.read_document}`);
+  if (condition.known_topic) parts.push(`knows ${condition.known_topic}`);
+  if (condition.topic_asked) parts.push(`asked ${condition.topic_asked}`);
+  if (condition.entity_state_id) parts.push(`state ${condition.entity_state_id}.${condition.entity_state_field || "?"}`);
   if (condition.all?.length) parts.push(`all(${condition.all.length})`);
   if (condition.any?.length) parts.push(`any(${condition.any.length})`);
   if (condition.not) parts.push("not(...)");
@@ -84,7 +103,10 @@ export function ConditionEditor({
       visit(condition.not);
     };
     gamePackage.dialogue.forEach((dialogue) =>
-      dialogue.nodes.forEach((node) => node.options.forEach((opt) => visit(opt.condition))),
+      {
+        dialogue.nodes.forEach((node) => node.options.forEach((opt) => visit(opt.condition)));
+        dialogue.responses?.forEach((response) => visit(response.condition));
+      },
     );
     gamePackage.cutscenes.forEach((cutscene) =>
       cutscene.actions.forEach((action) => {
@@ -340,6 +362,186 @@ export function ConditionEditor({
                 value={value?.rep_lte ?? ""}
                 onChange={(event) => setMaybeNumber("rep_lte", event.target.value)}
                 placeholder="max"
+                className="rounded border border-neutral-800 bg-black px-2 py-1.5 text-xs text-white"
+              />
+            </div>
+          </Labeled>
+
+          <Labeled label="Variable">
+            <div className="grid grid-cols-2 gap-2">
+              <input
+                value={value?.variable || ""}
+                onChange={(event) => update({ variable: event.target.value || undefined })}
+                placeholder="variable_id"
+                className="rounded border border-neutral-800 bg-black px-2 py-1.5 text-xs text-white"
+              />
+              <input
+                value={value?.variable_value === undefined ? "" : String(value.variable_value)}
+                onChange={(event) => update({ variable_value: parseScalar(event.target.value) })}
+                placeholder="exact value"
+                className="rounded border border-neutral-800 bg-black px-2 py-1.5 text-xs text-white"
+              />
+              <input
+                type="number"
+                value={value?.variable_gte ?? ""}
+                onChange={(event) => setMaybeNumber("variable_gte", event.target.value)}
+                placeholder="minimum"
+                className="rounded border border-neutral-800 bg-black px-2 py-1.5 text-xs text-white"
+              />
+              <input
+                type="number"
+                value={value?.variable_lte ?? ""}
+                onChange={(event) => setMaybeNumber("variable_lte", event.target.value)}
+                placeholder="maximum"
+                className="rounded border border-neutral-800 bg-black px-2 py-1.5 text-xs text-white"
+              />
+            </div>
+          </Labeled>
+
+          <Labeled label="Relationship">
+            <div className="grid grid-cols-3 gap-2">
+              <input
+                list="condition-relationship-ids"
+                value={value?.relationship || ""}
+                onChange={(event) => update({ relationship: event.target.value || undefined })}
+                placeholder="stable person id"
+                className="rounded border border-neutral-800 bg-black px-2 py-1.5 text-xs text-white"
+              />
+              <datalist id="condition-relationship-ids">
+                {gamePackage.entities.map((entity) => <option key={entity.id} value={entity.id} />)}
+                {gamePackage.dynamic_topics?.map((topic) => <option key={topic.record_id} value={topic.record_id} />)}
+              </datalist>
+              <input
+                type="number"
+                value={value?.relationship_gte ?? ""}
+                onChange={(event) => setMaybeNumber("relationship_gte", event.target.value)}
+                placeholder="min"
+                className="rounded border border-neutral-800 bg-black px-2 py-1.5 text-xs text-white"
+              />
+              <input
+                type="number"
+                value={value?.relationship_lte ?? ""}
+                onChange={(event) => setMaybeNumber("relationship_lte", event.target.value)}
+                placeholder="max"
+                className="rounded border border-neutral-800 bg-black px-2 py-1.5 text-xs text-white"
+              />
+            </div>
+          </Labeled>
+
+          <Labeled label="Current Location / Expedition">
+            <div className="grid grid-cols-2 gap-2">
+              <select
+                value={value?.current_map || ""}
+                onChange={(event) => update({ current_map: event.target.value || undefined })}
+                className="rounded border border-neutral-800 bg-black px-2 py-1.5 text-xs text-white"
+              >
+                <option value="">Any map</option>
+                {gamePackage.maps.map((map) => <option key={map.id} value={map.id}>{map.display_name || map.id}</option>)}
+              </select>
+              <input
+                value={value?.current_expedition || ""}
+                onChange={(event) => update({ current_expedition: event.target.value || undefined })}
+                placeholder="expedition id"
+                className="rounded border border-neutral-800 bg-black px-2 py-1.5 text-xs text-white"
+              />
+            </div>
+          </Labeled>
+
+          <Labeled label="Intercessor Memory">
+            <div className="grid grid-cols-2 gap-2">
+              <input
+                value={value?.current_intercessor || ""}
+                onChange={(event) => update({ current_intercessor: event.target.value || undefined })}
+                placeholder="current record id"
+                className="rounded border border-neutral-800 bg-black px-2 py-1.5 text-xs text-white"
+              />
+              <input
+                value={value?.prior_intercessor || ""}
+                onChange={(event) => update({ prior_intercessor: event.target.value || undefined })}
+                placeholder="past record id"
+                className="rounded border border-neutral-800 bg-black px-2 py-1.5 text-xs text-white"
+              />
+            </div>
+          </Labeled>
+
+          <Labeled label="World Knowledge">
+            <div className="grid grid-cols-2 gap-2">
+              <select
+                value={value?.read_document || ""}
+                onChange={(event) => update({ read_document: event.target.value || undefined })}
+                className="rounded border border-neutral-800 bg-black px-2 py-1.5 text-xs text-white"
+              >
+                <option value="">Any document state</option>
+                {gamePackage.documents.map((document) => <option key={document.id} value={document.id}>{document.display_name}</option>)}
+              </select>
+              <select
+                value={value?.known_topic || ""}
+                onChange={(event) => update({ known_topic: event.target.value || undefined })}
+                className="rounded border border-neutral-800 bg-black px-2 py-1.5 text-xs text-white"
+              >
+                <option value="">Any vocabulary state</option>
+                {gamePackage.keywords?.map((topic) => <option key={topic.id} value={topic.id}>{topic.display_label}</option>)}
+                {gamePackage.dynamic_topics?.map((topic) => <option key={topic.id} value={topic.id}>{topic.display_name} (dynamic)</option>)}
+              </select>
+            </div>
+          </Labeled>
+
+          <Labeled label="Topic Asked">
+            <div className="grid grid-cols-2 gap-2">
+              <select
+                value={value?.topic_asked || ""}
+                onChange={(event) => update({ topic_asked: event.target.value || undefined })}
+                className="rounded border border-neutral-800 bg-black px-2 py-1.5 text-xs text-white"
+              >
+                <option value="">No ask-count condition</option>
+                {gamePackage.keywords?.map((topic) => <option key={topic.id} value={topic.id}>{topic.display_label}</option>)}
+                {gamePackage.dynamic_topics?.map((topic) => <option key={`dynamic:${topic.id}`} value={`dynamic:${topic.id}`}>{topic.display_name} (dynamic)</option>)}
+              </select>
+              <select
+                value={value?.topic_asked_dialogue || ""}
+                onChange={(event) => update({ topic_asked_dialogue: event.target.value || undefined })}
+                className="rounded border border-neutral-800 bg-black px-2 py-1.5 text-xs text-white"
+              >
+                <option value="">Across all participants</option>
+                {gamePackage.dialogue.map((dialogue) => <option key={dialogue.id} value={dialogue.id}>{dialogue.display_name}</option>)}
+              </select>
+              <input
+                type="number"
+                min={0}
+                value={value?.topic_ask_count_gte ?? ""}
+                onChange={(event) => setMaybeNumber("topic_ask_count_gte", event.target.value)}
+                placeholder="minimum asks"
+                className="rounded border border-neutral-800 bg-black px-2 py-1.5 text-xs text-white"
+              />
+              <input
+                type="number"
+                min={0}
+                value={value?.topic_ask_count_lte ?? ""}
+                onChange={(event) => setMaybeNumber("topic_ask_count_lte", event.target.value)}
+                placeholder="maximum asks"
+                className="rounded border border-neutral-800 bg-black px-2 py-1.5 text-xs text-white"
+              />
+            </div>
+          </Labeled>
+
+          <Labeled label="NPC / Entity State">
+            <div className="grid grid-cols-3 gap-2">
+              <input
+                value={value?.entity_state_id || ""}
+                onChange={(event) => update({ entity_state_id: event.target.value || undefined })}
+                placeholder="entity or placement key"
+                className="rounded border border-neutral-800 bg-black px-2 py-1.5 text-xs text-white"
+              />
+              <input
+                value={value?.entity_state_field || ""}
+                onChange={(event) => update({ entity_state_field: event.target.value || undefined })}
+                placeholder="alive / dead / state"
+                className="rounded border border-neutral-800 bg-black px-2 py-1.5 text-xs text-white"
+              />
+              <input
+                value={value?.entity_state_value === undefined ? "" : String(value.entity_state_value)}
+                onChange={(event) => update({ entity_state_value: parseScalar(event.target.value) })}
+                placeholder="value"
                 className="rounded border border-neutral-800 bg-black px-2 py-1.5 text-xs text-white"
               />
             </div>

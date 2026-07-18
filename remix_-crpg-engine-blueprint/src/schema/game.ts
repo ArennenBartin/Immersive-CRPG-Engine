@@ -49,6 +49,30 @@ export interface ConditionData {
   // hour_gte > hour_lt (e.g. 22 → 5).
   hour_gte?: number;
   hour_lt?: number;
+  // General campaign/runtime variables. Dialogue uses these for authored
+  // state that is numeric or textual rather than a boolean switch.
+  variable?: string;
+  variable_value?: string | number | boolean;
+  variable_gte?: number;
+  variable_lte?: number;
+  // Relationship values are stored per stable entity/record id.
+  relationship?: string;
+  relationship_gte?: number;
+  relationship_lte?: number;
+  // World and conversation-memory predicates used by keyword responses.
+  current_map?: string;
+  current_expedition?: string;
+  current_intercessor?: string;
+  prior_intercessor?: string;
+  read_document?: string;
+  known_topic?: string;
+  topic_asked?: string;
+  topic_asked_dialogue?: string;
+  topic_ask_count_gte?: number;
+  topic_ask_count_lte?: number;
+  entity_state_id?: string;
+  entity_state_field?: string;
+  entity_state_value?: string | number | boolean;
   // Combinators.
   not?: ConditionData;
   all?: ConditionData[];
@@ -70,6 +94,26 @@ export const ConditionSchema: z.ZodType<ConditionData> = z.lazy(() =>
     time_of_day: z.union([z.string(), z.array(z.string())]).optional(),
     hour_gte: z.number().optional(),
     hour_lt: z.number().optional(),
+    variable: z.string().optional(),
+    variable_value: z.union([z.string(), z.number(), z.boolean()]).optional(),
+    variable_gte: z.number().optional(),
+    variable_lte: z.number().optional(),
+    relationship: z.string().optional(),
+    relationship_gte: z.number().optional(),
+    relationship_lte: z.number().optional(),
+    current_map: z.string().optional(),
+    current_expedition: z.string().optional(),
+    current_intercessor: z.string().optional(),
+    prior_intercessor: z.string().optional(),
+    read_document: z.string().optional(),
+    known_topic: z.string().optional(),
+    topic_asked: z.string().optional(),
+    topic_asked_dialogue: z.string().optional(),
+    topic_ask_count_gte: z.number().optional(),
+    topic_ask_count_lte: z.number().optional(),
+    entity_state_id: z.string().optional(),
+    entity_state_field: z.string().optional(),
+    entity_state_value: z.union([z.string(), z.number(), z.boolean()]).optional(),
     not: ConditionSchema.optional(),
     all: z.array(ConditionSchema).optional(),
     any: z.array(ConditionSchema).optional(),
@@ -164,13 +208,39 @@ export const SensoryChannelSchema = z.object({
   stimulus_kinds: z
     .array(z.enum(["light", "sound", "fire", "smoke", "danger_gas", "visible_player"])),
   stimulus_tags: z.array(z.string()).optional(),
+  // Ignored tags take precedence over the positive tag filter. This lets an
+  // otherwise ordinary hearing channel exclude footsteps (or Glass, voices,
+  // impacts, etc.) without requiring a parallel perception implementation.
+  ignored_stimulus_tags: z.array(z.string()).default([]),
+  // Per-tag score modifiers are multiplied together when more than one tag
+  // matches. A zero multiplier is therefore an authored mute for that tag.
+  stimulus_tag_multipliers: z
+    .record(z.string(), z.number().finite().min(0))
+    .default({}),
   range: z.number().finite().min(0).default(8),
   threshold: z.number().finite().min(0).max(1).default(0.2),
   sensitivity: z.number().finite().min(0).default(1),
+  // A fraction of the actor's previous score that a fresh, matching sound may
+  // add. Zero preserves pre-hearing behavior for legacy authored channels.
+  repeated_sound_gain: z.number().finite().min(0).max(1).default(0),
+  // Authored in macro cells and scaled by the runtime on fine-grid packages.
+  positional_uncertainty: z.number().finite().min(0).default(0),
+  // "reduced" halves world barrier attenuation; "ignore" bypasses it. This
+  // only affects sound and does not alter visual line-of-sight behavior.
+  barrier_response: z.enum(["normal", "reduced", "ignore"]).default("normal"),
   requires_los: z.boolean().default(false),
   requires_view_cone: z.boolean().default(false),
+  // Full angular field of view. Only read when requires_view_cone is true.
+  // 120 degrees gives ordinary actors useful peripheral sight without
+  // allowing them to see directly behind themselves.
+  view_cone_degrees: z.number().finite().min(1).max(360).default(120),
   requires_illumination: z.boolean().default(false),
   tracks_live_target: z.boolean().default(false),
+  // A carried source may remain identifiable briefly after direct contact.
+  // The lock is source-id based and never grants visual perception/combat.
+  source_tracking: z
+    .enum(["none", "lock_after_acquisition"])
+    .default("none"),
 });
 
 export const SensoryProfileSchema = z.object({
@@ -437,6 +507,9 @@ export const EntitySchema = z.object({
   // Optional dialogue used when this entity is in the party and the player
   // uses "Talk to Party". Falls back to dialogue_id when unset.
   party_dialogue_id: z.string().optional(),
+  // Topics learned simply by meeting / speaking with this stable entity.
+  discover_topic_ids: z.array(z.string()).optional(),
+  discover_dynamic_topic_ids: z.array(z.string()).optional(),
   is_npc: z.boolean().default(false),
   max_hp: z.number().default(10),
   max_mp: z.number().default(0),
@@ -580,6 +653,10 @@ export const ItemSchema = z.object({
   simulation: SimulationAuthoredProfileSchema.optional(),
   spatial: ItemSpatialProfileSchema.optional(),
   light_source: LightSourceProfileSchema.optional(),
+  // Recovering or examining an authored artifact can teach vocabulary without
+  // embedding dialogue behavior in the inventory system.
+  discover_topic_ids: z.array(z.string()).optional(),
+  discover_dynamic_topic_ids: z.array(z.string()).optional(),
 });
 
 export const EventActionSchema = z.object({
@@ -591,6 +668,9 @@ export const EventActionSchema = z.object({
     "wait",
     "teleport_player",
     "play_sound",
+    // Mechanical sound is simulation evidence. It is deliberately separate
+    // from play_sound, which only plays an audible presentation asset.
+    "emit_sound",
     "start_combat",
     "give_item",
     "remove_item",
@@ -603,6 +683,9 @@ export const EventActionSchema = z.object({
     "remove_currency",
     "add_party_member",
     "remove_party_member",
+    // Presentation-safe vocabulary discovery used by documents, locations,
+    // objects, quests, artifacts, and explicit scripts.
+    "unlock_topic",
     // Control flow: `label` is a no-op jump target; `branch` jumps to
     // `target_label` when `condition` passes (or unconditionally if absent).
     "label",
@@ -646,6 +729,13 @@ export const EventActionSchema = z.object({
   music_id: z.string().optional(), // for play_music (settings.music_tracks key)
   music_url: z.string().optional(), // for play_music (direct URL / data URL)
   sound_id: z.string().optional(), // for play_sound (settings.sound_effects key)
+  sound_loudness: z.number().finite().positive().optional(), // for emit_sound, in macro cells
+  sound_tag: z.string().optional(), // for emit_sound frequency/event identity
+  sound_category: z.string().optional(), // for hearing category filters
+  sound_material_tag: z.string().optional(), // optional acoustic surface/material
+  sound_duration_ticks: z.number().int().positive().optional(),
+  reveals_identity: z.boolean().optional(),
+  stimulus_tags: z.array(z.string()).optional(),
   volume: z.number().optional(), // for play_music (0..1)
   fade: z.enum(["in", "out"]).optional(), // for screen_fade
   color: z.string().optional(), // for screen_fade
@@ -656,6 +746,8 @@ export const EventActionSchema = z.object({
   ending_id: z.string().optional(), // for game_end
   title: z.string().optional(), // for game_end override
   liquid_id: z.string().optional(), // for chem_spill: water | honey | oil | miasma | fire
+  topic_id: z.string().optional(), // for unlock_topic
+  dynamic_topic_id: z.string().optional(), // for unlock_topic
 });
 
 export const CutsceneSchema = z.object({
@@ -730,6 +822,10 @@ export const MapDataSchema = z.object({
   width: z.number(),
   height: z.number(),
   ambient_light: z.number().finite().min(0).max(1).optional(),
+  // Entering a location may teach stable vocabulary without exposing any
+  // dialogue text or coupling map discovery to a particular NPC.
+  discover_topic_ids: z.array(z.string()).optional(),
+  discover_dynamic_topic_ids: z.array(z.string()).optional(),
   spawns: z.array(
     z.object({
       id: z.string(),
@@ -1019,10 +1115,150 @@ export const DialogueNodeSchema = z.object({
   options: z.array(DialogueOptionSchema).default([]),
 });
 
+export const DialogueKeywordScopeSchema = z.enum([
+  "conversation",
+  "expedition",
+  "campaign",
+]);
+
+export const DialogueKeywordCategorySchema = z.enum([
+  "subjects",
+  "people",
+  "intercessors",
+  "places",
+  "objects",
+  "events",
+  "beliefs",
+  "actions",
+]);
+
+export const DialogueActionKindSchema = z.enum([
+  "silence",
+  "goodbye",
+  "show_item",
+  "give_item",
+  "join",
+  "wait",
+  "trade",
+  "console",
+  "attend",
+  "recruit",
+  "dismiss",
+  "leave",
+  "custom",
+]);
+
+// A keyword's stable id is its save identity. `display_label` is deliberately
+// mutable so authors can rename a topic without invalidating learned-memory.
+export const DialogueKeywordSchema = z.object({
+  id: z.string().min(1),
+  display_label: z.string().min(1),
+  category: DialogueKeywordCategorySchema.default("subjects"),
+  scope: DialogueKeywordScopeSchema.default("expedition"),
+  dynamic_capable: z.boolean().default(false),
+  known_by_default: z.boolean().default(false),
+  important: z.boolean().default(false),
+  action_kind: DialogueActionKindSchema.optional(),
+  description: z.string().optional(),
+});
+
+// Authored dynamic records seed exact runtime-created subjects. Runtime may
+// create additional records with this same shape inside the save.
+export const DialogueDynamicTopicSchema = z.object({
+  id: z.string().min(1),
+  keyword_id: z.string().min(1),
+  record_id: z.string().min(1),
+  display_name: z.string().min(1),
+  category: DialogueKeywordCategorySchema.optional(),
+  scope: DialogueKeywordScopeSchema.default("campaign"),
+  source: z.string().default("authored"),
+  known_by_default: z.boolean().default(false),
+  response_associations: z.record(z.string(), z.array(z.string())).default({}),
+});
+
+export const DialogueTopicMentionSchema = z.object({
+  phrase: z.string().min(1),
+  topic_id: z.string().optional(),
+  dynamic_topic_id: z.string().optional(),
+  discover: z.boolean().default(true),
+});
+
+export const DialogueResponseSchema = z.object({
+  id: z.string().min(1),
+  // Compatibility entry point for cutscenes that used to open a particular
+  // legacy node. Native topic conversations normally leave this unset.
+  entry_node_id: z.string().optional(),
+  topic_id: z.string().optional(),
+  dynamic_topic_id: z.string().optional(),
+  role: z
+    .enum(["opening", "normal", "first", "repeat", "fallback", "sequential"])
+    .default("normal"),
+  sequence_index: z.number().int().nonnegative().optional(),
+  speaker: z.string().optional(),
+  text: z.string(),
+  priority: z.number().int().default(0),
+  condition: ConditionSchema.optional(),
+  mentions: z.array(DialogueTopicMentionSchema).default([]),
+  unlock_topic_ids: z.array(z.string()).default([]),
+  unlock_dynamic_topic_ids: z.array(z.string()).default([]),
+  // Topics promoted into the compact contextual list without necessarily
+  // changing their persistence scope.
+  context_topic_ids: z.array(z.string()).default([]),
+  context_dynamic_topic_ids: z.array(z.string()).default([]),
+  shown_item_id: z.string().optional(),
+  shown_item_category: z
+    .enum(["consumable", "weapon", "armor", "key"])
+    .optional(),
+  shown_item_blueprint_id: z.string().optional(),
+  shown_item_previously_shown: z.boolean().optional(),
+  set_switches: z
+    .array(
+      z.object({
+        switch_id: z.string(),
+        switch_value: z.boolean().optional(),
+      }),
+    )
+    .default([]),
+  set_quest_id: z.string().optional(),
+  set_quest_state: z.string().optional(),
+  trigger_cutscene_id: z.string().optional(),
+  effects_repeatable: z.boolean().default(false),
+  end_conversation: z.boolean().default(false),
+  scene_image_url: z.string().optional(),
+  scene_image_alt: z.string().optional(),
+  type: z.enum(["dialogue", "attend"]).optional(),
+  attend_node: AlderamonticoAttendNodeSchema.optional(),
+});
+
+export const DialogueLegacyMigrationIssueSchema = z.object({
+  code: z.string(),
+  path: z.string(),
+  message: z.string(),
+  original_text: z.string().optional(),
+  generated_topic_id: z.string().optional(),
+});
+
+export const DialogueLegacyMigrationSchema = z.object({
+  status: z.enum(["review_required", "ready", "confirmed"]).default("review_required"),
+  migrated_at: z.string(),
+  source_format: z.literal("legacy_tree"),
+  issues: z.array(DialogueLegacyMigrationIssueSchema).default([]),
+  // Kept intact until the author confirms migration; export/import preserves
+  // it even after confirmation so recovery remains possible.
+  original_nodes: z.array(DialogueNodeSchema).default([]),
+});
+
 export const DialogueSchema = z.object({
   id: z.string(),
   display_name: z.string(),
+  format: z.enum(["legacy_tree", "keyword_v1"]).optional(),
+  speaker: z.string().optional(),
   nodes: z.array(DialogueNodeSchema).default([]),
+  responses: z.array(DialogueResponseSchema).optional(),
+  initial_topic_ids: z.array(z.string()).optional(),
+  initial_dynamic_topic_ids: z.array(z.string()).optional(),
+  action_topic_ids: z.array(z.string()).optional(),
+  legacy_migration: DialogueLegacyMigrationSchema.optional(),
 });
 
 export const QuestObjectiveSchema = z.object({
@@ -1044,6 +1280,8 @@ export const DocumentSchema = z.object({
   id: z.string(),
   display_name: z.string(),
   content: z.string(),
+  discover_topic_ids: z.array(z.string()).optional(),
+  discover_dynamic_topic_ids: z.array(z.string()).optional(),
 });
 
 // Conditional price adjustment, applied in order: price * multiplier + delta.
@@ -1177,6 +1415,8 @@ export const GamePackageSchema = z.object({
   object_library: z.array(ObjectSchema).default([]),
   sprite_library: z.array(SpriteSchema).default([]),
   entities: z.array(EntitySchema).default([]),
+  keywords: z.array(DialogueKeywordSchema).default([]),
+  dynamic_topics: z.array(DialogueDynamicTopicSchema).default([]),
   dialogue: z.array(DialogueSchema).default([]),
   documents: z.array(DocumentSchema).default([]),
   quests: z.array(QuestSchema).default([]),
@@ -1245,6 +1485,11 @@ export type ObjectReferenceImageData = z.infer<typeof ObjectReferenceImageSchema
 export type SpriteData = z.infer<typeof SpriteSchema>;
 export type DialogueData = z.infer<typeof DialogueSchema>;
 export type DialogueNodeData = z.infer<typeof DialogueNodeSchema>;
+export type DialogueKeywordData = z.infer<typeof DialogueKeywordSchema>;
+export type DialogueKeywordScope = z.infer<typeof DialogueKeywordScopeSchema>;
+export type DialogueKeywordCategory = z.infer<typeof DialogueKeywordCategorySchema>;
+export type DialogueDynamicTopicData = z.infer<typeof DialogueDynamicTopicSchema>;
+export type DialogueResponseData = z.infer<typeof DialogueResponseSchema>;
 export type QuestData = z.infer<typeof QuestSchema>;
 export type QuestObjectiveData = z.infer<typeof QuestObjectiveSchema>;
 export type EntityData = z.infer<typeof EntitySchema>;
@@ -1719,6 +1964,8 @@ const createBaseGamePackage = (): GamePackage => ({
       skills: [],
     },
   ],
+  keywords: [],
+  dynamic_topics: [],
   dialogue: [
     {
       id: "dia_demo_guide",

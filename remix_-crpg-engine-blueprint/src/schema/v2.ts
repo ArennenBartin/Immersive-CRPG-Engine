@@ -44,11 +44,14 @@ export interface SaveRuntimeV2 {
   };
   story: {
     flags: PlaySave["flags"];
+    variables: NonNullable<PlaySave["variables"]>;
+    relationships: NonNullable<PlaySave["relationships"]>;
     quests: PlaySave["quests"];
     faction_rep: NonNullable<PlaySave["faction_rep"]>;
     read_documents: NonNullable<PlaySave["read_documents"]>;
     bark_cooldowns: NonNullable<PlaySave["bark_cooldowns"]>;
     game_end?: PlaySave["game_end"];
+    dialogue_memory?: PlaySave["dialogue_memory"];
   };
   actors: {
     entity_states: PlaySave["entity_states"];
@@ -61,6 +64,10 @@ export interface SaveRuntimeV2 {
   exploration: {
     map_deltas: NonNullable<PlaySave["map_deltas"]>;
     explored_cells: NonNullable<PlaySave["explored_cells"]>;
+  };
+  lifecycle: {
+    world_state_layers?: PlaySave["world_state_layers"];
+    intercessor_campaign?: PlaySave["intercessor_campaign"];
   };
   kernel: {
     world_facts: NonNullable<PlaySave["world_facts"]>;
@@ -163,6 +170,8 @@ const cloneSaveV1 = (save: PlaySave): PlaySave => ({
   pending_level_ups: save.pending_level_ups,
   known_skills: [...(save.known_skills || [])],
   flags: { ...(save.flags || {}) },
+  variables: save.variables ? { ...save.variables } : undefined,
+  relationships: save.relationships ? { ...save.relationships } : undefined,
   quests: { ...(save.quests || {}) },
   inventory: (save.inventory || []).map((entry) => ({ ...entry })),
   inventory_layout: save.inventory_layout
@@ -178,6 +187,13 @@ const cloneSaveV1 = (save: PlaySave): PlaySave => ({
   clock_minutes: save.clock_minutes,
   faction_rep: save.faction_rep ? { ...save.faction_rep } : undefined,
   read_documents: save.read_documents ? [...save.read_documents] : undefined,
+  dialogue_memory: save.dialogue_memory ? structuredClone(save.dialogue_memory) : undefined,
+  world_state_layers: save.world_state_layers
+    ? structuredClone(save.world_state_layers)
+    : undefined,
+  intercessor_campaign: save.intercessor_campaign
+    ? structuredClone(save.intercessor_campaign)
+    : undefined,
   explored_cells: save.explored_cells ? structuredClone(save.explored_cells) : undefined,
   bark_cooldowns: save.bark_cooldowns ? { ...save.bark_cooldowns } : undefined,
   game_end: save.game_end ? { ...save.game_end } : undefined,
@@ -235,11 +251,14 @@ export const buildSaveRuntimeV2 = (save: PlaySave): SaveRuntimeV2 => ({
   },
   story: {
     flags: { ...(save.flags || {}) },
+    variables: { ...(save.variables || {}) },
+    relationships: { ...(save.relationships || {}) },
     quests: { ...(save.quests || {}) },
     faction_rep: { ...(save.faction_rep || {}) },
     read_documents: [...(save.read_documents || [])],
     bark_cooldowns: { ...(save.bark_cooldowns || {}) },
     game_end: save.game_end ? { ...save.game_end } : undefined,
+    dialogue_memory: save.dialogue_memory ? structuredClone(save.dialogue_memory) : undefined,
   },
   actors: {
     entity_states: { ...(save.entity_states || {}) },
@@ -258,6 +277,14 @@ export const buildSaveRuntimeV2 = (save: PlaySave): SaveRuntimeV2 => ({
   exploration: {
     map_deltas: save.map_deltas ? structuredClone(save.map_deltas) : {},
     explored_cells: save.explored_cells ? structuredClone(save.explored_cells) : {},
+  },
+  lifecycle: {
+    world_state_layers: save.world_state_layers
+      ? structuredClone(save.world_state_layers)
+      : undefined,
+    intercessor_campaign: save.intercessor_campaign
+      ? structuredClone(save.intercessor_campaign)
+      : undefined,
   },
   kernel: {
     world_facts: save.world_facts ? structuredClone(save.world_facts) : [],

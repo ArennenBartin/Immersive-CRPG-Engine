@@ -9,6 +9,7 @@ import { expandGamePackageToFine } from "../src/engine-core/fineWorld";
 import { fineCoordKey } from "../src/engine-core/gridCoordinates";
 import { getPlacementFootprint } from "../src/utils/objectFootprint";
 import { isBuildingDoorPlacement } from "../src/utils/doorPlacement";
+import { auditGamePackageReferences } from "../src/generation-facing/referenceAudit";
 
 type Severity = "error" | "warning";
 
@@ -116,6 +117,15 @@ const auditPackage = (pkg: GamePackage) => {
       addIssue("error", "package", "schema", `${issue.path.join(".")}: ${issue.message}`);
     }
     return;
+  }
+
+  // Keep the map audit useful as the one-command QA gate for authored test
+  // packages: keyword conversation diagnostics are produced by the same pure
+  // validator Studio uses, then folded into this audit's existing output.
+  for (const issue of auditGamePackageReferences(parsed.data).issues) {
+    if (!issue.code.startsWith("DIALOGUE_")) continue;
+    if (issue.severity === "info") continue;
+    addIssue(issue.severity, issue.path, issue.code, issue.message);
   }
 
   const mapById = new Map(pkg.maps.map((map) => [map.id, map]));
