@@ -1,0 +1,233 @@
+{
+  "schema": "crpg_generated_intercessor_manifest_v1",
+  "source": "/overworld/generated/oblique/source/player_intercessor_atlas_raw.png",
+  "frameLayout": "4 columns south/north/west/east, 2 rows idle/step",
+  "sourceReference": "/sprites/player-pilgrim.png",
+  "alphaCleanup": "border-connected magenta/white background removed; square canvas padded for renderer",
+  "frames": [
+    {
+      "id": "south_idle",
+      "displayName": "Intercessor south idle",
+      "spriteId": "generated_player_intercessor_south_idle",
+      "url": "/overworld/generated/player/intercessor/south_idle.png",
+      "sourceCell": {
+        "row": 0,
+        "col": 0
+      },
+      "sourceBounds": {
+        "left": 0,
+        "top": 0,
+        "width": 314,
+        "height": 627
+      },
+      "output": {
+        "width": 627,
+        "height": 627
+      },
+      "visibleBounds": {
+        "left": 197,
+        "top": 57,
+        "width": 244,
+        "height": 507
+      },
+      "removedBackgroundPixels": 117960,
+      "removedFringePixels": 5557
+    },
+    {
+      "id": "north_idle",
+      "displayName": "Intercessor north idle",
+      "spriteId": "generated_player_intercessor_north_idle",
+      "url": "/overworld/generated/player/intercessor/north_idle.png",
+      "sourceCell": {
+        "row": 0,
+        "col": 1
+      },
+      "sourceBounds": {
+        "left": 314,
+        "top": 0,
+        "width": 313,
+        "height": 627
+      },
+      "output": {
+        "width": 627,
+        "height": 627
+      },
+      "visibleBounds": {
+        "left": 190,
+        "top": 59,
+        "width": 235,
+        "height": 493
+      },
+      "removedBackgroundPixels": 122827,
+      "removedFringePixels": 5038
+    },
+    {
+      "id": "west_idle",
+      "displayName": "Intercessor west idle",
+      "spriteId": "generated_player_intercessor_west_idle",
+      "url": "/overworld/generated/player/intercessor/west_idle.png",
+      "sourceCell": {
+        "row": 0,
+        "col": 2
+      },
+      "sourceBounds": {
+        "left": 627,
+        "top": 0,
+        "width": 314,
+        "height": 627
+      },
+      "output": {
+        "width": 627,
+        "height": 627
+      },
+      "visibleBounds": {
+        "left": 246,
+        "top": 58,
+        "width": 182,
+        "height": 499
+      },
+      "removedBackgroundPixels": 139454,
+      "removedFringePixels": 4710
+    },
+    {
+      "id": "east_idle",
+      "displayName": "Intercessor east idle",
+      "spriteId": "generated_player_intercessor_east_idle",
+      "url": "/overworld/generated/player/intercessor/east_idle.png",
+      "sourceCell": {
+        "row": 0,
+        "col": 3
+      },
+      "sourceBounds": {
+        "left": 941,
+        "top": 0,
+        "width": 313,
+        "height": 627
+      },
+      "output": {
+        "width": 627,
+        "height": 627
+      },
+      "visibleBounds": {
+        "left": 190,
+        "top": 58,
+        "width": 185,
+        "height": 498
+      },
+      "removedBackgroundPixels": 137593,
+      "removedFringePixels": 4811
+    },
+    {
+      "id": "south_step",
+      "displayName": "Intercessor south step",
+      "spriteId": "generated_player_intercessor_south_step",
+      "url": "/overworld/generated/player/intercessor/south_step.png",
+      "sourceCell": {
+        "row": 1,
+        "col": 0
+      },
+      "sourceBounds": {
+        "left": 0,
+        "top": 627,
+        "width": 314,
+        "height": 627
+      },
+      "output": {
+        "width": 627,
+        "height": 627
+      },
+      "visibleBounds": {
+        "left": 194,
+        "top": 54,
+        "width": 254,
+        "height": 502
+      },
+      "removedBackgroundPixels": 2187,
+      "removedFringePixels": 122874
+    },
+    {
+      "id": "north_step",
+      "displayName": "Intercessor north step",
+      "spriteId": "generated_player_intercessor_north_step",
+      "url": "/overworld/generated/player/intercessor/north_step.png",
+      "sourceCell": {
+        "row": 1,
+        "col": 1
+      },
+      "sourceBounds": {
+        "left": 314,
+        "top": 627,
+        "width": 313,
+        "height": 627
+      },
+      "output": {
+        "width": 627,
+        "height": 627
+      },
+      "visibleBounds": {
+        "left": 179,
+        "top": 58,
+        "width": 253,
+        "height": 488
+      },
+      "removedBackgroundPixels": 125934,
+      "removedFringePixels": 5140
+    },
+    {
+      "id": "west_step",
+      "displayName": "Intercessor west step",
+      "spriteId": "generated_player_intercessor_west_step",
+      "url": "/overworld/generated/player/intercessor/west_step.png",
+      "sourceCell": {
+        "row": 1,
+        "col": 2
+      },
+      "sourceBounds": {
+        "left": 627,
+        "top": 627,
+        "width": 314,
+        "height": 627
+      },
+      "output": {
+        "width": 627,
+        "height": 627
+      },
+      "visibleBounds": {
+        "left": 176,
+        "top": 60,
+        "width": 277,
+        "height": 474
+      },
+      "removedBackgroundPixels": 129347,
+      "removedFringePixels": 5467
+    },
+    {
+      "id": "east_step",
+      "displayName": "Intercessor east step",
+      "spriteId": "generated_player_intercessor_east_step",
+      "url": "/overworld/generated/player/intercessor/east_step.png",
+      "sourceCell": {
+        "row": 1,
+        "col": 3
+      },
+      "sourceBounds": {
+        "left": 941,
+        "top": 627,
+        "width": 313,
+        "height": 627
+      },
+      "output": {
+        "width": 627,
+        "height": 627
+      },
+      "visibleBounds": {
+        "left": 172,
+        "top": 59,
+        "width": 262,
+        "height": 476
+      },
+      "removedBackgroundPixels": 128654,
+      "removedFringePixels": 5354
+    }
+  ]
+}

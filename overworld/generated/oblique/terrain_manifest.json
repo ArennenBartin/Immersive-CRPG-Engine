@@ -1,0 +1,503 @@
+{
+  "schema": "crpg_oblique_terrain_manifest_v1",
+  "source": "/overworld/generated/oblique/source/terrain_atlas_raw.png",
+  "edgeBlendPixels": 5,
+  "tiles": [
+    {
+      "id": "grass",
+      "displayName": "Grass",
+      "spriteId": "oblique_tile_grass",
+      "url": "/overworld/generated/oblique/terrain/grass.png",
+      "sourceCell": {
+        "row": 0,
+        "col": 0
+      },
+      "sourceBounds": {
+        "left": 0,
+        "top": 2,
+        "width": 311,
+        "height": 311
+      },
+      "trimmedBounds": {
+        "left": 0,
+        "top": 0,
+        "width": 311,
+        "height": 311
+      },
+      "output": {
+        "width": 311,
+        "height": 311
+      },
+      "removedWhitePixels": 1176,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "dirt_path",
+      "displayName": "Dirt Path",
+      "spriteId": "oblique_tile_dirt_path",
+      "url": "/overworld/generated/oblique/terrain/dirt_path.png",
+      "sourceCell": {
+        "row": 0,
+        "col": 1
+      },
+      "sourceBounds": {
+        "left": 312,
+        "top": 2,
+        "width": 312,
+        "height": 311
+      },
+      "trimmedBounds": {
+        "left": 0,
+        "top": 0,
+        "width": 312,
+        "height": 311
+      },
+      "output": {
+        "width": 312,
+        "height": 311
+      },
+      "removedWhitePixels": 1339,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "packed_road",
+      "displayName": "Packed Road",
+      "spriteId": "oblique_tile_packed_road",
+      "url": "/overworld/generated/oblique/terrain/packed_road.png",
+      "sourceCell": {
+        "row": 0,
+        "col": 2
+      },
+      "sourceBounds": {
+        "left": 627,
+        "top": 2,
+        "width": 310,
+        "height": 311
+      },
+      "trimmedBounds": {
+        "left": 0,
+        "top": 0,
+        "width": 310,
+        "height": 311
+      },
+      "output": {
+        "width": 310,
+        "height": 311
+      },
+      "removedWhitePixels": 840,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "mud",
+      "displayName": "Mud",
+      "spriteId": "oblique_tile_mud",
+      "url": "/overworld/generated/oblique/terrain/mud.png",
+      "sourceCell": {
+        "row": 0,
+        "col": 3
+      },
+      "sourceBounds": {
+        "left": 941,
+        "top": 2,
+        "width": 310,
+        "height": 311
+      },
+      "trimmedBounds": {
+        "left": 0,
+        "top": 0,
+        "width": 310,
+        "height": 311
+      },
+      "output": {
+        "width": 310,
+        "height": 311
+      },
+      "removedWhitePixels": 1264,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "sand",
+      "displayName": "Sand",
+      "spriteId": "oblique_tile_sand",
+      "url": "/overworld/generated/oblique/terrain/sand.png",
+      "sourceCell": {
+        "row": 1,
+        "col": 0
+      },
+      "sourceBounds": {
+        "left": 0,
+        "top": 314,
+        "width": 311,
+        "height": 312
+      },
+      "trimmedBounds": {
+        "left": 0,
+        "top": 0,
+        "width": 310,
+        "height": 312
+      },
+      "output": {
+        "width": 310,
+        "height": 312
+      },
+      "removedWhitePixels": 1194,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "bare_stone",
+      "displayName": "Bare Stone",
+      "spriteId": "oblique_tile_bare_stone",
+      "url": "/overworld/generated/oblique/terrain/bare_stone.png",
+      "sourceCell": {
+        "row": 1,
+        "col": 1
+      },
+      "sourceBounds": {
+        "left": 312,
+        "top": 314,
+        "width": 312,
+        "height": 312
+      },
+      "trimmedBounds": {
+        "left": 0,
+        "top": 0,
+        "width": 312,
+        "height": 312
+      },
+      "output": {
+        "width": 312,
+        "height": 312
+      },
+      "removedWhitePixels": 1389,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "moss",
+      "displayName": "Moss",
+      "spriteId": "oblique_tile_moss",
+      "url": "/overworld/generated/oblique/terrain/moss.png",
+      "sourceCell": {
+        "row": 1,
+        "col": 2
+      },
+      "sourceBounds": {
+        "left": 627,
+        "top": 314,
+        "width": 310,
+        "height": 312
+      },
+      "trimmedBounds": {
+        "left": 0,
+        "top": 0,
+        "width": 310,
+        "height": 312
+      },
+      "output": {
+        "width": 310,
+        "height": 312
+      },
+      "removedWhitePixels": 941,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "grave_road",
+      "displayName": "Grave Road",
+      "spriteId": "oblique_tile_grave_road",
+      "url": "/overworld/generated/oblique/terrain/grave_road.png",
+      "sourceCell": {
+        "row": 1,
+        "col": 3
+      },
+      "sourceBounds": {
+        "left": 941,
+        "top": 314,
+        "width": 310,
+        "height": 312
+      },
+      "trimmedBounds": {
+        "left": 0,
+        "top": 0,
+        "width": 310,
+        "height": 312
+      },
+      "output": {
+        "width": 310,
+        "height": 312
+      },
+      "removedWhitePixels": 656,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "cairn_stone",
+      "displayName": "Cairn Stone",
+      "spriteId": "oblique_tile_cairn_stone",
+      "url": "/overworld/generated/oblique/terrain/cairn_stone.png",
+      "sourceCell": {
+        "row": 2,
+        "col": 0
+      },
+      "sourceBounds": {
+        "left": 0,
+        "top": 627,
+        "width": 311,
+        "height": 311
+      },
+      "trimmedBounds": {
+        "left": 0,
+        "top": 0,
+        "width": 310,
+        "height": 311
+      },
+      "output": {
+        "width": 310,
+        "height": 311
+      },
+      "removedWhitePixels": 1133,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "fen_reed",
+      "displayName": "Fen Reed",
+      "spriteId": "oblique_tile_fen_reed",
+      "url": "/overworld/generated/oblique/terrain/fen_reed.png",
+      "sourceCell": {
+        "row": 2,
+        "col": 1
+      },
+      "sourceBounds": {
+        "left": 312,
+        "top": 627,
+        "width": 312,
+        "height": 311
+      },
+      "trimmedBounds": {
+        "left": 0,
+        "top": 0,
+        "width": 312,
+        "height": 311
+      },
+      "output": {
+        "width": 312,
+        "height": 311
+      },
+      "removedWhitePixels": 1381,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "standing_water",
+      "displayName": "Standing Water",
+      "spriteId": "oblique_tile_standing_water",
+      "url": "/overworld/generated/oblique/terrain/standing_water.png",
+      "sourceCell": {
+        "row": 2,
+        "col": 2
+      },
+      "sourceBounds": {
+        "left": 627,
+        "top": 627,
+        "width": 310,
+        "height": 311
+      },
+      "trimmedBounds": {
+        "left": 0,
+        "top": 0,
+        "width": 310,
+        "height": 311
+      },
+      "output": {
+        "width": 310,
+        "height": 311
+      },
+      "removedWhitePixels": 949,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "tilled_field",
+      "displayName": "Tilled Field",
+      "spriteId": "oblique_tile_tilled_field",
+      "url": "/overworld/generated/oblique/terrain/tilled_field.png",
+      "sourceCell": {
+        "row": 2,
+        "col": 3
+      },
+      "sourceBounds": {
+        "left": 941,
+        "top": 627,
+        "width": 310,
+        "height": 311
+      },
+      "trimmedBounds": {
+        "left": 0,
+        "top": 0,
+        "width": 310,
+        "height": 311
+      },
+      "output": {
+        "width": 310,
+        "height": 311
+      },
+      "removedWhitePixels": 962,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "dark_garden",
+      "displayName": "Dark Garden",
+      "spriteId": "oblique_tile_dark_garden",
+      "url": "/overworld/generated/oblique/terrain/dark_garden.png",
+      "sourceCell": {
+        "row": 3,
+        "col": 0
+      },
+      "sourceBounds": {
+        "left": 0,
+        "top": 939,
+        "width": 311,
+        "height": 313
+      },
+      "trimmedBounds": {
+        "left": 0,
+        "top": 0,
+        "width": 311,
+        "height": 313
+      },
+      "output": {
+        "width": 311,
+        "height": 313
+      },
+      "removedWhitePixels": 1458,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "dense_brush",
+      "displayName": "Dense Brush",
+      "spriteId": "oblique_tile_dense_brush",
+      "url": "/overworld/generated/oblique/terrain/dense_brush.png",
+      "sourceCell": {
+        "row": 3,
+        "col": 1
+      },
+      "sourceBounds": {
+        "left": 312,
+        "top": 939,
+        "width": 312,
+        "height": 313
+      },
+      "trimmedBounds": {
+        "left": 0,
+        "top": 0,
+        "width": 312,
+        "height": 313
+      },
+      "output": {
+        "width": 312,
+        "height": 313
+      },
+      "removedWhitePixels": 1322,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "fractured_ground",
+      "displayName": "Fractured Ground",
+      "spriteId": "oblique_tile_fractured_ground",
+      "url": "/overworld/generated/oblique/terrain/fractured_ground.png",
+      "sourceCell": {
+        "row": 3,
+        "col": 2
+      },
+      "sourceBounds": {
+        "left": 627,
+        "top": 939,
+        "width": 310,
+        "height": 313
+      },
+      "trimmedBounds": {
+        "left": 0,
+        "top": 0,
+        "width": 310,
+        "height": 313
+      },
+      "output": {
+        "width": 310,
+        "height": 313
+      },
+      "removedWhitePixels": 910,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    },
+    {
+      "id": "glass_vein",
+      "displayName": "Glass Vein",
+      "spriteId": "oblique_tile_glass_vein",
+      "url": "/overworld/generated/oblique/terrain/glass_vein.png",
+      "sourceCell": {
+        "row": 3,
+        "col": 3
+      },
+      "sourceBounds": {
+        "left": 941,
+        "top": 939,
+        "width": 310,
+        "height": 313
+      },
+      "trimmedBounds": {
+        "left": 0,
+        "top": 0,
+        "width": 310,
+        "height": 313
+      },
+      "output": {
+        "width": 310,
+        "height": 313
+      },
+      "removedWhitePixels": 981,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0,
+        "topBottomAvg": 0
+      }
+    }
+  ]
+}

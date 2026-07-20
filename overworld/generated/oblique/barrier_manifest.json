@@ -1,0 +1,393 @@
+{
+  "schema": "crpg_oblique_barrier_manifest_v1",
+  "source": "/overworld/generated/oblique/source/barrier_atlas_raw.png",
+  "projection": "square_front_top_faces_no_map_symbols",
+  "edgeBlendPixels": 4,
+  "alphaCleanup": "border-connected white background removed",
+  "tiles": [
+    {
+      "id": "rough_wood_fence",
+      "displayName": "Rough Wood Fence",
+      "spriteId": "oblique_barrier_rough_wood_fence",
+      "url": "/overworld/generated/oblique/barrier/rough_wood_fence.png",
+      "sourceCell": {
+        "row": 0,
+        "col": 0
+      },
+      "sourceBounds": {
+        "left": 8,
+        "top": 11,
+        "width": 296,
+        "height": 296
+      },
+      "output": {
+        "width": 296,
+        "height": 296
+      },
+      "removedWhitePixels": 2142,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0
+      }
+    },
+    {
+      "id": "palisade_stakes",
+      "displayName": "Palisade Stakes",
+      "spriteId": "oblique_barrier_palisade_stakes",
+      "url": "/overworld/generated/oblique/barrier/palisade_stakes.png",
+      "sourceCell": {
+        "row": 0,
+        "col": 1
+      },
+      "sourceBounds": {
+        "left": 317,
+        "top": 11,
+        "width": 299,
+        "height": 296
+      },
+      "output": {
+        "width": 299,
+        "height": 296
+      },
+      "removedWhitePixels": 5425,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0
+      }
+    },
+    {
+      "id": "iron_bar_gate",
+      "displayName": "Iron Bar Gate",
+      "spriteId": "oblique_barrier_iron_bar_gate",
+      "url": "/overworld/generated/oblique/barrier/iron_bar_gate.png",
+      "sourceCell": {
+        "row": 0,
+        "col": 2
+      },
+      "sourceBounds": {
+        "left": 633,
+        "top": 11,
+        "width": 296,
+        "height": 296
+      },
+      "output": {
+        "width": 296,
+        "height": 296
+      },
+      "removedWhitePixels": 4158,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0
+      }
+    },
+    {
+      "id": "heavy_wood_gate",
+      "displayName": "Heavy Wood Gate",
+      "spriteId": "oblique_barrier_heavy_wood_gate",
+      "url": "/overworld/generated/oblique/barrier/heavy_wood_gate.png",
+      "sourceCell": {
+        "row": 0,
+        "col": 3
+      },
+      "sourceBounds": {
+        "left": 945,
+        "top": 11,
+        "width": 298,
+        "height": 296
+      },
+      "output": {
+        "width": 298,
+        "height": 296
+      },
+      "removedWhitePixels": 1353,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0
+      }
+    },
+    {
+      "id": "barred_stone_window",
+      "displayName": "Barred Stone Window",
+      "spriteId": "oblique_barrier_barred_stone_window",
+      "url": "/overworld/generated/oblique/barrier/barred_stone_window.png",
+      "sourceCell": {
+        "row": 1,
+        "col": 0
+      },
+      "sourceBounds": {
+        "left": 8,
+        "top": 326,
+        "width": 296,
+        "height": 297
+      },
+      "output": {
+        "width": 296,
+        "height": 297
+      },
+      "removedWhitePixels": 1571,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0
+      }
+    },
+    {
+      "id": "shuttered_timber_window",
+      "displayName": "Shuttered Timber Window",
+      "spriteId": "oblique_barrier_shuttered_timber_window",
+      "url": "/overworld/generated/oblique/barrier/shuttered_timber_window.png",
+      "sourceCell": {
+        "row": 1,
+        "col": 1
+      },
+      "sourceBounds": {
+        "left": 317,
+        "top": 326,
+        "width": 299,
+        "height": 297
+      },
+      "output": {
+        "width": 299,
+        "height": 297
+      },
+      "removedWhitePixels": 3041,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0
+      }
+    },
+    {
+      "id": "church_stained_window",
+      "displayName": "Church Stained-Glass Window",
+      "spriteId": "oblique_barrier_church_stained_window",
+      "url": "/overworld/generated/oblique/barrier/church_stained_window.png",
+      "sourceCell": {
+        "row": 1,
+        "col": 2
+      },
+      "sourceBounds": {
+        "left": 633,
+        "top": 326,
+        "width": 296,
+        "height": 297
+      },
+      "output": {
+        "width": 296,
+        "height": 297
+      },
+      "removedWhitePixels": 1700,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0
+      }
+    },
+    {
+      "id": "cellar_grate",
+      "displayName": "Cellar Grate",
+      "spriteId": "oblique_barrier_cellar_grate",
+      "url": "/overworld/generated/oblique/barrier/cellar_grate.png",
+      "sourceCell": {
+        "row": 1,
+        "col": 3
+      },
+      "sourceBounds": {
+        "left": 945,
+        "top": 326,
+        "width": 298,
+        "height": 297
+      },
+      "output": {
+        "width": 298,
+        "height": 297
+      },
+      "removedWhitePixels": 1873,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0
+      }
+    },
+    {
+      "id": "thorn_hedge",
+      "displayName": "Thorn Hedge Barrier",
+      "spriteId": "oblique_barrier_thorn_hedge",
+      "url": "/overworld/generated/oblique/barrier/thorn_hedge.png",
+      "sourceCell": {
+        "row": 2,
+        "col": 0
+      },
+      "sourceBounds": {
+        "left": 8,
+        "top": 641,
+        "width": 296,
+        "height": 288
+      },
+      "output": {
+        "width": 296,
+        "height": 288
+      },
+      "removedWhitePixels": 8997,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0
+      }
+    },
+    {
+      "id": "dense_bramble_wall",
+      "displayName": "Dense Bramble Wall",
+      "spriteId": "oblique_barrier_dense_bramble_wall",
+      "url": "/overworld/generated/oblique/barrier/dense_bramble_wall.png",
+      "sourceCell": {
+        "row": 2,
+        "col": 1
+      },
+      "sourceBounds": {
+        "left": 317,
+        "top": 641,
+        "width": 299,
+        "height": 288
+      },
+      "output": {
+        "width": 299,
+        "height": 288
+      },
+      "removedWhitePixels": 4341,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0
+      }
+    },
+    {
+      "id": "reed_screen",
+      "displayName": "Reed Screen",
+      "spriteId": "oblique_barrier_reed_screen",
+      "url": "/overworld/generated/oblique/barrier/reed_screen.png",
+      "sourceCell": {
+        "row": 2,
+        "col": 2
+      },
+      "sourceBounds": {
+        "left": 633,
+        "top": 641,
+        "width": 296,
+        "height": 288
+      },
+      "output": {
+        "width": 296,
+        "height": 288
+      },
+      "removedWhitePixels": 3660,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0
+      }
+    },
+    {
+      "id": "wattle_fence",
+      "displayName": "Wattle Fence",
+      "spriteId": "oblique_barrier_wattle_fence",
+      "url": "/overworld/generated/oblique/barrier/wattle_fence.png",
+      "sourceCell": {
+        "row": 2,
+        "col": 3
+      },
+      "sourceBounds": {
+        "left": 945,
+        "top": 641,
+        "width": 298,
+        "height": 288
+      },
+      "output": {
+        "width": 298,
+        "height": 288
+      },
+      "removedWhitePixels": 5952,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0
+      }
+    },
+    {
+      "id": "rubble_barricade",
+      "displayName": "Collapsed Rubble Barricade",
+      "spriteId": "oblique_barrier_rubble_barricade",
+      "url": "/overworld/generated/oblique/barrier/rubble_barricade.png",
+      "sourceCell": {
+        "row": 3,
+        "col": 0
+      },
+      "sourceBounds": {
+        "left": 8,
+        "top": 952,
+        "width": 296,
+        "height": 282
+      },
+      "output": {
+        "width": 296,
+        "height": 282
+      },
+      "removedWhitePixels": 3940,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0
+      }
+    },
+    {
+      "id": "timber_barricade",
+      "displayName": "Broken Timber Barricade",
+      "spriteId": "oblique_barrier_timber_barricade",
+      "url": "/overworld/generated/oblique/barrier/timber_barricade.png",
+      "sourceCell": {
+        "row": 3,
+        "col": 1
+      },
+      "sourceBounds": {
+        "left": 317,
+        "top": 952,
+        "width": 299,
+        "height": 282
+      },
+      "output": {
+        "width": 299,
+        "height": 282
+      },
+      "removedWhitePixels": 9557,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0
+      }
+    },
+    {
+      "id": "glass_growth_barrier",
+      "displayName": "Glass Growth Barrier",
+      "spriteId": "oblique_barrier_glass_growth_barrier",
+      "url": "/overworld/generated/oblique/barrier/glass_growth_barrier.png",
+      "sourceCell": {
+        "row": 3,
+        "col": 2
+      },
+      "sourceBounds": {
+        "left": 633,
+        "top": 952,
+        "width": 296,
+        "height": 282
+      },
+      "output": {
+        "width": 296,
+        "height": 282
+      },
+      "removedWhitePixels": 6383,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0
+      }
+    },
+    {
+      "id": "black_light_lattice",
+      "displayName": "Black-Light Lattice Barrier",
+      "spriteId": "oblique_barrier_black_light_lattice",
+      "url": "/overworld/generated/oblique/barrier/black_light_lattice.png",
+      "sourceCell": {
+        "row": 3,
+        "col": 3
+      },
+      "sourceBounds": {
+        "left": 945,
+        "top": 952,
+        "width": 298,
+        "height": 282
+      },
+      "output": {
+        "width": 298,
+        "height": 282
+      },
+      "removedWhitePixels": 7285,
+      "loopEdgeDelta": {
+        "leftRightAvg": 0
+      }
+    }
+  ]
+}

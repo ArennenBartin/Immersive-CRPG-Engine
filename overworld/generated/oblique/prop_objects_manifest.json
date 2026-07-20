@@ -1,0 +1,456 @@
+{
+  "schema": "crpg_oblique_prop_manifest_v1",
+  "source": "/overworld/generated/oblique/source/prop_objects_atlas_raw.png",
+  "projection": "square_grid_front_top_object_cutouts",
+  "alphaCleanup": "border-connected magenta/white background removed",
+  "tiles": [
+    {
+      "id": "simple_wooden_bed",
+      "displayName": "Simple Wooden Bed",
+      "spriteId": "oblique_prop_simple_wooden_bed",
+      "url": "/overworld/generated/oblique/prop_objects/simple_wooden_bed.png",
+      "sourceCell": {
+        "row": 0,
+        "col": 0
+      },
+      "sourceBounds": {
+        "left": 0,
+        "top": 0,
+        "width": 314,
+        "height": 314
+      },
+      "output": {
+        "width": 314,
+        "height": 314
+      },
+      "visibleBounds": {
+        "left": 51,
+        "top": 44,
+        "width": 205,
+        "height": 247
+      },
+      "removedBackgroundPixels": 56174,
+      "removedFringePixels": 784
+    },
+    {
+      "id": "straw_bedroll",
+      "displayName": "Straw Bedroll",
+      "spriteId": "oblique_prop_straw_bedroll",
+      "url": "/overworld/generated/oblique/prop_objects/straw_bedroll.png",
+      "sourceCell": {
+        "row": 0,
+        "col": 1
+      },
+      "sourceBounds": {
+        "left": 314,
+        "top": 0,
+        "width": 313,
+        "height": 314
+      },
+      "output": {
+        "width": 313,
+        "height": 314
+      },
+      "visibleBounds": {
+        "left": 66,
+        "top": 62,
+        "width": 192,
+        "height": 225
+      },
+      "removedBackgroundPixels": 60747,
+      "removedFringePixels": 939
+    },
+    {
+      "id": "wooden_chair",
+      "displayName": "Wooden Chair",
+      "spriteId": "oblique_prop_wooden_chair",
+      "url": "/overworld/generated/oblique/prop_objects/wooden_chair.png",
+      "sourceCell": {
+        "row": 0,
+        "col": 2
+      },
+      "sourceBounds": {
+        "left": 627,
+        "top": 0,
+        "width": 314,
+        "height": 314
+      },
+      "output": {
+        "width": 314,
+        "height": 314
+      },
+      "visibleBounds": {
+        "left": 69,
+        "top": 44,
+        "width": 153,
+        "height": 243
+      },
+      "removedBackgroundPixels": 68229,
+      "removedFringePixels": 3190
+    },
+    {
+      "id": "small_square_table",
+      "displayName": "Small Square Table",
+      "spriteId": "oblique_prop_small_square_table",
+      "url": "/overworld/generated/oblique/prop_objects/small_square_table.png",
+      "sourceCell": {
+        "row": 0,
+        "col": 3
+      },
+      "sourceBounds": {
+        "left": 941,
+        "top": 0,
+        "width": 313,
+        "height": 314
+      },
+      "output": {
+        "width": 313,
+        "height": 314
+      },
+      "visibleBounds": {
+        "left": 38,
+        "top": 72,
+        "width": 213,
+        "height": 213
+      },
+      "removedBackgroundPixels": 64565,
+      "removedFringePixels": 723
+    },
+    {
+      "id": "tall_bookshelf",
+      "displayName": "Tall Bookshelf",
+      "spriteId": "oblique_prop_tall_bookshelf",
+      "url": "/overworld/generated/oblique/prop_objects/tall_bookshelf.png",
+      "sourceCell": {
+        "row": 1,
+        "col": 0
+      },
+      "sourceBounds": {
+        "left": 0,
+        "top": 314,
+        "width": 314,
+        "height": 313
+      },
+      "output": {
+        "width": 314,
+        "height": 313
+      },
+      "visibleBounds": {
+        "left": 57,
+        "top": 19,
+        "width": 194,
+        "height": 266
+      },
+      "removedBackgroundPixels": 50120,
+      "removedFringePixels": 747
+    },
+    {
+      "id": "standing_oil_lamp",
+      "displayName": "Standing Oil Lamp",
+      "spriteId": "oblique_prop_standing_oil_lamp",
+      "url": "/overworld/generated/oblique/prop_objects/standing_oil_lamp.png",
+      "sourceCell": {
+        "row": 1,
+        "col": 1
+      },
+      "sourceBounds": {
+        "left": 314,
+        "top": 314,
+        "width": 313,
+        "height": 313
+      },
+      "output": {
+        "width": 313,
+        "height": 313
+      },
+      "visibleBounds": {
+        "left": 105,
+        "top": 24,
+        "width": 102,
+        "height": 264
+      },
+      "removedBackgroundPixels": 82651,
+      "removedFringePixels": 680
+    },
+    {
+      "id": "stone_well",
+      "displayName": "Stone Well",
+      "spriteId": "oblique_prop_stone_well",
+      "url": "/overworld/generated/oblique/prop_objects/stone_well.png",
+      "sourceCell": {
+        "row": 1,
+        "col": 2
+      },
+      "sourceBounds": {
+        "left": 627,
+        "top": 314,
+        "width": 314,
+        "height": 313
+      },
+      "output": {
+        "width": 314,
+        "height": 313
+      },
+      "visibleBounds": {
+        "left": 37,
+        "top": 37,
+        "width": 216,
+        "height": 250
+      },
+      "removedBackgroundPixels": 50290,
+      "removedFringePixels": 4331
+    },
+    {
+      "id": "rubble_pile",
+      "displayName": "Rubble Pile",
+      "spriteId": "oblique_prop_rubble_pile",
+      "url": "/overworld/generated/oblique/prop_objects/rubble_pile.png",
+      "sourceCell": {
+        "row": 1,
+        "col": 3
+      },
+      "sourceBounds": {
+        "left": 941,
+        "top": 314,
+        "width": 313,
+        "height": 313
+      },
+      "output": {
+        "width": 313,
+        "height": 313
+      },
+      "visibleBounds": {
+        "left": 20,
+        "top": 102,
+        "width": 251,
+        "height": 173
+      },
+      "removedBackgroundPixels": 68544,
+      "removedFringePixels": 1080
+    },
+    {
+      "id": "wooden_ladder",
+      "displayName": "Wooden Ladder",
+      "spriteId": "oblique_prop_wooden_ladder",
+      "url": "/overworld/generated/oblique/prop_objects/wooden_ladder.png",
+      "sourceCell": {
+        "row": 2,
+        "col": 0
+      },
+      "sourceBounds": {
+        "left": 0,
+        "top": 627,
+        "width": 314,
+        "height": 314
+      },
+      "output": {
+        "width": 314,
+        "height": 314
+      },
+      "visibleBounds": {
+        "left": 81,
+        "top": 9,
+        "width": 144,
+        "height": 260
+      },
+      "removedBackgroundPixels": 70719,
+      "removedFringePixels": 7436
+    },
+    {
+      "id": "shop_counter",
+      "displayName": "Shop Counter",
+      "spriteId": "oblique_prop_shop_counter",
+      "url": "/overworld/generated/oblique/prop_objects/shop_counter.png",
+      "sourceCell": {
+        "row": 2,
+        "col": 1
+      },
+      "sourceBounds": {
+        "left": 314,
+        "top": 627,
+        "width": 313,
+        "height": 314
+      },
+      "output": {
+        "width": 313,
+        "height": 314
+      },
+      "visibleBounds": {
+        "left": 27,
+        "top": 59,
+        "width": 245,
+        "height": 207
+      },
+      "removedBackgroundPixels": 53133,
+      "removedFringePixels": 676
+    },
+    {
+      "id": "mechanism_workbench",
+      "displayName": "Mechanism Workbench",
+      "spriteId": "oblique_prop_mechanism_workbench",
+      "url": "/overworld/generated/oblique/prop_objects/mechanism_workbench.png",
+      "sourceCell": {
+        "row": 2,
+        "col": 2
+      },
+      "sourceBounds": {
+        "left": 627,
+        "top": 627,
+        "width": 314,
+        "height": 314
+      },
+      "output": {
+        "width": 314,
+        "height": 314
+      },
+      "visibleBounds": {
+        "left": 29,
+        "top": 49,
+        "width": 232,
+        "height": 216
+      },
+      "removedBackgroundPixels": 60173,
+      "removedFringePixels": 1130
+    },
+    {
+      "id": "stone_altar",
+      "displayName": "Stone Altar",
+      "spriteId": "oblique_prop_stone_altar",
+      "url": "/overworld/generated/oblique/prop_objects/stone_altar.png",
+      "sourceCell": {
+        "row": 2,
+        "col": 3
+      },
+      "sourceBounds": {
+        "left": 941,
+        "top": 627,
+        "width": 313,
+        "height": 314
+      },
+      "output": {
+        "width": 313,
+        "height": 314
+      },
+      "visibleBounds": {
+        "left": 41,
+        "top": 25,
+        "width": 206,
+        "height": 242
+      },
+      "removedBackgroundPixels": 59144,
+      "removedFringePixels": 813
+    },
+    {
+      "id": "wooden_cupboard",
+      "displayName": "Wooden Cupboard",
+      "spriteId": "oblique_prop_wooden_cupboard",
+      "url": "/overworld/generated/oblique/prop_objects/wooden_cupboard.png",
+      "sourceCell": {
+        "row": 3,
+        "col": 0
+      },
+      "sourceBounds": {
+        "left": 0,
+        "top": 941,
+        "width": 314,
+        "height": 313
+      },
+      "output": {
+        "width": 314,
+        "height": 313
+      },
+      "visibleBounds": {
+        "left": 53,
+        "top": 9,
+        "width": 201,
+        "height": 254
+      },
+      "removedBackgroundPixels": 51037,
+      "removedFringePixels": 756
+    },
+    {
+      "id": "iron_stove",
+      "displayName": "Iron Stove",
+      "spriteId": "oblique_prop_iron_stove",
+      "url": "/overworld/generated/oblique/prop_objects/iron_stove.png",
+      "sourceCell": {
+        "row": 3,
+        "col": 1
+      },
+      "sourceBounds": {
+        "left": 314,
+        "top": 941,
+        "width": 313,
+        "height": 313
+      },
+      "output": {
+        "width": 313,
+        "height": 313
+      },
+      "visibleBounds": {
+        "left": 59,
+        "top": 8,
+        "width": 179,
+        "height": 254
+      },
+      "removedBackgroundPixels": 59088,
+      "removedFringePixels": 1074
+    },
+    {
+      "id": "broken_statue_fragment",
+      "displayName": "Broken Statue Fragment",
+      "spriteId": "oblique_prop_broken_statue_fragment",
+      "url": "/overworld/generated/oblique/prop_objects/broken_statue_fragment.png",
+      "sourceCell": {
+        "row": 3,
+        "col": 2
+      },
+      "sourceBounds": {
+        "left": 627,
+        "top": 941,
+        "width": 314,
+        "height": 313
+      },
+      "output": {
+        "width": 314,
+        "height": 313
+      },
+      "visibleBounds": {
+        "left": 35,
+        "top": 34,
+        "width": 207,
+        "height": 228
+      },
+      "removedBackgroundPixels": 69315,
+      "removedFringePixels": 738
+    },
+    {
+      "id": "metal_floor_hatch",
+      "displayName": "Metal Floor Hatch",
+      "spriteId": "oblique_prop_metal_floor_hatch",
+      "url": "/overworld/generated/oblique/prop_objects/metal_floor_hatch.png",
+      "sourceCell": {
+        "row": 3,
+        "col": 3
+      },
+      "sourceBounds": {
+        "left": 941,
+        "top": 941,
+        "width": 313,
+        "height": 313
+      },
+      "output": {
+        "width": 313,
+        "height": 313
+      },
+      "visibleBounds": {
+        "left": 11,
+        "top": 73,
+        "width": 259,
+        "height": 188
+      },
+      "removedBackgroundPixels": 53080,
+      "removedFringePixels": 779
+    }
+  ]
+}
