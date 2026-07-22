@@ -200,6 +200,33 @@ export const LightSourceProfileSchema = z.object({
   exposes_carrier: z.boolean().default(true),
 });
 
+// Canonical Fracture Crawl artifact identity is authored independently from
+// item display text. The physical origin is resolved from the item's stable
+// world-placement id, then copied into the campaign save the first time the
+// package is normalized. Renaming the item therefore cannot orphan it.
+export const ArtifactProfileSchema = z.object({
+  artifact_id: z.string().min(1),
+  recovery_value: z.number().finite().min(0).default(0),
+  burden: z.number().finite().min(0).default(0),
+});
+
+// A Glass item stack represents discrete recoverable units. Campaign value
+// and burden are derived from these authored rates and the save-backed ledger.
+export const GlassResourceProfileSchema = z.object({
+  units_per_item: z.number().int().positive().default(1),
+  recovery_value_per_unit: z.number().finite().min(0).default(1),
+  burden_per_unit: z.number().finite().min(0).default(1),
+});
+
+// Compatible emergency lights consume Glass through the campaign helper. The
+// ordinary light profile remains authoritative for illumination/perception;
+// this profile only describes fuel identity, cost, and burn lifetime.
+export const GlassFuelProfileSchema = z.object({
+  resource_item_id: z.string().min(1),
+  units_per_ignition: z.number().int().positive().default(1),
+  duration_ticks: z.number().int().positive().default(60),
+});
+
 // Sensory channels are intentionally data-driven: adding a future sense means
 // teaching the perception layer about a stimulus kind, not replacing a single
 // universal detection rule on every actor.
@@ -653,6 +680,9 @@ export const ItemSchema = z.object({
   simulation: SimulationAuthoredProfileSchema.optional(),
   spatial: ItemSpatialProfileSchema.optional(),
   light_source: LightSourceProfileSchema.optional(),
+  artifact: ArtifactProfileSchema.optional(),
+  glass_resource: GlassResourceProfileSchema.optional(),
+  glass_fuel: GlassFuelProfileSchema.optional(),
   // Recovering or examining an authored artifact can teach vocabulary without
   // embedding dialogue behavior in the inventory system.
   discover_topic_ids: z.array(z.string()).optional(),
@@ -816,6 +846,31 @@ export const MapGenerationMetadataSchema = z.object({
   attemptIndex: z.number().int().nonnegative().optional(),
 });
 
+// Author-facing opportunities emitted by a deterministic dungeon bake. These
+// are ordinary editable map data rather than runtime generator instructions:
+// authors can move/delete them in Map Studio, package round-trips preserve
+// them, and Play mode is free to ignore an opportunity until ordinary content
+// is attached to it.
+export const MapGenerationSocketSchema = z.object({
+  id: z.string().min(1),
+  kind: z.enum([
+    "entrance",
+    "culmination",
+    "landmark",
+    "artifact_origin",
+    "extraction",
+    "encounter",
+    "light_control",
+    "darkness",
+  ]),
+  cell: z.tuple([z.number().int(), z.number().int()]),
+  label: z.string().min(1).optional(),
+  node_id: z.string().min(1).optional(),
+  source_opportunity_id: z.string().min(1).optional(),
+  required: z.boolean().default(false),
+  tags: z.array(z.string().min(1)).default([]),
+});
+
 export const MapDataSchema = z.object({
   id: z.string(),
   display_name: z.string(),
@@ -835,6 +890,7 @@ export const MapDataSchema = z.object({
   ),
   cells: z.array(CellSchema).default([]),
   props: z.array(z.any()).default([]),
+  generation_sockets: z.array(MapGenerationSocketSchema).optional(),
   custom_object_placements: z.array(ObjectPlacementSchema).default([]),
   entity_placements: z.array(EntityPlacementSchema).default([]),
   item_placements: z.array(WorldItemPlacementSchema).default([]),
@@ -1446,6 +1502,7 @@ export const GamePackageSchema = z.object({
 
 export type GamePackage = z.infer<typeof GamePackageSchema>;
 export type MapGenerationMetadata = z.infer<typeof MapGenerationMetadataSchema>;
+export type MapGenerationSocketData = z.infer<typeof MapGenerationSocketSchema>;
 export type EnvironmentPreference = z.infer<typeof EnvironmentPreferenceSchema>;
 export type EncounterSlot = z.infer<typeof EncounterSlotSchema>;
 export type EncounterDefinition = z.infer<typeof EncounterDefinitionSchema>;
@@ -1468,6 +1525,9 @@ export type SimulationTraceProfileData = z.infer<typeof SimulationTraceProfileSc
 export type SimulationAuthoredProfileData = z.infer<typeof SimulationAuthoredProfileSchema>;
 export type LightSourceProfileData = z.infer<typeof LightSourceProfileSchema>;
 export type LightSourceProfile = LightSourceProfileData;
+export type ArtifactProfileData = z.infer<typeof ArtifactProfileSchema>;
+export type GlassResourceProfileData = z.infer<typeof GlassResourceProfileSchema>;
+export type GlassFuelProfileData = z.infer<typeof GlassFuelProfileSchema>;
 export type SensoryChannelData = z.infer<typeof SensoryChannelSchema>;
 export type SensoryProfileData = z.infer<typeof SensoryProfileSchema>;
 export type GameObjectPartCascadeData = z.infer<typeof GameObjectPartCascadeSchema>;

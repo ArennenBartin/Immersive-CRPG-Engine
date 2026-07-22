@@ -141,6 +141,7 @@ interface EditorState {
   commitDungeonBake: (result: DungeonPackageBakeResult) => boolean;
   updateMap: (mapId: string, updates: Partial<MapData>) => void;
   addMap: (mapData: MapData) => void;
+  deleteMap: (mapId: string) => boolean;
   addObject: (objData: any) => void;
   updateObject: (objId: string, updates: any) => void;
   replaceObject: (objData: any) => void;
@@ -582,6 +583,41 @@ export const useEngineStore = create<EditorState>((set, get) => ({
         maps: [...state.gamePackage.maps, mapData]
       }
     }));
+  },
+  deleteMap: (mapId) => {
+    const current = get();
+    if (current.gamePackage.maps.length <= 1) return false;
+    if (current.gamePackage.metadata.start_map_id === mapId) return false;
+    if (!current.gamePackage.maps.some((map) => map.id === mapId)) return false;
+
+    current.pushHistory();
+    set((state) => {
+      const remainingMaps = state.gamePackage.maps
+        .filter((map) => map.id !== mapId)
+        .map((map) => ({
+          ...map,
+          exits: map.exits.filter((exit) => exit.target_map_id !== mapId),
+        }));
+      const mapMusic = {
+        ...((state.gamePackage.settings?.map_music || {}) as Record<string, string>),
+      };
+      delete mapMusic[mapId];
+      return {
+        gamePackage: {
+          ...state.gamePackage,
+          maps: remainingMaps,
+          settings: {
+            ...state.gamePackage.settings,
+            map_music: mapMusic,
+          },
+        },
+        selectedMapId: pickSelectedMapId(
+          { ...state.gamePackage, maps: remainingMaps },
+          state.selectedMapId === mapId ? null : state.selectedMapId,
+        ),
+      };
+    });
+    return true;
   },
   addObject: (objData) => {
     get().pushHistory();

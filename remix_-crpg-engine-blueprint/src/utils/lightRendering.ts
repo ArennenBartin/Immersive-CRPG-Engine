@@ -106,15 +106,74 @@ export const STRUCTURE_EMISSIVE_FILL_MAX = 0.38;
 
 export const STATIC_FOG_BRIGHTNESS: Record<FogRenderState, number> = {
   visible: 1,
-  explored: 0.18,
+  explored: 0.12,
   unseen: 0,
 };
 
 // Dark enough to read as absence of light, saturated enough that remembered
 // architecture cannot be mistaken for the navy/black authored world beneath
 // it after the final screen grade.
-export const MEMORY_FOG_COLOR = "#3d2d6b";
+export const MEMORY_FOG_COLOR = "#2d2055";
+export const MEMORY_FOG_MID_COLOR = "#351026";
+export const MEMORY_FOG_FAR_COLOR = "#090106";
+export const MEMORY_FOG_NEAR_DISTANCE = 1;
+export const MEMORY_FOG_FAR_DISTANCE = 9;
+export const MEMORY_FOG_DISTANCE_BANDS = 24;
 export const UNKNOWN_FOG_COLOR = "#000000";
+
+// Remembered architecture is presentation, not present-tense perception. It
+// begins as indigo around the player, passes through a dark black-pink, then
+// settles into near-black at the edge of the remembered view. A small fixed
+// number of bands keeps asset-backed memory materials reusable while reading
+// as a continuous fade at world scale.
+export const resolveMemoryFogDistanceFactor = (distance: number): number => {
+  const safeDistance = Number.isFinite(distance) ? Math.max(0, distance) : 0;
+  return Math.max(
+    0,
+    Math.min(
+      1,
+      (safeDistance - MEMORY_FOG_NEAR_DISTANCE) /
+        (MEMORY_FOG_FAR_DISTANCE - MEMORY_FOG_NEAR_DISTANCE),
+    ),
+  );
+};
+
+const parseHexColor = (color: string): [number, number, number] => {
+  const hex = color.replace("#", "");
+  return [
+    Number.parseInt(hex.slice(0, 2), 16),
+    Number.parseInt(hex.slice(2, 4), 16),
+    Number.parseInt(hex.slice(4, 6), 16),
+  ];
+};
+
+const mixHexColor = (from: string, to: string, amount: number): string => {
+  const start = parseHexColor(from);
+  const end = parseHexColor(to);
+  const channel = (index: number) =>
+    Math.round(start[index] + (end[index] - start[index]) * amount)
+      .toString(16)
+      .padStart(2, "0");
+  return `#${channel(0)}${channel(1)}${channel(2)}`;
+};
+
+export const resolveMemoryFogColor = (distance: number): string => {
+  const linear = resolveMemoryFogDistanceFactor(distance);
+  if (linear <= 0) return MEMORY_FOG_COLOR;
+  if (linear >= 1) return MEMORY_FOG_FAR_COLOR;
+
+  const smooth = linear * linear * (3 - 2 * linear);
+  const banded =
+    Math.round(smooth * MEMORY_FOG_DISTANCE_BANDS) /
+    MEMORY_FOG_DISTANCE_BANDS;
+  return banded <= 0.5
+    ? mixHexColor(MEMORY_FOG_COLOR, MEMORY_FOG_MID_COLOR, banded * 2)
+    : mixHexColor(
+        MEMORY_FOG_MID_COLOR,
+        MEMORY_FOG_FAR_COLOR,
+        (banded - 0.5) * 2,
+      );
+};
 
 export interface StaticFogMaterialPolicy {
   brightness: number;
@@ -151,7 +210,7 @@ export const resolveStaticFogMaterialPolicy = (
     forceOpaque: true,
     preserveTextureMaps: false,
     tint: state === "explored" ? MEMORY_FOG_COLOR : UNKNOWN_FOG_COLOR,
-    tintStrength: state === "explored" ? 0.86 : 1,
+    tintStrength: state === "explored" ? 0.92 : 1,
   };
 };
 

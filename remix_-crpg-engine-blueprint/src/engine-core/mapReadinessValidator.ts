@@ -34,6 +34,9 @@ export const MAP_VALIDATION_ISSUE_CODES = [
   "STACKED_WALKABLE_COLLISION",
   "PLACEMENT_COORDINATE_INVALID",
   "PLACEMENT_ID_DUPLICATE",
+  "GENERATION_SOCKET_OUT_OF_BOUNDS",
+  "GENERATION_SOCKET_CELL_UNAUTHORED",
+  "GENERATION_SOCKET_CELL_BLOCKED",
   "SPAWN_MISSING",
   "SPAWN_OUT_OF_BOUNDS",
   "SPAWN_FOOTPRINT_INVALID",
@@ -689,6 +692,31 @@ export function validateOrdinaryMap(
   for (const spawn of map.spawns) {
     registerPlacementId(spawn.id, `spawn:${spawn.id}`);
     registerCoordinate(spawn.cell, spawn.id, "SPAWN_OUT_OF_BOUNDS");
+  }
+  for (const socket of map.generation_sockets ?? []) {
+    const socketCell = [socket.cell[0], socket.cell[1]] as GridCoordinate;
+    registerPlacementId(socket.id, `generation_socket:${socket.id}`);
+    registerCoordinate(socketCell, socket.id, "GENERATION_SOCKET_OUT_OF_BOUNDS");
+    const cell = navigation.topByCoordinate.get(coordinateKey(socketCell[0], socketCell[1]));
+    if (!cell) {
+      addIssue({
+        severity: "error",
+        code: "GENERATION_SOCKET_CELL_UNAUTHORED",
+        message: `${socket.id} is not attached to an authored map cell.`,
+        cells: [socketCell],
+        placementIds: [socket.id],
+        suggestedFix: "Move the socket onto ordinary authored geometry.",
+      });
+    } else if (!cell.active || !cell.walkable) {
+      addIssue({
+        severity: socket.required ? "error" : "warning",
+        code: "GENERATION_SOCKET_CELL_BLOCKED",
+        message: `${socket.id} is attached to a non-walkable cell.`,
+        cells: [socketCell],
+        placementIds: [socket.id],
+        suggestedFix: "Move the socket onto a walkable cell before attaching content.",
+      });
+    }
   }
   for (const placement of map.custom_object_placements) {
     const placementId = objectPlacementId(placement);

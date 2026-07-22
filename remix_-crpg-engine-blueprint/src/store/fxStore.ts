@@ -16,6 +16,9 @@ export interface DamagePopup {
 export const POPUP_LIFETIME_MS = 950;
 export const HIT_FLASH_MS = 220;
 export const SCREEN_PULSE_MS = 780;
+// Hit-flash timestamps are transient render data. Retaining one forever for
+// every actor ever damaged made this record grow throughout long expeditions.
+const HIT_FLASH_RETENTION_MS = 5_000;
 
 // ── Ambient barks ────────────────────────────────────────────────────────────
 // Overheard NPC-to-NPC speech rendered as floating text above the speaker. An
@@ -127,9 +130,16 @@ export const useFxStore = create<FxState>()((set) => ({
       return barks.length === state.barks.length ? state : { barks };
     }),
   flashEntity: (key) =>
-    set((state) => ({
-      hitFlashes: { ...state.hitFlashes, [key]: performance.now() },
-    })),
+    set((state) => {
+      const now = performance.now();
+      const hitFlashes = Object.fromEntries(
+        Object.entries(state.hitFlashes).filter(
+          ([, timestamp]) => now - timestamp < HIT_FLASH_RETENTION_MS,
+        ),
+      );
+      hitFlashes[key] = now;
+      return { hitFlashes };
+    }),
   markPlayerHurt: () =>
     set({
       playerHurtAt: performance.now(),

@@ -68,6 +68,7 @@ export interface SaveRuntimeV2 {
   lifecycle: {
     world_state_layers?: PlaySave["world_state_layers"];
     intercessor_campaign?: PlaySave["intercessor_campaign"];
+    fracture_crawl_campaign?: PlaySave["fracture_crawl_campaign"];
   };
   kernel: {
     world_facts: NonNullable<PlaySave["world_facts"]>;
@@ -194,6 +195,9 @@ const cloneSaveV1 = (save: PlaySave): PlaySave => ({
   intercessor_campaign: save.intercessor_campaign
     ? structuredClone(save.intercessor_campaign)
     : undefined,
+  fracture_crawl_campaign: save.fracture_crawl_campaign
+    ? structuredClone(save.fracture_crawl_campaign)
+    : undefined,
   explored_cells: save.explored_cells ? structuredClone(save.explored_cells) : undefined,
   bark_cooldowns: save.bark_cooldowns ? { ...save.bark_cooldowns } : undefined,
   game_end: save.game_end ? { ...save.game_end } : undefined,
@@ -284,6 +288,9 @@ export const buildSaveRuntimeV2 = (save: PlaySave): SaveRuntimeV2 => ({
       : undefined,
     intercessor_campaign: save.intercessor_campaign
       ? structuredClone(save.intercessor_campaign)
+      : undefined,
+    fracture_crawl_campaign: save.fracture_crawl_campaign
+      ? structuredClone(save.fracture_crawl_campaign)
       : undefined,
   },
   kernel: {

@@ -1,4 +1,4 @@
-import type { GamePackage } from "../../schema/game";
+import { ItemSchema, type GamePackage } from "../../schema/game";
 import {
   DungeonEncounterProfileSchema,
   DungeonHazardProfileSchema,
@@ -21,6 +21,8 @@ import type {
 } from "../types";
 
 export const INSTITUTIONAL_RUIN_RECIPE_ID = "institutional_ruin_v1";
+export const INSTITUTIONAL_RUIN_SINGLE_MAP_RECIPE_ID = "institutional_ruin_single_map_v2";
+export const FRACTURE_STARTER_LANTERN_ITEM_ID = "itm_fracture_starter_lantern";
 export const INSTITUTIONAL_RUIN_THEME_ID = "institutional_ruin_theme_v1";
 export const INSTITUTIONAL_RUIN_ENCOUNTER_PROFILE_ID = "institutional_ruin_encounters_v1";
 export const INSTITUTIONAL_RUIN_HAZARD_PROFILE_ID = "institutional_ruin_hazards_v1";
@@ -538,7 +540,135 @@ export const createInstitutionalRuinRecipe = (
   },
 });
 
+export const FRACTURE_STARTER_LANTERN: GamePackage["items"][number] = ItemSchema.parse({
+  id: FRACTURE_STARTER_LANTERN_ITEM_ID,
+  display_name: "Expedition Lantern",
+  description: "A durable survey lantern placed beside the entrance to a generated fracture.",
+  icon: "◉",
+  category: "key",
+  spatial: {
+    shape: [[0, 0]],
+    weight_kg: 1.2,
+    bulk: 1,
+    stack_limit: 1,
+  },
+  light_source: {
+    intensity: 0.9,
+    radius: 14,
+    color: "#ffd27a",
+    active_by_default: true,
+    extinguishable: true,
+    mobility: "portable",
+    persistent: true,
+    stimulus_tags: ["light", "lantern", "portable_light", "carried_light"],
+    exposes_carrier: true,
+  },
+});
+
+/**
+ * The current rule-definition preset. It deliberately uses one large open
+ * floor while the legacy v1 recipe remains available for door, gate, secret,
+ * and multi-floor regression coverage.
+ */
+export const createInstitutionalRuinSingleMapRecipe = (
+  seed = "institutional-ruin-single-map-001",
+): DungeonRecipeDef => DungeonRecipeSchema.parse({
+  id: INSTITUTIONAL_RUIN_SINGLE_MAP_RECIPE_ID,
+  name: "Institutional Ruin — Single Map",
+  description: "One large, doorless institutional ruin with a directional crawl, lateral branches, a compact loop, and a guaranteed entrance lantern.",
+  version: "2.1.0",
+  generatorId: "dungeon",
+  generatorVersion: "dungeon_v1",
+  seed,
+  stageSalts: {},
+  outputMode: "single_map",
+  themeId: INSTITUTIONAL_RUIN_THEME_ID,
+  scale: {
+    floorCount: { min: 1, max: 1 },
+    roomCount: { min: 16, max: 20 },
+    roomWidth: { min: 5, max: 12 },
+    roomDepth: { min: 5, max: 12 },
+    floorMapWidth: 72,
+    floorMapDepth: 72,
+    floorHeightStep: 3,
+  },
+  topology: {
+    criticalPathLength: { min: 8, max: 10 },
+    branchCount: { min: 2, max: 3 },
+    branchLength: { min: 2, max: 3 },
+    loopCount: { min: 1, max: 1 },
+    secretCount: { min: 0, max: 0 },
+    lockCount: { min: 0, max: 0 },
+    optionalObjectiveCount: { min: 0, max: 1 },
+    requireReturnPath: true,
+  },
+  architecture: {
+    connectionMode: "open_only",
+    layoutStyle: "directional_crawl",
+    roomArchetypePool: INSTITUTIONAL_RUIN_ARCHETYPES
+      .filter((entry) => entry.id !== ARCHETYPE_IDS.locked &&
+        entry.id !== ARCHETYPE_IDS.secret && entry.id !== ARCHETYPE_IDS.vertical)
+      .map((entry) => ({
+        id: entry.id,
+        weight: entry.id === ARCHETYPE_IDS.connector || entry.id === ARCHETYPE_IDS.service
+          ? 3
+          : entry.id === ARCHETYPE_IDS.resource || entry.id === ARCHETYPE_IDS.rest || entry.id === ARCHETYPE_IDS.landmark
+            ? 2
+            : 1,
+      })),
+    roomTemplatePool: [{ id: INSTITUTIONAL_RUIN_ENTRANCE_TEMPLATE_ID, weight: 4 }],
+    proceduralRoomBuilderPool: [
+      { id: "rectangular_room_v1", weight: 1 },
+      { id: "l_room_v1", weight: 1 },
+      { id: "junction_room_v1", weight: 1 },
+    ],
+    corridorWidth: { min: 3, max: 3 },
+    roomPadding: 1,
+    allowDiagonalCorridors: false,
+    allowVerticalTransitions: false,
+    verticalTransitionTypes: [],
+    boundaryStyle: "institutional_stone",
+  },
+  population: {
+    encounterProfileId: INSTITUTIONAL_RUIN_ENCOUNTER_PROFILE_ID,
+    hazardProfileId: INSTITUTIONAL_RUIN_HAZARD_PROFILE_ID,
+    rewardProfileId: INSTITUTIONAL_RUIN_REWARD_PROFILE_ID,
+    narrativeProfileId: INSTITUTIONAL_RUIN_NARRATIVE_PROFILE_ID,
+    startingLightItemId: FRACTURE_STARTER_LANTERN_ITEM_ID,
+  },
+  difficulty: {
+    baseThreat: 1.5,
+    threatGrowthByDepth: 3,
+    optionalBranchThreatMultiplier: 1.25,
+    resourceBudget: 8,
+    hazardBudget: 4,
+    complexityBudget: 12,
+  },
+  constraints: {
+    requiredRoomArchetypes: [
+      ARCHETYPE_IDS.entrance,
+      ARCHETYPE_IDS.junction,
+      ARCHETYPE_IDS.resource,
+      ARCHETYPE_IDS.rest,
+      ARCHETYPE_IDS.combat,
+      ARCHETYPE_IDS.landmark,
+      ARCHETYPE_IDS.objective,
+      ARCHETYPE_IDS.shortcut,
+    ],
+    forbiddenAdjacencies: [
+      { fromArchetypeId: ARCHETYPE_IDS.entrance, toArchetypeId: ARCHETYPE_IDS.hazard, bidirectional: true },
+      { fromArchetypeId: ARCHETYPE_IDS.rest, toArchetypeId: ARCHETYPE_IDS.combat, bidirectional: true },
+    ],
+    requiredTags: ["built", "single_map", "return_path", "optional_branch", "loop", "open_plan"],
+    permittedVerbs: ["move", "interact", "push", "break", "douse", "burn"],
+    permittedChemistryMaterials: ["stone", "metal", "wood", "water", "oil", "foam"],
+    maxGenerationAttempts: 48,
+    maxEmbeddingBacktracks: 3_000,
+  },
+});
+
 export interface DungeonGeneratorAuthoringContent {
+  items: GamePackage["items"];
   recipes: DungeonRecipeDef[];
   themes: DungeonThemeProfileDef[];
   roomArchetypes: DungeonRoomArchetypeDef[];
@@ -552,7 +682,11 @@ export interface DungeonGeneratorAuthoringContent {
 export const createInstitutionalRuinGeneratorContent = (
   seed?: string,
 ): DungeonGeneratorAuthoringContent => ({
-  recipes: [createInstitutionalRuinRecipe(seed)],
+  items: [FRACTURE_STARTER_LANTERN],
+  recipes: [
+    createInstitutionalRuinRecipe(seed),
+    createInstitutionalRuinSingleMapRecipe(seed),
+  ],
   themes: [INSTITUTIONAL_RUIN_THEME],
   roomArchetypes: INSTITUTIONAL_RUIN_ARCHETYPES,
   roomTemplates: INSTITUTIONAL_RUIN_ROOM_TEMPLATES,
@@ -582,6 +716,7 @@ export const mergeDungeonGeneratorAuthoringContent = (
   content: DungeonGeneratorAuthoringContent,
 ): GamePackage => ({
   ...pkg,
+  items: mergeMissingById(pkg.items, content.items),
   dungeon_recipes: mergeMissingById(pkg.dungeon_recipes, content.recipes),
   dungeon_themes: mergeMissingById(pkg.dungeon_themes, content.themes),
   dungeon_room_archetypes: mergeMissingById(pkg.dungeon_room_archetypes, content.roomArchetypes),

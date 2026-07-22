@@ -3,15 +3,21 @@ import {
   applyDungeonPackageBake,
   planDungeonPackageBake,
 } from "../src/dungeonGen/packageBake";
+import { evaluateDungeonQuality } from "../src/dungeonGen/quality";
 import {
-  createInstitutionalDungeonFixture,
+  createInstitutionalSingleMapDungeonFixture,
   evaluateDungeonAcceptance,
   runDungeonGeneration,
 } from "./dungeon-generation-test-support";
 
-const fixture = createInstitutionalDungeonFixture("institutional-ruin-audit-001");
+const fixture = createInstitutionalSingleMapDungeonFixture("institutional-ruin-single-map-audit-001");
 const result = runDungeonGeneration(fixture);
 const acceptance = evaluateDungeonAcceptance(fixture, result);
+const quality = evaluateDungeonQuality({
+  recipe: fixture.recipe,
+  gamePackage: fixture.gamePackage,
+  result,
+});
 
 const plan = planDungeonPackageBake(fixture.gamePackage, result.maps);
 const bake = applyDungeonPackageBake(plan, { policy: "replace" });
@@ -27,14 +33,15 @@ const diagnosticCounts = result.diagnostics.reduce<Record<string, number>>((coun
 }, {});
 
 console.log(JSON.stringify({
-  audit: "dungeon_v1_default_acceptance",
-  accepted: acceptance.accepted && bake.applied && roundTrip,
+  audit: "dungeon_v2_single_map_default_acceptance",
+  accepted: acceptance.accepted && quality.ready && bake.applied && roundTrip,
   recipeId: fixture.recipe.id,
   seed: fixture.recipe.seed,
   canonicalResultHash: result.canonicalResultHash,
   attempts: result.attemptCount,
   graph: result.graph?.metrics,
   metrics: result.metrics,
+  quality,
   maps: result.maps.map((map, index) => ({
     id: map.id,
     floorIndex: index,
@@ -57,10 +64,11 @@ console.log(JSON.stringify({
   },
   issues: [
     ...acceptance.issues,
+    ...quality.checks.filter((check) => !check.passed).map((check) =>
+      `${check.code}: found ${check.actual}; expected ${check.expected}`),
     ...(!bake.applied ? ["ordinary package bake did not apply"] : []),
     ...(!roundTrip ? ["baked maps did not survive package JSON/schema round-trip"] : []),
   ],
 }, null, 2));
 
-if (!acceptance.accepted || !bake.applied || !roundTrip) process.exitCode = 1;
-
+if (!acceptance.accepted || !quality.ready || !bake.applied || !roundTrip) process.exitCode = 1;

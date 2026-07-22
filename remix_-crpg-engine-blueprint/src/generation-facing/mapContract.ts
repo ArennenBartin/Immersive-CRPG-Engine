@@ -6,6 +6,7 @@ import {
   type MapData,
   type MapExitData,
   type MapGenerationMetadata,
+  type MapGenerationSocketData,
   type ObjectPlacementData,
   type TriggerData,
   type WorldItemPlacementData,
@@ -51,6 +52,7 @@ export interface MapBuildInput {
   triggers?: TriggerData[];
   regions?: WorldRegionData[];
   props?: unknown[];
+  generationSockets?: MapGenerationSocketData[];
   metadata?: MapBuildGenerationMetadata;
 }
 
@@ -97,6 +99,9 @@ const canonicalizeMap = (map: MapData): MapData => ({
   ),
   spawns: [...map.spawns].sort(idCompare),
   props: [...map.props].sort(stableValueCompare),
+  generation_sockets: map.generation_sockets
+    ? [...map.generation_sockets].sort(idCompare)
+    : undefined,
   custom_object_placements: [...map.custom_object_placements].sort(idCompare),
   entity_placements: [...map.entity_placements]
     .map((placement) => ({
@@ -167,6 +172,9 @@ const validateBuilderIds = (map: MapData, generated: boolean): MapBuildIssue[] =
   map.triggers.forEach((entry, index) => accept(entry.id, `triggers[${index}].id`, true));
   map.exits.forEach((entry, index) => accept(entry.id, `exits[${index}].id`, true));
   map.regions?.forEach((entry, index) => accept(entry.id, `regions[${index}].id`, true));
+  map.generation_sockets?.forEach((entry, index) =>
+    accept(entry.id, `generation_sockets[${index}].id`, true),
+  );
   return issues;
 };
 
@@ -186,6 +194,7 @@ export const buildMap = (input: MapBuildInput): MapData => {
     spawns: input.spawns,
     cells: input.cells,
     props: input.props ?? [],
+    generation_sockets: input.generationSockets,
     custom_object_placements: input.placements?.objects ?? [],
     entity_placements: input.placements?.entities ?? [],
     item_placements: input.placements?.items ?? [],

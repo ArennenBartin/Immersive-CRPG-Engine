@@ -6,12 +6,14 @@ import type {
   DungeonGenerationMetrics,
   DungeonStageId,
 } from "../../dungeonGen/types";
+import type { DungeonQualityReport } from "../../dungeonGen/quality";
 
 type SeverityFilter = "all" | DungeonDiagnostic["severity"];
 
 export interface DungeonAuditPanelProps {
   diagnostics: DungeonDiagnostic[];
   metrics?: DungeonGenerationMetrics;
+  qualityReport?: DungeonQualityReport;
   mapReports?: MapValidationReport[];
   canonicalResultHash?: string;
   contentLibraryHash?: string;
@@ -21,6 +23,7 @@ export interface DungeonAuditPanelProps {
 export function DungeonAuditPanel({
   diagnostics,
   metrics,
+  qualityReport,
   mapReports = [],
   canonicalResultHash,
   contentLibraryHash,
@@ -42,7 +45,9 @@ export function DungeonAuditPanel({
     (sum, report) => sum + report.issues.filter((issue) => issue.severity === "error").length,
     0,
   );
-  const ready = mapReports.length > 0 && fatalCount === 0 && errorCount === 0 && mapErrorCount === 0 && mapReports.every((report) => report.valid);
+  const qualityErrorCount = qualityReport?.checks.filter((entry) => !entry.passed).length ?? 0;
+  const ready = mapReports.length > 0 && fatalCount === 0 && errorCount === 0 && mapErrorCount === 0 &&
+    qualityErrorCount === 0 && mapReports.every((report) => report.valid);
 
   return (
     <div className="space-y-4">
@@ -54,7 +59,7 @@ export function DungeonAuditPanel({
               {ready ? "Ready to bake" : "Bake blocked by audit failures"}
             </h3>
             <p className="mt-1 text-sm text-neutral-300">
-              {fatalCount} fatal · {errorCount + mapErrorCount} errors · {warningCount} warnings · {mapReports.length} ordinary map reports
+              {fatalCount} fatal · {errorCount + mapErrorCount + qualityErrorCount} errors · {warningCount} warnings · {mapReports.length} ordinary map reports
             </p>
           </div>
         </div>
@@ -74,6 +79,58 @@ export function DungeonAuditPanel({
           <Metric label="Save bytes" value={metrics.estimatedSaveBytes} />
           <Metric label="Total ms" value={Math.round(metrics.totalDurationMs)} />
           <Metric label="Rejections" value={Object.values(metrics.rejectionCodes).reduce((sum, value) => sum + value, 0)} />
+        </section>
+      )}
+
+      {qualityReport && (
+        <section className={`rounded-xl border p-4 ${qualityReport.ready ? "border-emerald-500/30 bg-emerald-500/5" : "border-red-500/40 bg-red-500/10"}`}>
+          <div className="flex flex-wrap items-start gap-3">
+            <div className="mr-auto">
+              <h3 className="text-sm font-semibold text-neutral-100">Dungeon quality report</h3>
+              <p className="mt-1 text-xs text-neutral-500">
+                {qualityReport.thresholdsEnforced
+                  ? "Single-map quality thresholds are enforced and block Bake when they fail."
+                  : "Measurements are informational for this legacy recipe."}
+              </p>
+            </div>
+            <span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide ${qualityReport.ready ? "bg-emerald-500/15 text-emerald-300" : "bg-red-500/15 text-red-300"}`}>
+              {qualityReport.ready ? "quality pass" : "quality blocked"}
+            </span>
+          </div>
+          <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6">
+            <Metric label="Maps" value={qualityReport.metrics.mapCount} />
+            <Metric label="Rooms" value={qualityReport.metrics.roomCount} />
+            <Metric label="Edges" value={qualityReport.metrics.edgeCount} />
+            <Metric label="Doors" value={qualityReport.metrics.doorCount} />
+            <Metric label="Exits" value={qualityReport.metrics.exitCount} />
+            <Metric label="Lanterns" value={qualityReport.metrics.lanternCount} />
+            <Metric label="Critical route" value={qualityReport.metrics.entranceToCulminationPathLength ?? "—"} />
+            <Metric label="Max corridor" value={qualityReport.metrics.maximumCorridorLength} />
+            <Metric label="Max turns" value={qualityReport.metrics.maximumCorridorTurns} />
+            <Metric label="Loop length" value={qualityReport.metrics.loopLength} />
+            <Metric label="Silhouettes" value={qualityReport.metrics.silhouetteVariety} />
+            <Metric label="Landmark gap" value={qualityReport.metrics.minimumLandmarkSeparation ?? "—"} />
+            <Metric label="Fine estimate" value={qualityReport.metrics.estimatedFineCellCount} />
+            <Metric label="Actors" value={qualityReport.metrics.actorCount} />
+            <Metric label="Chem cells" value={qualityReport.metrics.initialActiveChemistryCellCount} />
+            <Metric label="Transitions" value={qualityReport.metrics.transitionCount} />
+            <Metric label="Non-open edges" value={qualityReport.metrics.nonOpenEdgeCount} />
+            <Metric label="Gates" value={qualityReport.metrics.gateCount} />
+            <Metric label="Secrets" value={qualityReport.metrics.secretCount} />
+            <Metric label="Lantern distance" value={qualityReport.metrics.lanternDistanceFromSpawn ?? "—"} />
+          </div>
+          {qualityReport.checks.length > 0 && (
+            <div className="mt-4 grid gap-2 md:grid-cols-2">
+              {qualityReport.checks.map((entry) => (
+                <div key={entry.code} className={`flex items-start gap-2 rounded-lg border px-3 py-2 text-xs ${entry.passed ? "border-emerald-500/20 bg-neutral-950 text-neutral-300" : "border-red-500/40 bg-red-500/10 text-red-100"}`}>
+                  {entry.passed
+                    ? <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-400" />
+                    : <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-400" />}
+                  <span><strong>{entry.label}</strong> · {entry.actual} <span className="text-neutral-500">({entry.expected})</span></span>
+                </div>
+              ))}
+            </div>
+          )}
         </section>
       )}
 
@@ -182,11 +239,11 @@ function SeverityIcon({ severity }: { severity: DungeonDiagnostic["severity"] })
   return <Info className="mt-0.5 h-4 w-4 shrink-0 text-blue-400" />;
 }
 
-function Metric({ label, value }: { label: string; value: number }) {
+function Metric({ label, value }: { label: string; value: number | string }) {
   return (
     <div className="rounded-lg border border-neutral-800 bg-neutral-900 p-3">
       <div className="text-[10px] uppercase tracking-wider text-neutral-500">{label}</div>
-      <div className="mt-1 text-lg font-semibold text-neutral-100">{value.toLocaleString()}</div>
+      <div className="mt-1 text-lg font-semibold text-neutral-100">{typeof value === "number" ? value.toLocaleString() : value}</div>
     </div>
   );
 }

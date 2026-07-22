@@ -121,15 +121,16 @@ export const resolveFogCurtainProfile = (
 
 // Static structure geometry is never removed or promoted into a special
 // post-fog pass. Its material owns visible/explored/unseen darkness, preserving
-// wall topology and ordinary depth behavior. Camera fading remains a
-// readability treatment for currently visible geometry only.
+// wall topology and ordinary depth behavior. Camera fading is independent of
+// fog state: a remembered or unknown foreground wall must not hide the player
+// simply because the wall itself is dark.
 export const resolveStructureFogCompositePolicy = (
   state: FogRenderState,
   cameraOccluded: boolean,
 ): StructureFogCompositePolicy => ({
   render: true,
   postFog: false,
-  cameraFaded: state === "visible" && cameraOccluded,
+  cameraFaded: cameraOccluded,
 });
 
 // Rendering consumes the authoritative visibility layers as a strict

@@ -397,6 +397,163 @@ export function ItemEditor() {
               )}
             </div>
 
+            <div className="space-y-4 border-t border-neutral-800 pt-6">
+              <div>
+                <h3 className="text-sm font-semibold text-violet-200">Artifact lifecycle</h3>
+                <p className="mt-1 text-xs text-neutral-500">
+                  Gives this item a stable campaign identity. Registered artifacts move between their authored origin, a carrier, a death bundle, and the recovery hub without duplication.
+                </p>
+              </div>
+              <label className="flex items-center gap-2 text-xs text-neutral-300">
+                <input
+                  type="checkbox"
+                  checked={Boolean(activeItem.artifact)}
+                  onChange={(event) => handleUpdate({
+                    artifact: event.target.checked
+                      ? {
+                          artifact_id: `artifact:${activeItem.id}`,
+                          recovery_value: 0,
+                          burden: 0,
+                        }
+                      : undefined,
+                  })}
+                />
+                Registered unique artifact
+              </label>
+              {activeItem.artifact && (
+                <div className="grid grid-cols-1 gap-4 rounded-md border border-violet-900/60 bg-violet-950/10 p-4 md:grid-cols-3">
+                  <div className="space-y-1 text-sm md:col-span-3">
+                    <label className="text-neutral-400">Stable artifact ID</label>
+                    <input
+                      className="w-full rounded border border-neutral-800 bg-black p-1.5 font-mono text-xs"
+                      value={activeItem.artifact.artifact_id}
+                      onChange={(event) => handleUpdate({ artifact: { ...activeItem.artifact!, artifact_id: event.target.value } })}
+                    />
+                  </div>
+                  <div className="space-y-1 text-sm">
+                    <label className="text-neutral-400">Recovery value</label>
+                    <input
+                      type="number"
+                      min={0}
+                      className="w-full rounded border border-neutral-800 bg-black p-1.5"
+                      value={activeItem.artifact.recovery_value ?? 0}
+                      onChange={(event) => handleUpdate({ artifact: { ...activeItem.artifact!, recovery_value: Math.max(0, Number(event.target.value) || 0) } })}
+                    />
+                  </div>
+                  <div className="space-y-1 text-sm">
+                    <label className="text-neutral-400">Burden</label>
+                    <input
+                      type="number"
+                      min={0}
+                      step={0.1}
+                      className="w-full rounded border border-neutral-800 bg-black p-1.5"
+                      value={activeItem.artifact.burden ?? 0}
+                      onChange={(event) => handleUpdate({ artifact: { ...activeItem.artifact!, burden: Math.max(0, Number(event.target.value) || 0) } })}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-4 border-t border-neutral-800 pt-6">
+              <div>
+                <h3 className="text-sm font-semibold text-fuchsia-200">Glass resource and emergency fuel</h3>
+                <p className="mt-1 text-xs text-neutral-500">
+                  Glass resources carry recoverable value and burden. A compatible light may consume those units when it is ignited.
+                </p>
+              </div>
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                <label className="flex items-center gap-2 text-xs text-neutral-300">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(activeItem.glass_resource)}
+                    onChange={(event) => handleUpdate({
+                      glass_resource: event.target.checked
+                        ? { units_per_item: 1, recovery_value_per_unit: 1, burden_per_unit: 0 }
+                        : undefined,
+                    })}
+                  />
+                  Harvestable Glass resource
+                </label>
+                <label className="flex items-center gap-2 text-xs text-neutral-300">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(activeItem.glass_fuel)}
+                    disabled={!activeItem.light_source}
+                    onChange={(event) => handleUpdate({
+                      glass_fuel: event.target.checked
+                        ? { resource_item_id: "", units_per_ignition: 1, duration_ticks: 120 }
+                        : undefined,
+                    })}
+                  />
+                  Glass-fueled light
+                </label>
+              </div>
+              {activeItem.glass_resource && (
+                <div className="grid grid-cols-1 gap-4 rounded-md border border-fuchsia-900/50 bg-fuchsia-950/10 p-4 md:grid-cols-3">
+                  {([
+                    ["units_per_item", "Units per item", 1],
+                    ["recovery_value_per_unit", "Value per unit", 0],
+                    ["burden_per_unit", "Burden per unit", 0],
+                  ] as const).map(([key, label, floor]) => (
+                    <div key={key} className="space-y-1 text-sm">
+                      <label className="text-neutral-400">{label}</label>
+                      <input
+                        type="number"
+                        min={floor}
+                        step={key === "burden_per_unit" ? 0.1 : 1}
+                        className="w-full rounded border border-neutral-800 bg-black p-1.5"
+                        value={activeItem.glass_resource?.[key] ?? floor}
+                        onChange={(event) => handleUpdate({
+                          glass_resource: {
+                            ...activeItem.glass_resource!,
+                            [key]: Math.max(floor, Number(event.target.value) || floor),
+                          },
+                        })}
+                      />
+                    </div>
+                  ))}
+                </div>
+              )}
+              {activeItem.glass_fuel && (
+                <div className="grid grid-cols-1 gap-4 rounded-md border border-amber-900/50 bg-amber-950/10 p-4 md:grid-cols-3">
+                  <div className="space-y-1 text-sm">
+                    <label className="text-neutral-400">Glass item</label>
+                    <select
+                      className="w-full rounded border border-neutral-800 bg-black p-1.5"
+                      value={activeItem.glass_fuel.resource_item_id}
+                      onChange={(event) => handleUpdate({ glass_fuel: { ...activeItem.glass_fuel!, resource_item_id: event.target.value } })}
+                    >
+                      <option value="">Select resource…</option>
+                      {gamePackage.items.filter((item) => item.glass_resource).map((item) => (
+                        <option key={item.id} value={item.id}>{item.display_name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="space-y-1 text-sm">
+                    <label className="text-neutral-400">Units per ignition</label>
+                    <input
+                      type="number"
+                      min={1}
+                      className="w-full rounded border border-neutral-800 bg-black p-1.5"
+                      value={activeItem.glass_fuel.units_per_ignition ?? 1}
+                      onChange={(event) => handleUpdate({ glass_fuel: { ...activeItem.glass_fuel!, units_per_ignition: Math.max(1, Math.floor(Number(event.target.value) || 1)) } })}
+                    />
+                  </div>
+                  <div className="space-y-1 text-sm">
+                    <label className="text-neutral-400">Burn duration ticks</label>
+                    <input
+                      type="number"
+                      min={1}
+                      className="w-full rounded border border-neutral-800 bg-black p-1.5"
+                      value={activeItem.glass_fuel.duration_ticks ?? activeItem.light_source?.duration_ticks ?? 120}
+                      onChange={(event) => handleUpdate({ glass_fuel: { ...activeItem.glass_fuel!, duration_ticks: Math.max(1, Math.floor(Number(event.target.value) || 1)) } })}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
             <div className="space-y-3 border-t border-neutral-800 pt-6">
               <div>
                 <h3 className="text-sm font-semibold text-indigo-100">Topics learned on acquisition</h3>

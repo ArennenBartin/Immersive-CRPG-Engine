@@ -22,7 +22,9 @@ import {
 } from "../src/dungeonGen";
 import {
   createInstitutionalRuinRecipe,
+  createInstitutionalRuinSingleMapRecipe,
   INSTITUTIONAL_RUIN_RECIPE_ID,
+  INSTITUTIONAL_RUIN_SINGLE_MAP_RECIPE_ID,
   installInstitutionalRuinGeneratorContent,
 } from "../src/dungeonGen/presets/institutionalRuin";
 import { DungeonRecipeSchema } from "../src/dungeonGen/schema";
@@ -72,6 +74,25 @@ export const createSingleFloorDungeonFixture = (seed: string): DungeonFixture =>
       lockCount: { min: 1, max: 1 },
     },
   }));
+
+/** The selected rule-definition default; legacy fixture helpers remain v1. */
+export const createInstitutionalSingleMapDungeonFixture = (
+  seed: string,
+): DungeonFixture => {
+  const installed = installInstitutionalRuinGeneratorContent(createEmptyGamePackage());
+  const recipe = createInstitutionalRuinSingleMapRecipe(seed);
+  return {
+    recipe,
+    gamePackage: GamePackageSchema.parse({
+      ...installed,
+      dungeon_recipes: [
+        ...installed.dungeon_recipes.filter((candidate) =>
+          candidate.id !== INSTITUTIONAL_RUIN_SINGLE_MAP_RECIPE_ID),
+        recipe,
+      ],
+    }),
+  };
+};
 
 export const runDungeonGeneration = (
   fixture: DungeonFixture,

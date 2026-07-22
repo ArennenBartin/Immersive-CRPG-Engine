@@ -6,11 +6,15 @@ import React, {
   memo,
   useLayoutEffect,
   startTransition,
+  createContext,
+  useCallback,
+  useContext,
 } from "react";
 import {
   CellData,
   MapData,
   ObjectData,
+  ObjectPart,
   ObjectPlacementData,
 } from "../schema/game";
 import type {
@@ -35,7 +39,7 @@ import {
   ObjectModelRenderer,
   ObjectRuntimeModelRenderer,
 } from "./ObjectRenderers";
-import { getObjectVerticalExtents } from "../utils/meshModel";
+import { getObjectVerticalExtents, hasMeshModel } from "../utils/meshModel";
 import { entityPlacementStateKey } from "../utils/entityState";
 import {
   useFxStore,
@@ -85,6 +89,7 @@ import {
   resolveAuthoritativeGroundLightPresentationStrength,
   hasAuthoritativePresentLight,
   MEMORY_FOG_COLOR,
+  resolveMemoryFogColor,
   resolveStaticFogMaterialPolicy,
   resolveStructureEmissiveFillStrength,
   resolveStructureFootprintIllumination,
@@ -119,7 +124,8 @@ type GifDecoderResponse = Partial<DecodedGifAtlas> & {
 
 const WORLD_GIF_FRAME_HEIGHT = 128;
 const WORLD_GIF_MIN_FRAME_MS = 80;
-const ANIMATED_SPRITE_RELEASE_DELAY_MS = 15_000;
+const SPRITE_TEXTURE_RELEASE_DELAY_MS = 15_000;
+const SPRITE_DECODE_RETRY_DELAYS_MS = [180, 600] as const;
 
 let gifDecodeWorker: Worker | null = null;
 let nextGifDecodeId = 1;
@@ -175,10 +181,33 @@ const getGifDecodeWorker = () => {
   return worker;
 };
 
-const decodeAnimatedGif = async (dataUrl: string): Promise<DecodedGifAtlas> => {
-  const response = await fetch(dataUrl);
+const dataUrlToArrayBuffer = (dataUrl: string): ArrayBuffer => {
+  const separator = dataUrl.indexOf(",");
+  if (separator < 0) throw new Error("Malformed animated sprite data URL");
+  const metadata = dataUrl.slice(5, separator);
+  const payload = dataUrl.slice(separator + 1);
+  const decoded = /;base64(?:;|$)/i.test(metadata)
+    ? atob(payload)
+    : decodeURIComponent(payload);
+  const bytes = new Uint8Array(decoded.length);
+  for (let index = 0; index < decoded.length; index += 1) {
+    bytes[index] = decoded.charCodeAt(index) & 0xff;
+  }
+  return bytes.buffer;
+};
+
+const loadAnimatedSpriteBuffer = async (source: string): Promise<ArrayBuffer> => {
+  // Embedded app browsers do not consistently allow fetch(data:). Decode
+  // package-embedded GIFs directly and reserve fetch for ordinary assets.
+  if (source.startsWith("data:")) return dataUrlToArrayBuffer(source);
+  const sourceUrl = new URL(source, document.baseURI).href;
+  const response = await fetch(sourceUrl, { cache: "force-cache" });
   if (!response.ok) throw new Error(`GIF fetch failed: ${response.status}`);
-  const buffer = await response.arrayBuffer();
+  return response.arrayBuffer();
+};
+
+const decodeAnimatedGif = async (dataUrl: string): Promise<DecodedGifAtlas> => {
+  const buffer = await loadAnimatedSpriteBuffer(dataUrl);
   const id = nextGifDecodeId++;
   return new Promise<DecodedGifAtlas>((resolve, reject) => {
     pendingGifDecodes.set(id, { resolve, reject });
@@ -219,10 +248,16 @@ type SpriteTextureCacheEntry = {
   activeUsers?: number;
   subscribers?: Set<() => void>;
   releaseTimer?: ReturnType<typeof setTimeout>;
+  decodeRetryTimer?: ReturnType<typeof setTimeout>;
   disposed?: boolean;
 };
 
 const spriteTextureCache = new Map<string, SpriteTextureCacheEntry>();
+// The cache can contain every static and animated sprite visited during a
+// long Studio/Play session. The animation driver must only inspect entries
+// that are mounted right now; walking the historical cache every frame made
+// animation cost grow with play time even after actors left the scene.
+const activeAnimatedSpriteEntries = new Set<SpriteTextureCacheEntry>();
 
 const showAnimatedSpriteAtlasFrame = (
   entry: SpriteTextureCacheEntry,
@@ -252,6 +287,7 @@ const notifySpriteTextureSubscribers = (entry: SpriteTextureCacheEntry) => {
 const loadAnimatedSpriteAtlas = async (
   entry: SpriteTextureCacheEntry,
   dataUrl: string,
+  attempt = 0,
 ) => {
   try {
     const decoded = await decodeAnimatedGif(dataUrl);
@@ -285,14 +321,26 @@ const loadAnimatedSpriteAtlas = async (
       columns: decoded.columns,
       durations: decoded.durations,
       frameIndex: 0,
-      nextFrameAt: Math.max(20, decoded.durations[0] || 100),
+      nextFrameAt:
+        performance.now() + Math.max(20, decoded.durations[0] || 100),
     };
     showAnimatedSpriteAtlasFrame(entry, 0);
     entry.ready = true;
     notifySpriteTextureSubscribers(entry);
   } catch (error) {
     if (entry.disposed) return;
-    entry.texture = null;
+    const retryDelay = SPRITE_DECODE_RETRY_DELAYS_MS[attempt];
+    if (retryDelay !== undefined) {
+      entry.decodeRetryTimer = setTimeout(() => {
+        entry.decodeRetryTimer = undefined;
+        if (!entry.disposed) {
+          void loadAnimatedSpriteAtlas(entry, dataUrl, attempt + 1);
+        }
+      }, retryDelay);
+      return;
+    }
+    // Keep the lightweight placeholder texture rather than poisoning the
+    // cache with a null entry after a transient development-server/HMR fetch.
     entry.ready = false;
     notifySpriteTextureSubscribers(entry);
     console.warn("Unable to decode animated world sprite", error);
@@ -442,22 +490,30 @@ function useSpriteTexture(spriteId: string | undefined, gamePackage: any) {
     [spriteId, gamePackage.sprite_library],
   );
   useEffect(() => {
-    if (!entry.cacheKey || !isAnimatedSprite(entry.spriteDef)) return;
+    if (!entry.cacheKey) return;
+    const animated = isAnimatedSprite(entry.spriteDef);
     entry.activeUsers = (entry.activeUsers || 0) + 1;
+    if (animated) activeAnimatedSpriteEntries.add(entry);
     if (entry.releaseTimer) {
       clearTimeout(entry.releaseTimer);
       entry.releaseTimer = undefined;
     }
     const notify = () => setRevision((revision) => (revision + 1) % 1_000_000);
-    entry.subscribers?.add(notify);
+    if (animated) entry.subscribers?.add(notify);
     return () => {
-      entry.subscribers?.delete(notify);
+      if (animated) entry.subscribers?.delete(notify);
       entry.activeUsers = Math.max(0, (entry.activeUsers || 1) - 1);
+      if (entry.activeUsers === 0) activeAnimatedSpriteEntries.delete(entry);
       if (entry.activeUsers > 0 || entry.releaseTimer) return;
       entry.releaseTimer = setTimeout(() => {
         entry.releaseTimer = undefined;
         if ((entry.activeUsers || 0) > 0 || !entry.cacheKey) return;
+        activeAnimatedSpriteEntries.delete(entry);
         entry.disposed = true;
+        if (entry.decodeRetryTimer) {
+          clearTimeout(entry.decodeRetryTimer);
+          entry.decodeRetryTimer = undefined;
+        }
         entry.texture?.dispose();
         const image = entry.texture?.image;
         if (image instanceof HTMLCanvasElement) {
@@ -467,16 +523,18 @@ function useSpriteTexture(spriteId: string | undefined, gamePackage: any) {
         if (spriteTextureCache.get(entry.cacheKey) === entry) {
           spriteTextureCache.delete(entry.cacheKey);
         }
-      }, ANIMATED_SPRITE_RELEASE_DELAY_MS);
+      }, SPRITE_TEXTURE_RELEASE_DELAY_MS);
     };
   }, [entry]);
   return entry;
 }
 
 function AnimatedSpriteTextureDriver() {
-  useFrame(({ clock }) => {
-    const now = clock.elapsedTime * 1000;
-    spriteTextureCache.forEach((entry) => {
+  useFrame(() => {
+    // A cached atlas can survive a Canvas remount. Wall-clock time keeps its
+    // deadline valid when the new R3F clock restarts at zero.
+    const now = performance.now();
+    activeAnimatedSpriteEntries.forEach((entry) => {
       const source = entry.animatedSource;
       if (
         (entry.activeUsers || 0) > 0 &&
@@ -737,11 +795,17 @@ function SmoothPositionGroup({
 
     const current = currentRef.current;
     const target = targetRef.current;
-    const distance = current.distanceTo(target);
+    const distanceSquared = current.distanceToSquared(target);
+
+    // Almost every actor is stationary on almost every visual frame. Avoid a
+    // square root for those callbacks; only moving groups need exact distance.
+    if (distanceSquared < TILE_SLIDE_EPSILON) return;
+
+    const distance = Math.sqrt(distanceSquared);
 
     if (distance > snapDistance) {
       current.copy(target);
-    } else if (distance * distance >= TILE_SLIDE_EPSILON) {
+    } else {
       const maxStep = TILE_SLIDE_SPEED * Math.min(frameDelta, 0.05);
 
       if (distance <= maxStep) {
@@ -753,8 +817,6 @@ function SmoothPositionGroup({
             .multiplyScalar(maxStep / distance),
         );
       }
-    } else {
-      return;
     }
 
     groupRef.current.position.copy(current);
@@ -802,6 +864,15 @@ function HitFlashOverlay({
 }
 
 const actorRenderPositions = new Map<string, THREE.Vector3>();
+
+const updateActorRenderPosition = (actorId: string, position: THREE.Vector3) => {
+  const existing = actorRenderPositions.get(actorId);
+  if (existing) {
+    existing.copy(position);
+  } else {
+    actorRenderPositions.set(actorId, position.clone());
+  }
+};
 
 const ACTOR_SPRITE_RENDER_ORDER = 200;
 const ACTOR_EFFECT_RENDER_ORDER = 210;
@@ -905,8 +976,10 @@ const EntityNode = memo(function EntityNode({
     <SmoothPositionGroup
       position={[placement.cell[0], yOffset, placement.cell[1]]}
       onPositionUpdate={(position) => {
-        if (fxKey) actorRenderPositions.set(fxKey, position.clone());
-        if (actorId) actorRenderPositions.set(actorId, position.clone());
+        if (fxKey) updateActorRenderPosition(fxKey, position);
+        if (actorId && actorId !== fxKey) {
+          updateActorRenderPosition(actorId, position);
+        }
       }}
     >
       {engaged && !isActive && !darkSilhouette && (
@@ -1452,9 +1525,11 @@ function ActorReadoutBadge({
   useFrame(() => {
     const group = groupRef.current;
     if (!group) return;
-    const actorPosition = actorIds
-      .map((actorId) => actorRenderPositions.get(actorId))
-      .find(Boolean);
+    let actorPosition: THREE.Vector3 | undefined;
+    for (const actorId of actorIds) {
+      actorPosition = actorRenderPositions.get(actorId);
+      if (actorPosition) break;
+    }
     const playerPosition = actorIds.includes("player") && playerStateRef.ready
       ? playerStateRef
       : null;
@@ -1485,15 +1560,16 @@ function ActorReadoutBadge({
 const resolveLiveActorPosition = (
   actorIds: string[],
   fallback: [number, number],
+  target: THREE.Vector3,
 ) => {
-  const actorPosition = actorIds
-    .map((actorId) => actorRenderPositions.get(actorId))
-    .find(Boolean);
-  if (actorPosition) return actorPosition;
-  if (actorIds.includes("player") && playerStateRef.ready) {
-    return new THREE.Vector3(playerStateRef.px, playerStateRef.py, playerStateRef.pz);
+  for (const actorId of actorIds) {
+    const actorPosition = actorRenderPositions.get(actorId);
+    if (actorPosition) return target.copy(actorPosition);
   }
-  return new THREE.Vector3(fallback[0], 0, fallback[1]);
+  if (actorIds.includes("player") && playerStateRef.ready) {
+    return target.set(playerStateRef.px, playerStateRef.py, playerStateRef.pz);
+  }
+  return target.set(fallback[0], 0, fallback[1]);
 };
 
 function ActorTether({
@@ -1512,19 +1588,32 @@ function ActorTether({
   dashed?: boolean;
 }) {
   const geometryRef = useRef<THREE.BufferGeometry>(null);
+  const sourcePositionRef = useRef(new THREE.Vector3());
+  const targetPositionRef = useRef(new THREE.Vector3());
   useFrame(() => {
     const geometry = geometryRef.current;
     if (!geometry) return;
-    const source = resolveLiveActorPosition(sourceActorIds, sourceFallback);
-    const target = resolveLiveActorPosition(targetActorIds, targetFallback);
+    const source = resolveLiveActorPosition(
+      sourceActorIds,
+      sourceFallback,
+      sourcePositionRef.current,
+    );
+    const target = resolveLiveActorPosition(
+      targetActorIds,
+      targetFallback,
+      targetPositionRef.current,
+    );
     const position = geometry.getAttribute("position") as THREE.BufferAttribute;
     position.setXYZ(0, source.x, source.y + 0.82, source.z);
     position.setXYZ(1, target.x, target.y + 0.45, target.z);
     position.needsUpdate = true;
-    geometry.computeBoundingSphere();
   });
   return (
-    <lineSegments raycast={() => null} renderOrder={700}>
+    <lineSegments
+      raycast={() => null}
+      renderOrder={700}
+      frustumCulled={false}
+    >
       <bufferGeometry ref={geometryRef}>
         <bufferAttribute
           attach="attributes-position"
@@ -1742,6 +1831,41 @@ const getEmojiTexture = (icon: string) => {
   return texture;
 };
 
+type FloatingWorldItemEntry = {
+  group: THREE.Group;
+  yBase: number;
+  phase: number;
+};
+
+const WorldItemFloatRegistrationContext = createContext<
+  ((entry: FloatingWorldItemEntry) => () => void) | null
+>(null);
+
+function WorldItemFloatProvider({ children }: { children: React.ReactNode }) {
+  const entriesRef = useRef(new Set<FloatingWorldItemEntry>());
+  const register = useCallback((entry: FloatingWorldItemEntry) => {
+    entriesRef.current.add(entry);
+    return () => entriesRef.current.delete(entry);
+  }, []);
+
+  // One callback advances every item in this renderer. A useFrame subscription
+  // per dropped item was cheap on a small map but scaled poorly in loot-heavy
+  // rooms and remained active for the lifetime of the scene.
+  useFrame(({ clock }) => {
+    const elapsed = clock.elapsedTime * 2;
+    entriesRef.current.forEach((entry) => {
+      entry.group.position.y =
+        entry.yBase + 0.34 + Math.sin(elapsed + entry.phase) * 0.05;
+    });
+  });
+
+  return (
+    <WorldItemFloatRegistrationContext.Provider value={register}>
+      {children}
+    </WorldItemFloatRegistrationContext.Provider>
+  );
+}
+
 function WorldItemNode({
   cell,
   icon,
@@ -1774,14 +1898,14 @@ function WorldItemNode({
   const groupRef = useRef<THREE.Group>(null);
   const phase = useMemo(
     () => Math.abs(cell[0] * 13.37 + cell[1] * 7.77) % Math.PI,
-    [cell],
+    [cell[0], cell[1]],
   );
+  const registerFloat = useContext(WorldItemFloatRegistrationContext);
 
-  useFrame(({ clock }) => {
-    if (!groupRef.current) return;
-    groupRef.current.position.y =
-      yBase + 0.34 + Math.sin(clock.elapsedTime * 2 + phase) * 0.05;
-  });
+  useLayoutEffect(() => {
+    if (!groupRef.current || !registerFloat) return;
+    return registerFloat({ group: groupRef.current, yBase, phase });
+  }, [phase, registerFloat, yBase]);
 
   return (
     <group ref={groupRef} position={[cell[0], yBase + 0.34, cell[1]]}>
@@ -2231,9 +2355,11 @@ type CellVisualGroup = {
 function InstancedCellGroup({
   group,
   hiddenCellKeys,
+  memoryOrigin,
 }: {
   group: CellVisualGroup;
   hiddenCellKeys?: Set<string>;
+  memoryOrigin?: [number, number];
 }) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
   const fogMaterial = resolveStaticFogMaterialPolicy(group.fogState);
@@ -2249,10 +2375,10 @@ function InstancedCellGroup({
   const normalScale = fogMaterial.preserveTextureMaps
     ? getObjectMaterialNormalScale(group.material)
     : 1;
-  const materialColor = resolveFogStructureColor(
-    group.material.color,
-    fogMaterial,
-  );
+  const materialColor =
+    group.fogState === "explored"
+      ? new THREE.Color("#ffffff")
+      : resolveFogStructureColor(group.material.color, fogMaterial);
   const materialEmission = fogMaterial.preserveEmission
     ? resolveStructureEmission(
         group.material.color,
@@ -2280,12 +2406,24 @@ function InstancedCellGroup({
       }
       dummy.updateMatrix();
       meshRef.current!.setMatrixAt(index, dummy.matrix);
+      if (group.fogState === "explored") {
+        const distance = memoryOrigin
+          ? Math.hypot(cell.x - memoryOrigin[0], cell.z - memoryOrigin[1])
+          : 0;
+        meshRef.current!.setColorAt(
+          index,
+          new THREE.Color(resolveMemoryFogColor(distance)),
+        );
+      }
     });
 
     meshRef.current.count = group.cells.length;
     meshRef.current.instanceMatrix.needsUpdate = true;
+    if (meshRef.current.instanceColor) {
+      meshRef.current.instanceColor.needsUpdate = true;
+    }
     meshRef.current.computeBoundingSphere();
-  }, [group, hiddenCellKeys]);
+  }, [group, hiddenCellKeys, memoryOrigin?.[0], memoryOrigin?.[1]]);
 
   return (
     <instancedMesh
@@ -2438,16 +2576,23 @@ const resolveFogStructureColor = (
   return color;
 };
 
-const memoryStructureMaterial = new THREE.MeshBasicMaterial({
-  color: resolveStaticFogMaterialPolicy("explored").tint || MEMORY_FOG_COLOR,
-  transparent: false,
-  opacity: 1,
-  depthTest: true,
-  depthWrite: true,
-  side: THREE.DoubleSide,
-  fog: false,
-  toneMapped: false,
-});
+const memoryStructureMaterials = new Map<string, THREE.MeshBasicMaterial>();
+const getMemoryStructureMaterial = (color: string) => {
+  const cached = memoryStructureMaterials.get(color);
+  if (cached) return cached;
+  const material = new THREE.MeshBasicMaterial({
+    color,
+    transparent: false,
+    opacity: 1,
+    depthTest: true,
+    depthWrite: true,
+    side: THREE.DoubleSide,
+    fog: false,
+    toneMapped: false,
+  });
+  memoryStructureMaterials.set(color, material);
+  return material;
+};
 const unknownStructureMaterial = new THREE.MeshBasicMaterial({
   color: "#000000",
   transparent: false,
@@ -2464,6 +2609,7 @@ function applyGroupStructurePolicy(
   opacity: number,
   illumination: number,
   fogState: FogRenderState,
+  memoryColor = MEMORY_FOG_COLOR,
 ) {
   const fogMaterial = resolveStaticFogMaterialPolicy(fogState);
   group.traverse((child: any) => {
@@ -2489,7 +2635,7 @@ function applyGroupStructurePolicy(
     if (fogMaterial.flatUnlit) {
       const flatMaterial =
         fogState === "explored"
-          ? memoryStructureMaterial
+          ? getMemoryStructureMaterial(memoryColor)
           : unknownStructureMaterial;
       child.material = Array.isArray(originalMaterial)
         ? originalMaterial.map(() => flatMaterial)
@@ -2579,6 +2725,7 @@ function OccludingCellRenderer({
   opacity,
   illumination,
   fogState,
+  memoryOrigin,
 }: {
   cell: CellData;
   object: ObjectData | null | undefined;
@@ -2586,6 +2733,7 @@ function OccludingCellRenderer({
   opacity: number;
   illumination: number;
   fogState: FogRenderState;
+  memoryOrigin?: [number, number];
 }) {
   const groupRef = useRef<THREE.Group>(null);
   const height = Math.max(0, (cell.visual_height || 0) * 0.5);
@@ -2607,7 +2755,15 @@ function OccludingCellRenderer({
   const normalScale = fogMaterial.preserveTextureMaps
     ? getObjectMaterialNormalScale(material)
     : 1;
-  const materialColor = resolveFogStructureColor(material.color, fogMaterial);
+  const memoryColor = resolveMemoryFogColor(
+    memoryOrigin
+      ? Math.hypot(cell.x - memoryOrigin[0], cell.z - memoryOrigin[1])
+      : 0,
+  );
+  const materialColor =
+    fogState === "explored"
+      ? new THREE.Color(memoryColor)
+      : resolveFogStructureColor(material.color, fogMaterial);
   const materialEmission = fogMaterial.preserveEmission
     ? resolveStructureEmission(
         material.color,
@@ -2624,8 +2780,9 @@ function OccludingCellRenderer({
       opacity,
       illumination,
       fogState,
+      memoryColor,
     );
-  }, [fastTile, opacity, illumination, fogState]);
+  }, [fastTile, opacity, illumination, fogState, memoryColor]);
 
   // Asset-backed models may attach their real mesh after the parent layout
   // effect has run. Re-apply the same policy when that child count changes so
@@ -2672,6 +2829,7 @@ function OccludingCellRenderer({
       opacity,
       illumination,
       fogState,
+      memoryColor,
     );
   });
 
@@ -2774,6 +2932,19 @@ type RuntimeInstanceGroup = {
   instances: RuntimeObjectInstance[];
 };
 
+const canInstanceRuntimeObject = (object: ObjectData) =>
+  Boolean(
+    object.model_kind !== "asset" &&
+      ((hasMeshModel(object) && object.mesh) ||
+        (object.parts?.length || 0) > 0),
+  );
+
+type FogAwareRuntimeInstanceGroup = RuntimeInstanceGroup & {
+  key: string;
+  fogState: FogRenderState;
+  illumination: number;
+};
+
 const groupRuntimeInstances = <
   T extends {
     cell: CellData;
@@ -2789,7 +2960,7 @@ const groupRuntimeInstances = <
   const grouped = new Map<string, RuntimeInstanceGroup>();
 
   items.forEach((item, index) => {
-    if (forceSingles || !item.object.mesh) {
+    if (forceSingles || !canInstanceRuntimeObject(item.object)) {
       singles.push(item);
       return;
     }
@@ -2804,6 +2975,63 @@ const groupRuntimeInstances = <
 
     existing.instances.push({
       key: `cell_${item.object.id}_${item.cell.x}_${item.cell.y || 0}_${item.cell.z}_${index}`,
+      position: getPosition(item),
+      rotationY: item.rotationY,
+    });
+  });
+
+  return {
+    singles,
+    groups: Array.from(grouped.values()),
+  };
+};
+
+const groupFogAwareRuntimeInstances = <
+  T extends {
+    cell: CellData;
+    object: ObjectData;
+    rotationY: number;
+  },
+>(
+  items: T[],
+  getPosition: (item: T) => [number, number, number],
+  getFogState: (item: T) => FogRenderState,
+  getIllumination: (item: T) => number,
+) => {
+  const singles: T[] = [];
+  const grouped = new Map<string, FogAwareRuntimeInstanceGroup>();
+
+  items.forEach((item, index) => {
+    // Asset-backed models do not expose reusable geometry until their loader
+    // resolves. Keep those as individual renderers; authored mesh and parts
+    // objects can safely share geometry and materials.
+    if (!canInstanceRuntimeObject(item.object)) {
+      singles.push(item);
+      return;
+    }
+
+    const fogState = getFogState(item);
+    const illumination =
+      Math.round(
+        Math.max(0, Math.min(1, getIllumination(item))) * 12,
+      ) / 12;
+    const key = `${item.object.id}:${fogState}:light${illumination.toFixed(3)}`;
+    const existing =
+      grouped.get(key) ||
+      (() => {
+        const next: FogAwareRuntimeInstanceGroup = {
+          key,
+          object: item.object,
+          instances: [],
+          fogState,
+          illumination,
+        };
+        grouped.set(key, next);
+        return next;
+      })();
+
+    existing.instances.push({
+      key: `cell_${key}_${item.cell.x}_${item.cell.y || 0}_${item.cell.z}_${index}`,
       position: getPosition(item),
       rotationY: item.rotationY,
     });
@@ -2834,18 +3062,18 @@ function CellVisualLayers({
   getCellFogState?: (cell: readonly [number, number]) => FogRenderState;
   getStructureIllumination?: (cell: readonly [number, number]) => number;
 }) {
-  const sampledPlayerPos = useMemo<[number, number] | undefined>(() => {
-    if (!enableOcclusion || !playerPos) return undefined;
+  const sampledMemoryOrigin = useMemo<[number, number] | undefined>(() => {
+    if (!playerPos) return undefined;
     // Fine-grid movement advances by thirds of one rendered macro tile. The
-    // camera occlusion corridor does not meaningfully change inside that tile,
-    // but recalculating it rewrote every occludable instance matrix each fine
-    // step. Sample the rendered macro center and update once per tile instead.
+    // camera corridor and remembered-wall gradient do not meaningfully change
+    // inside that tile. Sample once per rendered macro tile so neither feature
+    // rewrites every structure instance on every fine-grid step.
     return [Math.round(playerPos[0]), Math.round(playerPos[1])];
   }, [
-    enableOcclusion,
     playerPos ? Math.round(playerPos[0]) : undefined,
     playerPos ? Math.round(playerPos[1]) : undefined,
   ]);
+  const sampledPlayerPos = enableOcclusion ? sampledMemoryOrigin : undefined;
 
   const occludedCellKeys = useMemo(
     () =>
@@ -2873,9 +3101,9 @@ function CellVisualLayers({
     cells.forEach((cell) => {
       const key = getCellCoordKey(cell.x, cell.z);
       if (!occludedCellKeys.has(key)) return;
-      // Camera fading is a readability treatment for geometry the viewer can
-      // currently see. Explored and unseen walls retain their dark material so
-      // fading cannot open a bright hole in the secrecy mask.
+      // Camera fading is a player-readability treatment, not present-tense
+      // vision. Retain each wall's fog material while fading any foreground
+      // wall that crosses the camera corridor, including dark memory walls.
       if (
         !getCellFogState ||
         resolveStructureFogCompositePolicy(
@@ -3023,11 +3251,12 @@ function CellVisualLayers({
 
   const staticModelInstances = useMemo(
     () =>
-      groupRuntimeInstances(modelCells, ({ cell }) => [
-        cell.x,
-        cell.y || 0,
-        cell.z,
-      ], Boolean(getCellFogState || getStructureIllumination)),
+      groupFogAwareRuntimeInstances(
+        modelCells,
+        ({ cell }) => [cell.x, cell.y || 0, cell.z],
+        ({ cell }) => getCellFogState?.([cell.x, cell.z]) || "visible",
+        ({ cell }) => getStructureIllumination?.([cell.x, cell.z]) || 0,
+      ),
     [modelCells, getCellFogState, getStructureIllumination],
   );
 
@@ -3044,11 +3273,12 @@ function CellVisualLayers({
     });
 
     return {
-      visible: groupRuntimeInstances(visible, ({ cell }) => [
-        cell.x,
-        cell.y || 0,
-        cell.z,
-      ], Boolean(getCellFogState || getStructureIllumination)),
+      visible: groupFogAwareRuntimeInstances(
+        visible,
+        ({ cell }) => [cell.x, cell.y || 0, cell.z],
+        ({ cell }) => getCellFogState?.([cell.x, cell.z]) || "visible",
+        ({ cell }) => getStructureIllumination?.([cell.x, cell.z]) || 0,
+      ),
       faded,
     };
   }, [
@@ -3061,20 +3291,28 @@ function CellVisualLayers({
   return (
     <>
       {groups.map((group) => (
-        <InstancedCellGroup key={group.key} group={group} />
+        <InstancedCellGroup
+          key={group.key}
+          group={group}
+          memoryOrigin={sampledMemoryOrigin}
+        />
       ))}
       {occludableGroups.map((group) => (
         <InstancedCellGroup
           key={group.key}
           group={group}
           hiddenCellKeys={cameraFadedCellKeys}
+          memoryOrigin={sampledMemoryOrigin}
         />
       ))}
       {staticModelInstances.groups.map((group) => (
         <RuntimeObjectInstances
-          key={`cell_instances_${group.object.id}`}
+          key={`cell_instances_${group.key}`}
           object={group.object}
           instances={group.instances}
+          fogState={group.fogState}
+          illumination={group.illumination}
+          memoryOrigin={sampledMemoryOrigin}
         />
       ))}
       {staticModelInstances.singles.map(({ cell, object, rotationY }, index) => (
@@ -3086,13 +3324,17 @@ function CellVisualLayers({
           opacity={1}
           illumination={getStructureIllumination?.([cell.x, cell.z]) || 0}
           fogState={getCellFogState?.([cell.x, cell.z]) || "visible"}
+          memoryOrigin={sampledMemoryOrigin}
         />
       ))}
       {occludableModelInstances.visible.groups.map((group) => (
         <RuntimeObjectInstances
-          key={`occ_cell_instances_${group.object.id}`}
+          key={`occ_cell_instances_${group.key}`}
           object={group.object}
           instances={group.instances}
+          fogState={group.fogState}
+          illumination={group.illumination}
+          memoryOrigin={sampledMemoryOrigin}
         />
       ))}
       {occludableModelInstances.visible.singles.map(
@@ -3107,6 +3349,7 @@ function CellVisualLayers({
               getStructureIllumination?.([cell.x, cell.z]) || 0
             }
             fogState={getCellFogState?.([cell.x, cell.z]) || "visible"}
+            memoryOrigin={sampledMemoryOrigin}
           />
         ),
       )}
@@ -3121,6 +3364,7 @@ function CellVisualLayers({
             getStructureIllumination?.([cell.x, cell.z]) || 0
           }
           fogState={getCellFogState?.([cell.x, cell.z]) || "visible"}
+          memoryOrigin={sampledMemoryOrigin}
         />
       ))}
       {occludableFastCells.map(({ cell, object, rotationY }, index) =>
@@ -3135,6 +3379,7 @@ function CellVisualLayers({
             getStructureIllumination?.([cell.x, cell.z]) || 0
           }
           fogState={getCellFogState?.([cell.x, cell.z]) || "visible"}
+          memoryOrigin={sampledMemoryOrigin}
         />
         ) : null,
       )}
@@ -3287,26 +3532,147 @@ function CellHighlights({
   );
 }
 
+type RuntimeObjectGeometryGroup = {
+  key: string;
+  materialRef?: string;
+  geometry: THREE.BufferGeometry;
+  localPosition?: [number, number, number];
+  localRotation?: [number, number, number];
+};
+
+const createRuntimePartGeometry = (part: ObjectPart) => {
+  switch (part.shape) {
+    case "box":
+    case "slab":
+    case "rib":
+    case "stair":
+      return new THREE.BoxGeometry(part.size[0], part.size[1], part.size[2]);
+    case "column":
+    case "cylinder":
+      return new THREE.CylinderGeometry(
+        part.size[0] / 2,
+        part.size[0] / 2,
+        part.size[1],
+        Math.max(3, part.segments || 12),
+      );
+    case "cone":
+      return new THREE.CylinderGeometry(
+        0,
+        part.size[0] / 2,
+        part.size[1],
+        Math.max(3, part.segments || 12),
+      );
+    case "sphere":
+      return new THREE.SphereGeometry(part.size[0] / 2, 16, 16);
+    case "plane":
+      return new THREE.PlaneGeometry(
+        part.size[0],
+        part.size[2] || part.size[1] || 1,
+      );
+    case "ring":
+      return new THREE.TorusGeometry(
+        part.size[0] / 2,
+        Math.max(0.01, part.size[1] / 2),
+        Math.max(6, part.segments || 16),
+        Math.max(12, (part.segments || 16) * 2),
+      );
+    default:
+      return new THREE.BoxGeometry(1, 1, 1);
+  }
+};
+
+const createRuntimeObjectGeometryGroups = (
+  object: ObjectData,
+): RuntimeObjectGeometryGroup[] => {
+  // Match ObjectRuntimeModelRenderer's precedence exactly. Imported assets
+  // stay on their loader-backed path, and stale mesh data on migrated/edited
+  // parts objects must not silently replace their authored parts geometry.
+  if (object.model_kind === "asset") return [];
+  if (hasMeshModel(object) && object.mesh) {
+    return createRuntimeMeshGeometryGroups(object.mesh).map((group) => ({
+      ...group,
+    }));
+  }
+  return (object.parts || []).map((part, index) => ({
+    key: `part:${part.name}:${index}`,
+    materialRef: part.material,
+    geometry: createRuntimePartGeometry(part),
+    localPosition: [
+      Number(part.position[0] || 0),
+      Number(part.position[1] || 0),
+      Number(part.position[2] || 0),
+    ],
+    localRotation: [
+      Number(part.rotation[0] || 0),
+      Number(part.rotation[1] || 0),
+      Number(part.rotation[2] || 0),
+    ],
+  }));
+};
+
 function InstancedRuntimeGeometryGroup({
   object,
   geometryGroup,
   instances,
+  fogState,
+  illumination = 0,
+  memoryOrigin,
 }: {
   object: ObjectData;
-  geometryGroup: ReturnType<typeof createRuntimeMeshGeometryGroups>[number];
+  geometryGroup: RuntimeObjectGeometryGroup;
   instances: RuntimeObjectInstance[];
+  fogState?: FogRenderState;
+  illumination?: number;
+  memoryOrigin?: [number, number];
 }) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
   const material = resolveObjectMaterial(object, geometryGroup.materialRef);
-  const texture = getObjectMaterialTexture(material);
-  const normalMap = getObjectMaterialNormalMap(material);
-  const roughnessMap = getObjectMaterialRoughnessMap(material);
+  const fogMaterial = fogState
+    ? resolveStaticFogMaterialPolicy(fogState)
+    : null;
+  const preserveTextureMaps = fogMaterial?.preserveTextureMaps !== false;
+  const texture = preserveTextureMaps ? getObjectMaterialTexture(material) : null;
+  const normalMap = preserveTextureMaps
+    ? getObjectMaterialNormalMap(material)
+    : null;
+  const roughnessMap = preserveTextureMaps
+    ? getObjectMaterialRoughnessMap(material)
+    : null;
   const normalScale = getObjectMaterialNormalScale(material);
+  const materialColor = fogMaterial
+    ? fogMaterial.flatUnlit
+      ? new THREE.Color(
+          fogState === "explored" ? "#ffffff" : fogMaterial.tint || "#000000",
+        )
+      : resolveFogStructureColor(material.color, fogMaterial)
+    : new THREE.Color(material.color);
+  const materialEmission =
+    fogMaterial && fogMaterial.preserveEmission
+      ? resolveStructureEmission(
+          material.color,
+          material.emissive,
+          material.emissiveIntensity,
+          illumination,
+        )
+      : {
+          color: new THREE.Color(material.emissive),
+          intensity: fogMaterial ? 0 : material.emissiveIntensity,
+        };
 
   useLayoutEffect(() => {
     if (!meshRef.current) return;
 
     const dummy = new THREE.Object3D();
+    const memoryInstanceColor = new THREE.Color();
+    const localMatrix = new THREE.Matrix4();
+    const localQuaternion = new THREE.Quaternion().setFromEuler(
+      new THREE.Euler(...(geometryGroup.localRotation || [0, 0, 0])),
+    );
+    localMatrix.compose(
+      new THREE.Vector3(...(geometryGroup.localPosition || [0, 0, 0])),
+      localQuaternion,
+      new THREE.Vector3(1, 1, 1),
+    );
     instances.forEach((instance, index) => {
       dummy.position.set(
         instance.position[0],
@@ -3316,13 +3682,34 @@ function InstancedRuntimeGeometryGroup({
       dummy.rotation.set(0, instance.rotationY, 0);
       dummy.scale.set(1, 1, 1);
       dummy.updateMatrix();
+      dummy.matrix.multiply(localMatrix);
       meshRef.current!.setMatrixAt(index, dummy.matrix);
+      if (fogState === "explored") {
+        const distance = memoryOrigin
+          ? Math.hypot(
+              instance.position[0] - memoryOrigin[0],
+              instance.position[2] - memoryOrigin[1],
+            )
+          : 0;
+        memoryInstanceColor.set(resolveMemoryFogColor(distance));
+        meshRef.current!.setColorAt(index, memoryInstanceColor);
+      }
     });
 
     meshRef.current.count = instances.length;
     meshRef.current.instanceMatrix.needsUpdate = true;
+    if (meshRef.current.instanceColor) {
+      meshRef.current.instanceColor.needsUpdate = true;
+    }
     meshRef.current.computeBoundingSphere();
-  }, [instances]);
+  }, [
+    instances,
+    geometryGroup.localPosition,
+    geometryGroup.localRotation,
+    fogState,
+    memoryOrigin?.[0],
+    memoryOrigin?.[1],
+  ]);
 
   return (
     <instancedMesh
@@ -3331,23 +3718,36 @@ function InstancedRuntimeGeometryGroup({
       frustumCulled
       raycast={() => null}
       castShadow
-      receiveShadow
+      receiveShadow={!fogMaterial?.flatUnlit}
     >
       <primitive object={geometryGroup.geometry} attach="geometry" />
-      <meshStandardMaterial
-        map={texture || undefined}
-        normalMap={normalMap || undefined}
-        normalScale={[normalScale, normalScale]}
-        roughnessMap={roughnessMap || undefined}
-        color={material.color}
-        roughness={material.roughness}
-        metalness={material.metalness}
-        emissive={material.emissive}
-        emissiveIntensity={material.emissiveIntensity}
-        opacity={material.opacity}
-        transparent={material.transparent}
-        side={THREE.DoubleSide}
-      />
+      {fogMaterial?.flatUnlit ? (
+        <meshBasicMaterial
+          color={materialColor}
+          transparent={false}
+          opacity={1}
+          depthTest
+          depthWrite
+          side={THREE.DoubleSide}
+          fog={false}
+          toneMapped={false}
+        />
+      ) : (
+        <meshStandardMaterial
+          map={texture || undefined}
+          normalMap={normalMap || undefined}
+          normalScale={[normalScale, normalScale]}
+          roughnessMap={roughnessMap || undefined}
+          color={materialColor}
+          roughness={material.roughness}
+          metalness={material.metalness}
+          emissive={materialEmission.color}
+          emissiveIntensity={materialEmission.intensity}
+          opacity={material.opacity}
+          transparent={material.transparent}
+          side={THREE.DoubleSide}
+        />
+      )}
     </instancedMesh>
   );
 }
@@ -3355,13 +3755,18 @@ function InstancedRuntimeGeometryGroup({
 function RuntimeObjectInstances({
   object,
   instances,
+  fogState,
+  illumination,
+  memoryOrigin,
 }: {
   object: ObjectData;
   instances: RuntimeObjectInstance[];
+  fogState?: FogRenderState;
+  illumination?: number;
+  memoryOrigin?: [number, number];
 }) {
   const geometryGroups = useMemo(
-    () =>
-      object.mesh ? createRuntimeMeshGeometryGroups(object.mesh) : [],
+    () => createRuntimeObjectGeometryGroups(object),
     [object],
   );
 
@@ -3372,7 +3777,7 @@ function RuntimeObjectInstances({
     [geometryGroups],
   );
 
-  if (!object.mesh || instances.length === 0) return null;
+  if (geometryGroups.length === 0 || instances.length === 0) return null;
 
   return (
     <>
@@ -3382,6 +3787,9 @@ function RuntimeObjectInstances({
           object={object}
           geometryGroup={geometryGroup}
           instances={instances}
+          fogState={fogState}
+          illumination={illumination}
+          memoryOrigin={memoryOrigin}
         />
       ))}
     </>
@@ -3842,7 +4250,7 @@ function CustomObjectPlacementLayer({
       const repeated = (objectCounts.get(placement.object_id) || 0) > 2;
       const canInstance =
         repeated &&
-        Boolean(info.object.mesh) &&
+        canInstanceRuntimeObject(info.object) &&
         !placement.dialogue_id &&
         !info.object.tags?.includes("interactable");
 
@@ -3949,9 +4357,11 @@ type MemoryStructurePlacement = {
 function FoggedMemoryObject({
   object,
   fogState,
+  memoryColor,
 }: {
   object: ObjectData;
   fogState: Exclude<FogRenderState, "visible">;
+  memoryColor: string;
 }) {
   const groupRef = useRef<THREE.Group>(null);
   const settledRef = useRef(false);
@@ -3963,9 +4373,9 @@ function FoggedMemoryObject({
     probesRef.current = 0;
     meshCountRef.current = -1;
     if (groupRef.current) {
-      applyGroupStructurePolicy(groupRef.current, 1, 0, fogState);
+      applyGroupStructurePolicy(groupRef.current, 1, 0, fogState, memoryColor);
     }
-  }, [object, fogState]);
+  }, [object, fogState, memoryColor]);
 
   // Asset meshes can arrive after their parent mounts. Apply the flat memory
   // material through a bounded startup window, then leave the subtree alone.
@@ -3986,7 +4396,7 @@ function FoggedMemoryObject({
       return;
     }
     meshCountRef.current = meshCount;
-    applyGroupStructurePolicy(groupRef.current, 1, 0, fogState);
+    applyGroupStructurePolicy(groupRef.current, 1, 0, fogState, memoryColor);
   });
 
   return (
@@ -4000,10 +4410,12 @@ function MemoryStructurePlacementLayer({
   placements,
   objectById,
   highestCellByCoord,
+  memoryOrigin,
 }: {
   placements: MemoryStructurePlacement[];
   objectById: Map<string, ObjectData>;
   highestCellByCoord: Map<string, CellData>;
+  memoryOrigin?: [number, number];
 }) {
   const renderInfo = useMemo(
     () =>
@@ -4032,6 +4444,14 @@ function MemoryStructurePlacementLayer({
           <FoggedMemoryObject
             object={info.object}
             fogState={info.fogState}
+            memoryColor={resolveMemoryFogColor(
+              memoryOrigin
+                ? Math.hypot(
+                    info.position[0] - memoryOrigin[0],
+                    info.position[2] - memoryOrigin[1],
+                  )
+                : 0,
+            )}
           />
         </group>
       ))}
@@ -4074,7 +4494,7 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
   getStructureIllumination,
   suppressPlacementLights = false,
 }: ReferenceGameRendererProps) {
-  const { gamePackage } = useEngineStore();
+  const gamePackage = useEngineStore((state) => state.gamePackage);
   useWebGLContextRecovery();
 
   const snappedRenderCenter = useMemo<[number, number] | null>(() => {
@@ -4086,6 +4506,10 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
   }, [renderCenter?.[0], renderCenter?.[1]]);
   const [chunkedRenderCenter, setChunkedRenderCenter] =
     useState<[number, number] | null>(snappedRenderCenter);
+  const sampledMemoryOrigin = useMemo<[number, number]>(
+    () => [Math.round(playerPos[0]), Math.round(playerPos[1])],
+    [Math.round(playerPos[0]), Math.round(playerPos[1])],
+  );
 
   useEffect(() => {
     if (!renderCenter || !snappedRenderCenter) {
@@ -4289,6 +4713,7 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
           placements={memoryStructurePlacements}
           objectById={objectById}
           highestCellByCoord={placementSurfaceByCoord}
+          memoryOrigin={sampledMemoryOrigin}
         />
 
         {editLayerY !== undefined && map.triggers?.map((trigger, i) => {
@@ -4325,7 +4750,7 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
         })}
       </group>
     );
-  }, [editLayerY, renderPlacements, memoryStructurePlacements, map.triggers, objectById, highestCellByCoord, placementSurfaceByCoord, mapDelta, suppressPlacementLights, getCellFogState]);
+  }, [editLayerY, renderPlacements, memoryStructurePlacements, map.triggers, objectById, highestCellByCoord, placementSurfaceByCoord, mapDelta, suppressPlacementLights, getCellFogState, sampledMemoryOrigin[0], sampledMemoryOrigin[1]]);
 
   const {
     texture: playerSpriteTex,
@@ -4381,8 +4806,9 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
   );
 
   return (
-    <group onPointerOut={onPointerOut}>
-      <AnimatedSpriteTextureDriver />
+    <WorldItemFloatProvider>
+      <group onPointerOut={onPointerOut}>
+        <AnimatedSpriteTextureDriver />
       {/* Rainbow-dusk sky backdrop, wrapping the whole scene. */}
       <SkyDome />
       {/* Invisible interaction plane for editor and targeting */}
@@ -4695,7 +5121,8 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
             </SmoothPositionGroup>
           );
         })()}
-    </group>
+      </group>
+    </WorldItemFloatProvider>
   );
 });
 
@@ -5054,7 +5481,7 @@ function AuthoritativePointLight({
   );
 }
 
-function AuthoritativeLightLayer({
+const AuthoritativeLightLayer = memo(function AuthoritativeLightLayer({
   visibility,
   map,
   gridSpace,
@@ -5159,7 +5586,7 @@ function AuthoritativeLightLayer({
       ))}
     </group>
   );
-}
+});
 
 export const GameRenderer3D = memo(function GameRenderer3D({
   map,
@@ -5312,6 +5739,28 @@ export const GameRenderer3D = memo(function GameRenderer3D({
     renderRadius === undefined
       ? undefined
       : renderRadius * logicalCellWorldSize(gridSpace, fineRatio);
+  // Fog presentation and authoritative light culling are intentionally
+  // macro-cadenced in fine-grid Play. Preserve one center identity inside the
+  // current macro tile so React can leave those large instanced trees alone
+  // while only the player actor interpolates through its fine steps.
+  const overlayRenderCenterX = renderCenter
+    ? gridSpace === "fine"
+      ? Math.floor(renderCenter[0] / fineRatio) * fineRatio +
+        Math.floor(fineRatio / 2)
+      : renderCenter[0]
+    : undefined;
+  const overlayRenderCenterZ = renderCenter
+    ? gridSpace === "fine"
+      ? Math.floor(renderCenter[1] / fineRatio) * fineRatio +
+        Math.floor(fineRatio / 2)
+      : renderCenter[1]
+    : undefined;
+  const stableOverlayRenderCenter = useMemo<[number, number] | undefined>(() => {
+    if (overlayRenderCenterX === undefined || overlayRenderCenterZ === undefined) {
+      return undefined;
+    }
+    return [overlayRenderCenterX, overlayRenderCenterZ];
+  }, [overlayRenderCenterX, overlayRenderCenterZ]);
   const authoritativeFogSets = useMemo(() => {
     if (!authoritativeVisibility) return null;
     const illuminationByCell = new Map(
@@ -5336,9 +5785,11 @@ export const GameRenderer3D = memo(function GameRenderer3D({
         ),
       ),
       actorVisible: new Set(
-        authoritativeVisibility.currently_visible.map((cell) =>
-          fogCellKey(cell[0], cell[1]),
-        ),
+        authoritativeVisibility.currently_visible
+          .map((cell) => fogCellKey(cell[0], cell[1]))
+          .filter((key) =>
+            hasAuthoritativePresentLight(illuminationByCell.get(key) ?? 0),
+          ),
       ),
       discovered: new Set(
         authoritativeVisibility.discovered.map((cell) =>
@@ -5439,7 +5890,10 @@ export const GameRenderer3D = memo(function GameRenderer3D({
         gridSpace,
         fineRatio,
         currentlyVisible: authoritativeFogSets.actorVisible,
-        terrainVisible: authoritativeFogSets.terrainVisible,
+        // Follow the darkness the player actually sees. Mechanically sensed
+        // light tails are compressed into memory by presentation and must not
+        // suppress the immediate-proximity silhouette.
+        terrainVisible: authoritativeFogSets.presentationVisible,
         lineOfSight: authoritativeFogSets.memoryLineOfSight,
       });
     };
@@ -5537,7 +5991,7 @@ export const GameRenderer3D = memo(function GameRenderer3D({
           map={map}
           gridSpace={gridSpace}
           fineRatio={fineRatio}
-          renderCenter={renderCenter}
+          renderCenter={stableOverlayRenderCenter}
           renderRadius={renderRadius}
           maxLights={authoritativePointLightBudget}
         />
@@ -5547,14 +6001,20 @@ export const GameRenderer3D = memo(function GameRenderer3D({
         mapDelta={mapDelta}
         gridSpace={gridSpace}
         fineRatio={fineRatio}
-        playerPos={playerPos}
+        // Authoritative fog never derives visibility from this coordinate,
+        // but camera occlusion still needs a player anchor. Feed it the
+        // macro-cadenced render center so foreground walls fade correctly
+        // without invalidating the structure tree on every fine-grid step.
+        playerPos={
+          authoritativeVisibility ? stableOverlayRenderCenter : playerPos
+        }
         targetPattern={targetPattern}
         rangeCells={rangeCells}
         hoveredCell={hoveredCell}
         combatOverwatchZones={combatOverwatchZones}
         combatIntents={combatIntents}
         worldDeniedCells={worldDeniedCells}
-        renderCenter={renderCenter}
+        renderCenter={stableOverlayRenderCenter}
         renderRadius={renderRadius}
         fogOfWar={fogOfWar}
         fogRadius={fogRadius}
@@ -5597,7 +6057,9 @@ if (import.meta.hot) {
     spriteTextureCache.forEach((entry) => {
       entry.disposed = true;
       if (entry.releaseTimer) clearTimeout(entry.releaseTimer);
+      if (entry.decodeRetryTimer) clearTimeout(entry.decodeRetryTimer);
       entry.releaseTimer = undefined;
+      entry.decodeRetryTimer = undefined;
       entry.subscribers?.clear();
       const image = entry.texture?.image;
       entry.texture?.dispose();
@@ -5607,6 +6069,7 @@ if (import.meta.hot) {
       }
     });
     spriteTextureCache.clear();
+    activeAnimatedSpriteEntries.clear();
 
     gifDecodeWorker?.terminate();
     gifDecodeWorker = null;
@@ -5623,6 +6086,8 @@ if (import.meta.hot) {
     readoutTextureCache.clear();
     emojiTextureCache.forEach((texture) => texture.dispose());
     emojiTextureCache.clear();
+    memoryStructureMaterials.forEach((material) => material.dispose());
+    memoryStructureMaterials.clear();
     actorRenderPositions.clear();
 
     lightPoolTextureCache?.dispose();

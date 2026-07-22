@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import React, { memo, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
 import type { MapData } from "../schema/game";
 import type { MapDelta } from "../schema/save";
@@ -21,6 +21,7 @@ import {
 import {
   hasAuthoritativePresentLight,
   MEMORY_FOG_COLOR,
+  resolveMemoryFogColor,
 } from "../utils/lightRendering";
 import {
   logicalCellToMacro,
@@ -100,6 +101,7 @@ function InstancedPlaneField({
   coverage = 0.94,
   depthTest = true,
   unlit = false,
+  colorForCell,
 }: {
   cells: OverlayCell[];
   style: OverlayStyle;
@@ -107,6 +109,7 @@ function InstancedPlaneField({
   coverage?: number;
   depthTest?: boolean;
   unlit?: boolean;
+  colorForCell?: (cell: OverlayCell) => string;
 }) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
 
@@ -114,17 +117,23 @@ function InstancedPlaneField({
     const mesh = meshRef.current;
     if (!mesh) return;
     const dummy = new THREE.Object3D();
+    const instanceColor = new THREE.Color();
     cells.forEach((cell, index) => {
       dummy.position.set(cell.x, cell.y, cell.z);
       dummy.rotation.set(-Math.PI / 2, 0, 0);
       dummy.scale.set(cell.size * coverage, cell.size * coverage, 1);
       dummy.updateMatrix();
       mesh.setMatrixAt(index, dummy.matrix);
+      if (colorForCell) {
+        instanceColor.set(colorForCell(cell));
+        mesh.setColorAt(index, instanceColor);
+      }
     });
     mesh.count = cells.length;
     mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     mesh.computeBoundingSphere();
-  }, [cells, coverage]);
+  }, [cells, coverage, colorForCell]);
 
   if (cells.length === 0) return null;
   return (
@@ -138,7 +147,7 @@ function InstancedPlaneField({
       <planeGeometry args={[1, 1]} />
       {unlit ? (
         <meshBasicMaterial
-          color={style.color}
+          color={colorForCell ? "#ffffff" : style.color}
           transparent
           opacity={style.opacity}
           depthTest={depthTest}
@@ -148,7 +157,7 @@ function InstancedPlaneField({
         />
       ) : (
         <meshStandardMaterial
-          color={style.color}
+          color={colorForCell ? "#ffffff" : style.color}
           emissive={style.emissive || "#000000"}
           emissiveIntensity={style.emissiveIntensity || 0}
           transparent
@@ -164,20 +173,22 @@ function InstancedPlaneField({
 
 const FOG_CURTAIN_VERTEX_SHADER = `
   varying vec2 vUv;
+  varying vec3 vFogColor;
   void main() {
     vUv = uv;
+    vFogColor = instanceColor;
     gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0);
   }
 `;
 
 const FOG_CURTAIN_FRAGMENT_SHADER = `
-  uniform vec3 fogColor;
   uniform float fogOpacity;
   varying vec2 vUv;
+  varying vec3 vFogColor;
   void main() {
     float verticalMist = 0.22 + 0.78 * (1.0 - smoothstep(0.08, 1.0, vUv.y));
     float feather = smoothstep(0.0, 0.06, vUv.x) * (1.0 - smoothstep(0.94, 1.0, vUv.x));
-    gl_FragColor = vec4(fogColor, fogOpacity * verticalMist * feather);
+    gl_FragColor = vec4(vFogColor, fogOpacity * verticalMist * feather);
   }
 `;
 
@@ -186,36 +197,41 @@ function InstancedFogCurtainField({
   color,
   opacity,
   renderOrder,
+  colorForCurtain,
 }: {
   curtains: FogCurtain[];
   color: string;
   opacity: number;
   renderOrder: number;
+  colorForCurtain?: (curtain: FogCurtain) => string;
 }) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
   const uniforms = useMemo(
     () => ({
-      fogColor: { value: new THREE.Color(color) },
       fogOpacity: { value: opacity },
     }),
-    [color, opacity],
+    [opacity],
   );
 
   useLayoutEffect(() => {
     const mesh = meshRef.current;
     if (!mesh) return;
     const dummy = new THREE.Object3D();
+    const instanceColor = new THREE.Color();
     curtains.forEach((curtain, index) => {
       dummy.position.set(curtain.x, curtain.y, curtain.z);
       dummy.rotation.set(0, curtain.rotationY, 0);
       dummy.scale.set(curtain.width, curtain.height, 1);
       dummy.updateMatrix();
       mesh.setMatrixAt(index, dummy.matrix);
+      instanceColor.set(colorForCurtain?.(curtain) || color);
+      mesh.setColorAt(index, instanceColor);
     });
     mesh.count = curtains.length;
     mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     mesh.computeBoundingSphere();
-  }, [curtains]);
+  }, [curtains, color, colorForCurtain]);
 
   if (curtains.length === 0) return null;
   return (
@@ -287,7 +303,7 @@ export interface WorldOverlays3DProps {
   performanceMode?: boolean;
 }
 
-export function WorldOverlays3D({
+export const WorldOverlays3D = memo(function WorldOverlays3D({
   map,
   mapDelta,
   gridSpace,
@@ -329,6 +345,32 @@ export function WorldOverlays3D({
       ? Math.floor(renderCenter[1] / fineRatio) * fineRatio + Math.floor(fineRatio / 2)
       : renderCenter[1]
     : undefined;
+  const memoryLogicalOrigin = renderCenter || playerPos;
+  const memoryWorldOrigin = memoryLogicalOrigin
+    ? logicalCellToWorld(memoryLogicalOrigin, gridSpace, fineRatio)
+    : undefined;
+  const sampledMemoryOriginX = memoryWorldOrigin
+    ? Math.round(memoryWorldOrigin[0])
+    : 0;
+  const sampledMemoryOriginZ = memoryWorldOrigin
+    ? Math.round(memoryWorldOrigin[1])
+    : 0;
+  const memoryColorForPoint = useMemo(
+    () => (point: { x: number; z: number }) =>
+      resolveMemoryFogColor(
+        memoryWorldOrigin
+          ? Math.hypot(
+              point.x - sampledMemoryOriginX,
+              point.z - sampledMemoryOriginZ,
+            )
+          : 0,
+      ),
+    [
+      Boolean(memoryWorldOrigin),
+      sampledMemoryOriginX,
+      sampledMemoryOriginZ,
+    ],
+  );
   const inWindow = (x: number, z: number, padding = 0) => {
     if (windowCenterX === undefined || windowCenterZ === undefined || renderRadius === undefined) return true;
     const dx = x - windowCenterX;
@@ -1071,6 +1113,7 @@ export function WorldOverlays3D({
         color={MEMORY_FOG_COLOR}
         opacity={resolveFogCurtainProfile("explored", false).opacity}
         renderOrder={76}
+        colorForCurtain={memoryColorForPoint}
       />
       <InstancedFogCurtainField
         curtains={fogCurtains.unseenOpen}
@@ -1083,6 +1126,7 @@ export function WorldOverlays3D({
         color={MEMORY_FOG_COLOR}
         opacity={resolveFogCurtainProfile("explored", true).opacity}
         renderOrder={78}
+        colorForCurtain={memoryColorForPoint}
       />
       <InstancedFogCurtainField
         curtains={fogCurtains.unseen}
@@ -1097,6 +1141,7 @@ export function WorldOverlays3D({
         coverage={1.02}
         depthTest
         unlit
+        colorForCell={memoryColorForPoint}
       />
       <InstancedPlaneField
         cells={fogResult.unseen}
@@ -1121,6 +1166,7 @@ export function WorldOverlays3D({
         coverage={1.01}
         depthTest
         unlit
+        colorForCell={memoryColorForPoint}
       />
       <InstancedPlaneField
         cells={fineFogCorrection.unseen}
@@ -1154,4 +1200,4 @@ export function WorldOverlays3D({
       ))}
     </group>
   );
-}
+});

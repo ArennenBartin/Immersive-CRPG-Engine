@@ -429,11 +429,11 @@ console.log("engine-core: 3D render-space adapter");
       visibleFadedWall.cameraFaded &&
       exploredWall.render &&
       !exploredWall.postFog &&
-      !exploredWall.cameraFaded &&
+      exploredWall.cameraFaded &&
       unseenWall.render &&
       !unseenWall.postFog &&
-      !unseenWall.cameraFaded,
-    "all walls retain one opaque mesh and only visible walls camera-fade",
+      unseenWall.cameraFaded,
+    "all walls retain one mesh and camera-side walls fade regardless of fog state",
   );
   const fineCopies = Array.from({ length: 9 }, (_, index) => ({
     x: index % 3,

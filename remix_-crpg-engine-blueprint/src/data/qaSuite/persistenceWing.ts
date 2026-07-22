@@ -1,6 +1,6 @@
 // ── QA persistence + succession wing ────────────────────────────────────────
 // A compact browser proof for the authored/campaign/expedition state boundary.
-// The south room contains temporary encounter state and three labeled control
+// The south room contains temporary encounter state and four labeled control
 // terminals. The north annex sits behind a stable shortcut door and holds the
 // campaign artifact plus a resettable hostile. After succession, the shortcut,
 // explored annex, artifact recovery, and campaign switch should remain while
@@ -64,6 +64,12 @@ const successionTerminal = lever(
   [5, 4],
   "qa_cut_persistence_succession",
 );
+const signatureTerminal = lever(
+  "qa_trig_persistence_signature",
+  "obj_terminal",
+  [5, 2],
+  "qa_cut_persistence_signature",
+);
 
 const persistenceMap: QaWing["maps"][number] = {
   id: QA_PERSISTENCE_MAP_ID,
@@ -101,6 +107,10 @@ const persistenceMap: QaWing["maps"][number] = {
       ...successionTerminal.placement,
       id: "qa_persistence_succession_terminal",
     },
+    {
+      ...signatureTerminal.placement,
+      id: "qa_persistence_signature_terminal",
+    },
     sign("obj_bookshelf", [5, 6], "qa_dlg_persistence_instructions"),
     // The crate is deliberately south of the divider: moving it is an obvious
     // tactical delta that should not survive the expedition boundary.
@@ -124,6 +134,18 @@ const persistenceMap: QaWing["maps"][number] = {
       cell: [0, -5],
       count: 1,
     },
+    {
+      id: "qa_persistence_glass_placement",
+      item_id: "qa_persistence_glass",
+      cell: [-3, 2],
+      count: 6,
+    },
+    {
+      id: "qa_persistence_emergency_lamp_placement",
+      item_id: "qa_persistence_emergency_lamp",
+      cell: [-5, 2],
+      count: 1,
+    },
   ],
   container_placements: [],
   regions: [],
@@ -131,6 +153,7 @@ const persistenceMap: QaWing["maps"][number] = {
     campaignTerminal.trigger,
     hazardTerminal.trigger,
     successionTerminal.trigger,
+    signatureTerminal.trigger,
   ],
   exits: [hubReturnExit([0, 8])],
 };
@@ -148,7 +171,7 @@ export const persistenceWing: QaWing = {
     say(
       "qa_dlg_persistence_instructions",
       "Persistence Lab Instructions",
-      "Open the divider door and explore the north annex. Recover the violet Archive Seal there. The three south terminals, west to east, are CAMPAIGN (sets a lasting major switch), HAZARD (creates temporary fire and miasma), and SUCCESSION (ends this Intercessor for the death handoff test). Move the south crate and collect the ordinary supply before succession. A successor should inherit the explored annex, open shortcut, Archive Seal, and campaign switch; the hazard, hostile, crate, and ordinary supply should reset.",
+      "Open the divider door and explore the north annex. The Violet Archive Seal now follows the artifact registry: carry it home to archive it, or die with it and recover it from the death bundle. The south terminals are CAMPAIGN, HAZARD, a SIGNATURE lesson beside the death terminal, and SUCCESSION. A dead Intercessor leaves a reachable ghost and bundle; commune with the ghost once to inherit their signature skill. Harvest the loose Glass and emergency lamp to test the value-for-light tradeoff. Returning through the south exit archives carried artifacts at the hub.",
       [{ text: "Close." }],
     ),
   ],
@@ -188,6 +211,15 @@ export const persistenceWing: QaWing = {
         { type: "modify_player_stats", stats: { hp: -999 } },
       ],
     },
+    {
+      id: "qa_cut_persistence_signature",
+      display_name: "SIGNATURE — Learn a Distinct Successor Skill",
+      is_blocking: true,
+      actions: [
+        { type: "learn_skill", skill_id: "qa_skill_first_aid" },
+        { type: "play_sound", sound_id: "level_up" },
+      ],
+    },
   ],
   items: [
     {
@@ -201,9 +233,49 @@ export const persistenceWing: QaWing = {
     {
       id: "qa_persistence_artifact",
       display_name: "Violet Archive Seal",
-      description: "A campaign-scoped recovery token used only by the persistence QA lab.",
+      description: "A uniquely registered artifact. Its location is conserved through carrying, death bundles, origin return, and hub recovery.",
       icon: "V",
       category: "key",
+      artifact: {
+        artifact_id: "artifact:qa:violet_archive_seal",
+        recovery_value: 90,
+        burden: 2,
+      },
+    },
+    {
+      id: "qa_persistence_glass",
+      display_name: "Raw Glass",
+      description: "Harvested Fracture Glass. Each unit has recoverable value and burden, and can be burned as emergency lamp fuel.",
+      icon: "◇",
+      category: "key",
+      glass_resource: {
+        units_per_item: 1,
+        recovery_value_per_unit: 12,
+        burden_per_unit: 0.2,
+      },
+    },
+    {
+      id: "qa_persistence_emergency_lamp",
+      display_name: "Glass Emergency Lamp",
+      description: "An extinguishable portable lamp. Igniting it consumes one carried unit of Raw Glass.",
+      icon: "◉",
+      category: "key",
+      light_source: {
+        intensity: 0.92,
+        radius: 11,
+        color: "#ffd36a",
+        active_by_default: false,
+        extinguishable: true,
+        mobility: "portable",
+        persistent: false,
+        stimulus_tags: ["light", "glass", "lamp", "portable_light", "glass_fueled"],
+        exposes_carrier: true,
+      },
+      glass_fuel: {
+        resource_item_id: "qa_persistence_glass",
+        units_per_ignition: 1,
+        duration_ticks: 240,
+      },
     },
   ],
   switches: {

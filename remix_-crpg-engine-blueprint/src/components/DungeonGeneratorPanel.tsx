@@ -17,6 +17,7 @@ import {
   X,
 } from "lucide-react";
 import {
+  evaluateDungeonQuality,
   generateDungeon,
   type DungeonGenerationResult,
   type DungeonRecipeDef,
@@ -24,7 +25,8 @@ import {
 } from "../dungeonGen";
 import { DungeonRecipeSchema } from "../dungeonGen/schema";
 import {
-  createInstitutionalRuinRecipe,
+  createInstitutionalRuinSingleMapRecipe,
+  INSTITUTIONAL_RUIN_SINGLE_MAP_RECIPE_ID,
   installInstitutionalRuinGeneratorContent,
 } from "../dungeonGen/presets/institutionalRuin";
 import {
@@ -33,6 +35,12 @@ import {
   type ApplyDungeonPackageBakeOptions,
   type DungeonPackageBakePlan,
 } from "../dungeonGen/packageBake";
+import {
+  bakeFractureDungeonDraft,
+  createFractureDungeonDraft,
+  type FractureDungeonBakeResult,
+  type FractureDungeonDraft,
+} from "../engine-core/fractureDungeonGeneration";
 import { validateOrdinaryMap } from "../engine-core/mapReadinessValidator";
 import type { GamePackage } from "../schema/game";
 import { useEngineStore } from "../store/engineStore";
@@ -43,6 +51,12 @@ import { DungeonGraphView } from "./dungeon/DungeonGraphView";
 import { DungeonPopulationView } from "./dungeon/DungeonPopulationView";
 import { DungeonPreview3D } from "./dungeon/DungeonPreview3D";
 import { DungeonRecipeEditor } from "./dungeon/DungeonRecipeEditor";
+import type {
+  DungeonGeneratorWorkerRequest,
+  DungeonGeneratorWorkerRequestPayload,
+  DungeonGeneratorWorkerResponse,
+  DungeonGeneratorWorkerResult,
+} from "./dungeon/dungeonGeneratorWorkerProtocol";
 
 export type DungeonStudioTab =
   | "recipe"
@@ -157,18 +171,66 @@ const bumpStageSalt = (current: string | undefined) => {
     : `reroll-${count + 1}`;
 };
 
+const fractureBakeAsGenerationResult = (
+  draft: FractureDungeonDraft,
+  bake: FractureDungeonBakeResult,
+  totalDurationMs: number,
+): DungeonGenerationResult => {
+  const macroCellCount = bake.maps.reduce((sum, map) => sum + map.cells.length, 0);
+  const actorCount = bake.maps.reduce((sum, map) => sum + map.entity_placements.length, 0);
+  const objectCount = bake.maps.reduce((sum, map) =>
+    sum + map.custom_object_placements.length + map.container_placements.length, 0);
+  const initialActiveChemistryCells = bake.maps.reduce((sum, map) =>
+    sum + map.cells.filter((cell) => Boolean(cell.initial_chemistry)).length, 0);
+  return {
+    success: bake.success,
+    recipeId: draft.profile.id,
+    recipeVersion: draft.profile.version,
+    seed: draft.profile.seed,
+    generatorVersion: draft.profile.generatorVersion,
+    contentLibraryHash: draft.provenance.contentLibraryHash,
+    canonicalResultHash: bake.outputHash,
+    graph: bake.graph || draft.graph,
+    embedded: bake.embedded,
+    bakedMapIds: bake.maps.map((map) => map.id),
+    maps: bake.maps,
+    validationReports: bake.validationReports,
+    diagnostics: bake.diagnostics,
+    attemptCount: draft.provenance.attemptIndex + 1,
+    metrics: {
+      attemptCount: draft.provenance.attemptIndex + 1,
+      stageDurationMs: { geometry: Math.max(0, totalDurationMs) },
+      totalDurationMs: Math.max(0, totalDurationMs),
+      embeddingBacktracks: 0,
+      rejectionCodes: {},
+      mapCount: bake.maps.length,
+      macroCellCount,
+      estimatedFineCellCount: macroCellCount * 9,
+      roomCount: (bake.graph || draft.graph).nodes.length,
+      actorCount,
+      objectCount,
+      initialActiveChemistryCells,
+      estimatedSaveBytes: new TextEncoder().encode(JSON.stringify(bake.maps)).byteLength,
+    },
+  };
+};
+
 export function DungeonGeneratorPanel() {
   const {
     gamePackage,
     setGamePackage,
     commitDungeonBake,
   } = useEngineStore();
-  const initialSavedRecipe = gamePackage.dungeon_recipes[0];
-  const initialRecipe = initialSavedRecipe || createInstitutionalRuinRecipe();
+  const initialSavedRecipe = gamePackage.dungeon_recipes.find((recipe) =>
+    recipe.id === INSTITUTIONAL_RUIN_SINGLE_MAP_RECIPE_ID) || gamePackage.dungeon_recipes[0];
+  const initialRecipe = initialSavedRecipe || createInstitutionalRuinSingleMapRecipe();
   const [tab, setTab] = useState<DungeonStudioTab>("recipe");
   const [sourceRecipeId, setSourceRecipeId] = useState<string | null>(initialSavedRecipe?.id || null);
   const [recipeDraft, setRecipeDraft] = useState<DungeonRecipeDef>(() => cloneRecipe(initialRecipe));
   const [result, setResult] = useState<DungeonGenerationResult | undefined>();
+  const [fractureDraft, setFractureDraft] = useState<FractureDungeonDraft | undefined>();
+  const [fractureBake, setFractureBake] = useState<FractureDungeonBakeResult | undefined>();
+  const [fractureDiagnostics, setFractureDiagnostics] = useState<DungeonGenerationResult["diagnostics"]>([]);
   const [history, setHistory] = useState<SeedHistoryEntry[]>([]);
   const [compareHistoryId, setCompareHistoryId] = useState<string>("");
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -204,7 +266,8 @@ export function DungeonGeneratorPanel() {
     : recipeParse.error.issues.map((issue) => `${issue.path.join(".") || "recipe"}: ${issue.message}`);
   const contentInstalled =
     gamePackage.dungeon_themes.length > 0 &&
-    gamePackage.dungeon_room_archetypes.length > 0;
+    gamePackage.dungeon_room_archetypes.length > 0 &&
+    gamePackage.dungeon_recipes.some((recipe) => recipe.id === INSTITUTIONAL_RUIN_SINGLE_MAP_RECIPE_ID);
 
   const previewPackage = useMemo(
     () => buildPreviewPackage(gamePackage, result),
@@ -223,6 +286,11 @@ export function DungeonGeneratorPanel() {
     !result.diagnostics.some((diagnostic) => diagnostic.severity === "fatal" || diagnostic.severity === "error") &&
     mapReports.every((report) => report.valid),
   );
+  const qualityReport = useMemo(
+    () => result ? evaluateDungeonQuality({ recipe: recipeDraft, gamePackage: previewPackage, result }) : undefined,
+    [previewPackage, recipeDraft, result],
+  );
+  const generationReady = auditReady && (qualityReport?.ready ?? true);
   const bakePlanState = useMemo<{ plan?: DungeonPackageBakePlan; error?: string }>(() => {
     if (!result?.maps.length) return {};
     try {
@@ -233,13 +301,36 @@ export function DungeonGeneratorPanel() {
   }, [gamePackage, result]);
   const comparedEntry = history.find((entry) => entry.id === compareHistoryId);
 
+  const clearLocalGeneration = () => {
+    setFractureDraft(undefined);
+    setFractureBake(undefined);
+    setFractureDiagnostics([]);
+    setResult(undefined);
+    setSelectedNodeId(null);
+    setSelectedRoomId(null);
+    setFloorIndex(0);
+  };
+
+  const discardLocalGeneration = () => {
+    clearLocalGeneration();
+    setGenerationError(null);
+    setBakeError(null);
+    setProgress(null);
+    setTab("recipe");
+  };
+
+  const handleRecipeChange = (recipe: DungeonRecipeDef) => {
+    setRecipeDraft(recipe);
+    if (fractureDraft || result) clearLocalGeneration();
+  };
+
   const selectSavedRecipe = (id: string) => {
     const recipe = gamePackage.dungeon_recipes.find((candidate) => candidate.id === id);
     if (!recipe) return;
     if (dirty && !window.confirm("Discard unsaved recipe edits and open another recipe?")) return;
     setSourceRecipeId(recipe.id);
     setRecipeDraft(cloneRecipe(recipe));
-    setResult(undefined);
+    clearLocalGeneration();
     setGenerationError(null);
     setTab("recipe");
   };
@@ -260,11 +351,11 @@ export function DungeonGeneratorPanel() {
   };
 
   const newRecipe = () => {
-    const base = createInstitutionalRuinRecipe("new-dungeon-001");
+    const base = createInstitutionalRuinSingleMapRecipe("new-dungeon-001");
     const id = uniqueRecipeId("dungeon_recipe", gamePackage.dungeon_recipes);
     setSourceRecipeId(null);
     setRecipeDraft({ ...base, id, name: "New Dungeon Recipe" });
-    setResult(undefined);
+    clearLocalGeneration();
     setTab("recipe");
   };
 
@@ -272,7 +363,7 @@ export function DungeonGeneratorPanel() {
     const id = uniqueRecipeId(`${recipeDraft.id}_copy`, gamePackage.dungeon_recipes);
     setSourceRecipeId(null);
     setRecipeDraft({ ...cloneRecipe(recipeDraft), id, name: `${recipeDraft.name} Copy` });
-    setResult(undefined);
+    clearLocalGeneration();
     setTab("recipe");
   };
 
@@ -284,29 +375,177 @@ export function DungeonGeneratorPanel() {
     if (!window.confirm(`Delete recipe ${sourceRecipeId}? Baked maps will not be deleted.`)) return;
     const remaining = gamePackage.dungeon_recipes.filter((recipe) => recipe.id !== sourceRecipeId);
     setGamePackage({ ...gamePackage, dungeon_recipes: remaining });
-    const next = remaining[0] || createInstitutionalRuinRecipe("new-dungeon-001");
-    setSourceRecipeId(remaining[0]?.id || null);
+    const preferred = remaining.find((recipe) => recipe.id === INSTITUTIONAL_RUIN_SINGLE_MAP_RECIPE_ID);
+    const next = preferred || remaining[0] || createInstitutionalRuinSingleMapRecipe("new-dungeon-001");
+    setSourceRecipeId((preferred || remaining[0])?.id || null);
     setRecipeDraft(cloneRecipe(next));
-    setResult(undefined);
+    clearLocalGeneration();
     setTab("recipe");
   };
 
   const installStarterContent = () => {
     const installed = installInstitutionalRuinGeneratorContent(gamePackage);
     if (JSON.stringify(installed) !== JSON.stringify(gamePackage)) setGamePackage(installed);
-    const recipe = installed.dungeon_recipes.find((candidate) => candidate.id === "institutional_ruin_v1")
+    const recipe = installed.dungeon_recipes.find((candidate) => candidate.id === INSTITUTIONAL_RUIN_SINGLE_MAP_RECIPE_ID)
+      || installed.dungeon_recipes.find((candidate) => candidate.id === "institutional_ruin_v1")
       || installed.dungeon_recipes[0]
-      || createInstitutionalRuinRecipe();
+      || createInstitutionalRuinSingleMapRecipe();
     setSourceRecipeId(recipe.id);
     setRecipeDraft(cloneRecipe(recipe));
+    clearLocalGeneration();
     setGenerationError(null);
   };
 
-  const executeGeneration = (
-    recipe: DungeonRecipeDef,
-    pkg: GamePackage,
-  ): Promise<DungeonGenerationResult> => {
-    const generatedAt = new Date().toISOString();
+  const generateFractureDraft = async (requestedRecipe = recipeDraft) => {
+    if (generating) return;
+    setGenerationError(null);
+    setBakeError(null);
+    const parsed = DungeonRecipeSchema.safeParse(requestedRecipe);
+    if (!parsed.success) {
+      setGenerationError(parsed.error.issues.map((issue) =>
+        `${issue.path.join(".") || "recipe"}: ${issue.message}`).join(" | "));
+      setTab("recipe");
+      return;
+    }
+    let localPackage: GamePackage;
+    try {
+      // This snapshot deliberately stays local: drafting must not save a recipe
+      // or mutate authored maps in the package store.
+      localPackage = packageWithSavedRecipe(gamePackage, parsed.data, sourceRecipeId);
+    } catch (error) {
+      setGenerationError(error instanceof Error ? error.message : "Could not prepare a local draft snapshot.");
+      setTab("recipe");
+      return;
+    }
+    cancelRef.current = false;
+    setGenerating(true);
+    setProgress({ stage: "topology", attempt: 1, completedStages: 0, totalStages: 1, message: "Creating a non-destructive topology draft…" });
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+    try {
+      const response = await executeWorkerStage({
+        type: "generate",
+        stage: "draft",
+        recipe: parsed.data,
+        gamePackage: localPackage,
+        debug: true,
+      }, (requestId) => ({
+        type: "result",
+        stage: "draft",
+        requestId,
+        result: createFractureDungeonDraft({
+          profile: parsed.data,
+          gamePackage: localPackage,
+          debug: true,
+          shouldCancel: () => cancelRef.current,
+        }),
+      }));
+      if (response.stage !== "draft") throw new Error("Dungeon worker returned the wrong stage for a draft request.");
+      const created = response.result;
+      setFractureDiagnostics(created.diagnostics);
+      setFractureBake(undefined);
+      setResult(undefined);
+      if (!created.success || !created.draft) {
+        setFractureDraft(undefined);
+        const blockingMessage = created.diagnostics.find((entry) =>
+          entry.severity === "fatal" || entry.severity === "error")?.message;
+        setGenerationError(blockingMessage || "The topology draft could not be created.");
+        setTab("audit");
+        return;
+      }
+      setFractureDraft(created.draft);
+      setSelectedNodeId(created.draft.graph.entranceNodeId);
+      setSelectedRoomId(created.draft.graph.entranceNodeId);
+      setFloorIndex(0);
+      setTab("graph");
+    } catch (error) {
+      setFractureDraft(undefined);
+      setFractureBake(undefined);
+      setResult(undefined);
+      setGenerationError(error instanceof Error ? error.message : "Topology draft generation failed.");
+      setTab("audit");
+    } finally {
+      setGenerating(false);
+      setProgress(null);
+      cancelRef.current = false;
+    }
+  };
+
+  const generateFractureGeometry = async () => {
+    if (generating || !fractureDraft) return;
+    setGenerationError(null);
+    setBakeError(null);
+    let localPackage: GamePackage;
+    try {
+      localPackage = packageWithSavedRecipe(gamePackage, fractureDraft.profile, sourceRecipeId);
+    } catch (error) {
+      setGenerationError(error instanceof Error ? error.message : "Could not prepare a local geometry snapshot.");
+      return;
+    }
+    cancelRef.current = false;
+    setGenerating(true);
+    setProgress({ stage: "geometry", attempt: fractureDraft.provenance.attemptIndex + 1, completedStages: 0, totalStages: 1, message: "Baking this exact topology into ordinary preview maps…" });
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+    const startedAt = performance.now();
+    try {
+      const generatedAt = new Date().toISOString();
+      const response = await executeWorkerStage({
+        type: "generate",
+        stage: "geometry",
+        draft: fractureDraft,
+        gamePackage: localPackage,
+        generatedAt,
+        debug: true,
+      }, (requestId) => {
+        const fallbackStartedAt = performance.now();
+        const fallbackBake = bakeFractureDungeonDraft({
+          draft: fractureDraft,
+          gamePackage: localPackage,
+          generatedAt,
+          shouldCancel: () => cancelRef.current,
+        });
+        return {
+          type: "result",
+          stage: "geometry",
+          requestId,
+          result: fallbackBake,
+          durationMs: Math.max(0, performance.now() - fallbackStartedAt),
+        };
+      });
+      if (response.stage !== "geometry") throw new Error("Dungeon worker returned the wrong stage for a geometry request.");
+      const baked = response.result;
+      const generated = fractureBakeAsGenerationResult(
+        fractureDraft,
+        baked,
+        response.durationMs || performance.now() - startedAt,
+      );
+      setFractureBake(baked);
+      setFractureDiagnostics(baked.diagnostics);
+      setResult(generated);
+      setSelectedNodeId(generated.graph?.entranceNodeId || null);
+      setSelectedRoomId(generated.graph?.entranceNodeId || null);
+      setFloorIndex(generated.embedded?.maps[0]?.floorIndex || 0);
+      if (!baked.success) {
+        const blockingMessage = baked.diagnostics.find((entry) =>
+          entry.severity === "fatal" || entry.severity === "error")?.message;
+        setGenerationError(blockingMessage || "Geometry generation did not pass its audit.");
+        setTab("audit");
+      } else {
+        setTab("floor_plan");
+      }
+    } catch (error) {
+      setGenerationError(error instanceof Error ? error.message : "Geometry generation failed.");
+      setTab("audit");
+    } finally {
+      setGenerating(false);
+      setProgress(null);
+      cancelRef.current = false;
+    }
+  };
+
+  const executeWorkerStage = (
+    payload: DungeonGeneratorWorkerRequestPayload,
+    fallback: (requestId: string) => DungeonGeneratorWorkerResult,
+  ): Promise<DungeonGeneratorWorkerResult> => {
     const updateProgress = (next: GenerationProgressState) => setProgress({
       stage: next.stage,
       attempt: next.attempt,
@@ -315,6 +554,8 @@ export function DungeonGeneratorPanel() {
       message: next.message,
     });
 
+    workerSequenceRef.current += 1;
+    const requestId = `dungeon-run-${workerSequenceRef.current}`;
     if (typeof Worker !== "undefined") {
       try {
         const worker = new Worker(
@@ -322,30 +563,22 @@ export function DungeonGeneratorPanel() {
           { type: "module", name: "crpg-dungeon-generator" },
         );
         generationWorkerRef.current = worker;
-        workerSequenceRef.current += 1;
-        const requestId = `dungeon-run-${workerSequenceRef.current}`;
-        return new Promise<DungeonGenerationResult>((resolve, reject) => {
+        return new Promise<DungeonGeneratorWorkerResult>((resolve, reject) => {
           generationWorkerRejectRef.current = reject;
           const cleanup = () => {
             worker.terminate();
             if (generationWorkerRef.current === worker) generationWorkerRef.current = null;
             generationWorkerRejectRef.current = null;
           };
-          worker.onmessage = (event: MessageEvent<{
-            type: "progress" | "result" | "error";
-            requestId: string;
-            progress?: GenerationProgressState;
-            result?: DungeonGenerationResult;
-            error?: string;
-          }>) => {
+          worker.onmessage = (event: MessageEvent<DungeonGeneratorWorkerResponse>) => {
             if (event.data.requestId !== requestId) return;
-            if (event.data.type === "progress" && event.data.progress) {
+            if (event.data.type === "progress") {
               updateProgress(event.data.progress);
               return;
             }
-            if (event.data.type === "result" && event.data.result) {
+            if (event.data.type === "result") {
               cleanup();
-              resolve(event.data.result);
+              resolve(event.data);
               return;
             }
             if (event.data.type === "error") {
@@ -359,35 +592,49 @@ export function DungeonGeneratorPanel() {
             cleanup();
             reject(new Error(message));
           };
-          worker.postMessage({
-            type: "generate",
-            requestId,
-            recipe,
-            gamePackage: pkg,
-            generatedAt,
-            debug: true,
-          });
+          worker.postMessage({ ...payload, requestId } as DungeonGeneratorWorkerRequest);
         });
       } catch {
         // Browser or test environments that cannot construct a module worker
         // retain the same deterministic core path as a compatibility fallback.
       }
     }
+    return Promise.resolve(fallback(requestId));
+  };
 
-    return Promise.resolve(generateDungeon({
+  const executeGeneration = async (
+    recipe: DungeonRecipeDef,
+    pkg: GamePackage,
+  ): Promise<DungeonGenerationResult> => {
+    const generatedAt = new Date().toISOString();
+    const response = await executeWorkerStage({
+      type: "generate",
+      stage: "full",
       recipe,
       gamePackage: pkg,
       generatedAt,
       debug: true,
-      shouldCancel: () => cancelRef.current,
-      onProgress: (next) => updateProgress({
-        stage: next.stage,
-        attempt: next.attempt,
-        completedStages: next.completedStages,
-        totalStages: next.totalStages,
-        message: next.message,
+    }, (requestId) => ({
+      type: "result",
+      stage: "full",
+      requestId,
+      result: generateDungeon({
+        recipe,
+        gamePackage: pkg,
+        generatedAt,
+        debug: true,
+        shouldCancel: () => cancelRef.current,
+        onProgress: (next) => setProgress({
+          stage: next.stage,
+          attempt: next.attempt,
+          completedStages: next.completedStages,
+          totalStages: next.totalStages,
+          message: next.message,
+        }),
       }),
     }));
+    if (response.stage !== "full") throw new Error("Dungeon worker returned the wrong stage for a full generation request.");
+    return response.result;
   };
 
   const cancelGeneration = () => {
@@ -407,6 +654,9 @@ export function DungeonGeneratorPanel() {
     if (generating) return;
     setGenerationError(null);
     setBakeError(null);
+    setFractureDraft(undefined);
+    setFractureBake(undefined);
+    setFractureDiagnostics([]);
     let prepared: { recipe: DungeonRecipeDef; package: GamePackage };
     try {
       prepared = saveRecipe(requestedRecipe);
@@ -461,7 +711,7 @@ export function DungeonGeneratorPanel() {
     if (!changed) return;
     const next = { ...recipeDraft, stageSalts };
     setRecipeDraft(next);
-    void runGeneration(next);
+    void generateFractureDraft(next);
   };
 
   const toggleStageGroup = (stages: readonly DungeonStageId[]) => {
@@ -528,7 +778,7 @@ export function DungeonGeneratorPanel() {
           </select>
           {!contentInstalled && (
             <button onClick={installStarterContent} className="rounded-md border border-purple-500/40 bg-purple-500/10 px-3 py-2 text-sm font-medium text-purple-200 hover:bg-purple-500/20">
-              Install Institutional Ruin starter
+              Install / update single-map starter
             </button>
           )}
           <button
@@ -545,13 +795,39 @@ export function DungeonGeneratorPanel() {
               <X className="h-4 w-4" /> Cancel
             </button>
           ) : (
-            <button
-              onClick={() => void runGeneration()}
-              disabled={recipeIssues.length > 0}
-              className="ml-auto flex items-center gap-2 rounded-md bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              <Play className="h-4 w-4 fill-current" /> Generate
-            </button>
+            <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+              {(fractureDraft || result) && (
+                <button
+                  onClick={discardLocalGeneration}
+                  className="flex items-center gap-2 rounded-md border border-neutral-700 px-3 py-2 text-sm text-neutral-300 hover:border-red-500/50 hover:bg-red-500/10 hover:text-red-200"
+                  title="Discard local draft and geometry. Authored maps are not changed."
+                >
+                  <X className="h-4 w-4" /> Discard
+                </button>
+              )}
+              <button
+                onClick={() => void runGeneration()}
+                disabled={recipeIssues.length > 0}
+                className="flex items-center gap-2 rounded-md border border-neutral-700 px-3 py-2 text-xs font-medium text-neutral-400 hover:border-neutral-500 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-40"
+                title="Compatibility: save the recipe and run the original full pipeline"
+              >
+                Full pipeline
+              </button>
+              <button
+                onClick={() => void generateFractureDraft()}
+                disabled={recipeIssues.length > 0}
+                className="flex items-center gap-2 rounded-md bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <Network className="h-4 w-4" /> Generate Draft
+              </button>
+              <button
+                onClick={() => void generateFractureGeometry()}
+                disabled={!fractureDraft}
+                className="flex items-center gap-2 rounded-md bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <Play className="h-4 w-4 fill-current" /> Generate Geometry
+              </button>
+            </div>
           )}
         </div>
 
@@ -565,6 +841,10 @@ export function DungeonGeneratorPanel() {
               <div className="h-full bg-sky-400 transition-all" style={{ width: `${Math.max(2, progress.totalStages ? progress.completedStages / progress.totalStages * 100 : 2)}%` }} />
             </div>
           </div>
+        )}
+
+        {fractureDraft && (
+          <FractureDraftStatus draft={fractureDraft} bake={fractureBake} diagnostics={fractureDiagnostics} />
         )}
       </header>
 
@@ -617,6 +897,9 @@ export function DungeonGeneratorPanel() {
           onRestore={(entry) => {
             setRecipeDraft(cloneRecipe(entry.recipe));
             setSourceRecipeId(gamePackage.dungeon_recipes.some((recipe) => recipe.id === entry.recipe.id) ? entry.recipe.id : null);
+            setFractureDraft(undefined);
+            setFractureBake(undefined);
+            setFractureDiagnostics([]);
             setResult(entry.result);
             setSelectedNodeId(entry.result.graph?.entranceNodeId || null);
             setSelectedRoomId(entry.result.graph?.entranceNodeId || null);
@@ -640,9 +923,9 @@ export function DungeonGeneratorPanel() {
             className={`flex shrink-0 items-center gap-2 rounded-t-lg px-3 py-2 text-sm transition-colors ${tab === entry.id ? "border-b-2 border-sky-400 bg-sky-500/10 text-sky-200" : "text-neutral-500 hover:bg-neutral-900 hover:text-neutral-200"}`}
           >
             <entry.icon className="h-4 w-4" /> {entry.label}
-            {entry.id === "audit" && result && (
-              <span className={`rounded px-1.5 py-0.5 text-[9px] ${auditReady ? "bg-emerald-500/15 text-emerald-300" : "bg-red-500/15 text-red-300"}`}>
-                {auditReady ? "pass" : "blocked"}
+            {entry.id === "audit" && (result || fractureDraft) && (
+              <span className={`rounded px-1.5 py-0.5 text-[9px] ${generationReady ? "bg-emerald-500/15 text-emerald-300" : "bg-red-500/15 text-red-300"}`}>
+                {generationReady ? "pass" : result ? "blocked" : "draft"}
               </span>
             )}
           </button>
@@ -656,7 +939,7 @@ export function DungeonGeneratorPanel() {
             gamePackage={gamePackage}
             dirty={dirty}
             issues={recipeIssues}
-            onChange={setRecipeDraft}
+            onChange={handleRecipeChange}
             onSave={() => {
               try {
                 saveRecipe();
@@ -670,21 +953,27 @@ export function DungeonGeneratorPanel() {
           />
         )}
         {tab === "graph" && (
-          <DungeonGraphView
-            graph={result?.graph}
-            selectedNodeId={selectedNodeId}
-            onSelectNode={(nodeId) => {
+          <div className="space-y-4">
+            {fractureDraft && <FractureOpportunityPanel draft={fractureDraft} selectedNodeId={selectedNodeId} onSelectNode={(nodeId) => {
               setSelectedNodeId(nodeId);
               setSelectedRoomId(nodeId);
-            }}
-          />
+            }} />}
+            <DungeonGraphView
+              graph={result?.graph || fractureDraft?.graph}
+              selectedNodeId={selectedNodeId}
+              onSelectNode={(nodeId) => {
+                setSelectedNodeId(nodeId);
+                setSelectedRoomId(nodeId);
+              }}
+            />
+          </div>
         )}
         {tab === "floor_plan" && (
           <DungeonFloorPlan
             embedded={result?.embedded}
-            graph={result?.graph}
+            graph={result?.graph || fractureDraft?.graph}
             maps={result?.maps}
-            diagnostics={result?.diagnostics}
+            diagnostics={result?.diagnostics || fractureDiagnostics}
             floorIndex={floorIndex}
             selectedRoomId={selectedRoomId}
             onFloorChange={setFloorIndex}
@@ -698,35 +987,122 @@ export function DungeonGeneratorPanel() {
           <DungeonPreview3D
             maps={result?.maps || []}
             embedded={result?.embedded}
-            graph={result?.graph}
-            diagnostics={result?.diagnostics}
+            graph={result?.graph || fractureDraft?.graph}
+            diagnostics={result?.diagnostics || fractureDiagnostics}
             floorIndex={floorIndex}
             onFloorChange={setFloorIndex}
           />
         )}
         {tab === "population" && (
-          <DungeonPopulationView maps={result?.maps || []} graph={result?.graph} embedded={result?.embedded} />
+          <DungeonPopulationView maps={result?.maps || []} graph={result?.graph || fractureDraft?.graph} embedded={result?.embedded} />
         )}
         {tab === "audit" && (
           <DungeonAuditPanel
-            diagnostics={result?.diagnostics || []}
+            diagnostics={result?.diagnostics || fractureDiagnostics}
             metrics={result?.metrics}
+            qualityReport={qualityReport}
             mapReports={mapReports}
-            canonicalResultHash={result?.canonicalResultHash}
-            contentLibraryHash={result?.contentLibraryHash}
+            canonicalResultHash={result?.canonicalResultHash || fractureDraft?.provenance.topologyHash}
+            contentLibraryHash={result?.contentLibraryHash || fractureDraft?.provenance.contentLibraryHash}
             onSelectDiagnostic={selectDiagnostic}
           />
         )}
         {tab === "bake" && (
           <DungeonBakeDialog
             plan={bakePlanState.plan}
-            auditReady={auditReady}
+            auditReady={generationReady}
             error={bakeError}
             onBake={handleBake}
           />
         )}
       </main>
     </div>
+  );
+}
+
+function FractureDraftStatus({
+  draft,
+  bake,
+  diagnostics,
+}: {
+  draft: FractureDungeonDraft;
+  bake?: FractureDungeonBakeResult;
+  diagnostics: DungeonGenerationResult["diagnostics"];
+}) {
+  const blockingCount = diagnostics.filter((entry) =>
+    entry.severity === "fatal" || entry.severity === "error").length;
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-xs">
+      <div className="flex items-center gap-2 font-semibold text-violet-100">
+        {bake?.success ? <CheckCircle2 className="h-4 w-4 text-emerald-300" /> : <Network className="h-4 w-4 text-violet-300" />}
+        {bake?.success ? "Geometry preview ready" : "Topology draft ready"}
+      </div>
+      <span className="rounded bg-neutral-950/70 px-2 py-1 font-mono text-violet-200" title={draft.provenance.topologyHash}>
+        topology {draft.provenance.topologyHash.slice(0, 16)}
+      </span>
+      {bake?.outputHash && (
+        <span className="rounded bg-neutral-950/70 px-2 py-1 font-mono text-emerald-200" title={bake.outputHash}>
+          geometry {bake.outputHash.slice(0, 16)}
+        </span>
+      )}
+      <span className="text-neutral-400">seed <span className="font-mono text-neutral-200">{draft.provenance.seed}</span></span>
+      <span className="text-neutral-400">
+        profile <span className="font-mono text-neutral-200">{draft.provenance.profileId}@{draft.provenance.profileVersion}</span>
+      </span>
+      <span className="text-neutral-400">generator <span className="font-mono text-neutral-200">{draft.provenance.generatorVersion}</span></span>
+      <span className="text-neutral-400">attempt {draft.provenance.attemptIndex + 1}</span>
+      <span className="text-neutral-400">{draft.opportunities.length} opportunities</span>
+      {bake && <span className="text-neutral-400">{bake.sockets.length} placed sockets · {bake.maps.length} preview maps</span>}
+      <span className={blockingCount ? "text-red-300" : "text-emerald-300"}>
+        {blockingCount ? `${blockingCount} blocking diagnostics` : "validated"}
+      </span>
+      <span className="ml-auto font-medium text-sky-200">Local only · authored maps untouched</span>
+    </div>
+  );
+}
+
+function FractureOpportunityPanel({
+  draft,
+  selectedNodeId,
+  onSelectNode,
+}: {
+  draft: FractureDungeonDraft;
+  selectedNodeId?: string | null;
+  onSelectNode: (nodeId: string) => void;
+}) {
+  const counts = Object.entries(draft.opportunities.reduce<Record<string, number>>((result, opportunity) => {
+    result[opportunity.category] = (result[opportunity.category] ?? 0) + 1;
+    return result;
+  }, {})).sort(([left], [right]) => left.localeCompare(right));
+  return (
+    <section className="rounded-xl border border-violet-500/25 bg-violet-500/5 p-4">
+      <div className="flex flex-wrap items-start gap-3">
+        <div className="mr-auto">
+          <h3 className="text-sm font-semibold text-violet-100">Fracture topology opportunities</h3>
+          <p className="mt-1 text-xs text-neutral-500">
+            Stable intent markers belong to this disposable draft. Geometry places them as ordinary, editable map sockets.
+          </p>
+        </div>
+        {counts.map(([category, count]) => (
+          <span key={category} className="rounded-full border border-violet-500/20 bg-neutral-950 px-2.5 py-1 text-[10px] text-violet-200">
+            {category.replaceAll("_", " ")} · {count}
+          </span>
+        ))}
+      </div>
+      <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
+        {draft.opportunities.map((opportunity) => (
+          <button
+            key={opportunity.id}
+            onClick={() => onSelectNode(opportunity.nodeId)}
+            className={`shrink-0 rounded-lg border px-3 py-2 text-left text-xs ${selectedNodeId === opportunity.nodeId ? "border-sky-400 bg-sky-500/10 text-sky-100" : "border-neutral-800 bg-neutral-950 text-neutral-300 hover:border-violet-500/50"}`}
+            title={`${opportunity.id}\n${opportunity.tags.join(", ")}`}
+          >
+            <span className="block font-semibold capitalize">{opportunity.category.replaceAll("_", " ")}</span>
+            <span className="mt-0.5 block max-w-44 truncate font-mono text-[9px] text-neutral-600">{opportunity.nodeId}</span>
+          </button>
+        ))}
+      </div>
+    </section>
   );
 }
 

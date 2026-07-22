@@ -112,8 +112,8 @@ export function DungeonRecipeEditor({
             <RangeField label="Branches" value={recipe.topology.branchCount} min={0} onChange={(branchCount) => patchTopology({ branchCount })} />
             <RangeField label="Branch length" value={recipe.topology.branchLength} min={1} onChange={(branchLength) => patchTopology({ branchLength })} />
             <RangeField label="Loops" value={recipe.topology.loopCount} min={0} onChange={(loopCount) => patchTopology({ loopCount })} />
-            <RangeField label="Secrets" value={recipe.topology.secretCount} min={0} onChange={(secretCount) => patchTopology({ secretCount })} />
-            <RangeField label="Locks" value={recipe.topology.lockCount} min={0} onChange={(lockCount) => patchTopology({ lockCount })} />
+            <RangeField label="Secrets" value={recipe.topology.secretCount} min={0} disabled={recipe.architecture.connectionMode === "open_only"} onChange={(secretCount) => patchTopology({ secretCount })} />
+            <RangeField label="Locks" value={recipe.topology.lockCount} min={0} disabled={recipe.architecture.connectionMode === "open_only"} onChange={(lockCount) => patchTopology({ lockCount })} />
             <RangeField label="Optional objectives" value={recipe.topology.optionalObjectiveCount || { min: 0, max: 0 }} min={0} onChange={(optionalObjectiveCount) => patchTopology({ optionalObjectiveCount })} />
           </div>
           <Toggle label="Require a valid return path" checked={recipe.topology.requireReturnPath} onChange={(requireReturnPath) => patchTopology({ requireReturnPath })} />
@@ -121,6 +121,40 @@ export function DungeonRecipeEditor({
 
         <Card title="Architecture" description="Room sources, clearances, corridors, and legal vertical transitions.">
           <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Connection policy">
+              <select
+                className={inputClass}
+                value={recipe.architecture.connectionMode}
+                onChange={(event) => {
+                  const connectionMode = event.target.value as DungeonRecipeDef["architecture"]["connectionMode"];
+                  patch({
+                    architecture: { ...recipe.architecture, connectionMode },
+                    topology: connectionMode === "open_only"
+                      ? {
+                          ...recipe.topology,
+                          lockCount: { min: 0, max: 0 },
+                          secretCount: { min: 0, max: 0 },
+                        }
+                      : recipe.topology,
+                  });
+                }}
+              >
+                <option value="open_only">Open passages only</option>
+                <option value="mixed_doors">Doors, locks, and secrets</option>
+              </select>
+            </Field>
+            <Field label="Layout style">
+              <select
+                className={inputClass}
+                value={recipe.architecture.layoutStyle}
+                onChange={(event) => patchArchitecture({
+                  layoutStyle: event.target.value as DungeonRecipeDef["architecture"]["layoutStyle"],
+                })}
+              >
+                <option value="directional_crawl">Directional crawl</option>
+                <option value="organic">Organic</option>
+              </select>
+            </Field>
             <RangeField label="Corridor width" value={recipe.architecture.corridorWidth} min={1} onChange={(corridorWidth) => patchArchitecture({ corridorWidth })} />
             <NumberField label="Room padding" value={recipe.architecture.roomPadding} min={0} onChange={(roomPadding) => patchArchitecture({ roomPadding })} />
             <Field label="Boundary style"><input className={inputClass} value={recipe.architecture.boundaryStyle} onChange={(event) => patchArchitecture({ boundaryStyle: event.target.value })} /></Field>
@@ -162,6 +196,18 @@ export function DungeonRecipeEditor({
             <ProfileSelect label="Hazard" value={recipe.population.hazardProfileId} entries={gamePackage.dungeon_hazard_profiles} onChange={(hazardProfileId) => patchPopulation({ hazardProfileId })} />
             <ProfileSelect label="Reward" value={recipe.population.rewardProfileId} entries={gamePackage.dungeon_reward_profiles} onChange={(rewardProfileId) => patchPopulation({ rewardProfileId })} />
             <ProfileSelect label="Narrative" value={recipe.population.narrativeProfileId} entries={gamePackage.dungeon_narrative_profiles} onChange={(narrativeProfileId) => patchPopulation({ narrativeProfileId })} />
+            <Field label="Starting light">
+              <select
+                className={inputClass}
+                value={recipe.population.startingLightItemId || ""}
+                onChange={(event) => patchPopulation({ startingLightItemId: event.target.value || undefined })}
+              >
+                <option value="">None</option>
+                {gamePackage.items
+                  .filter((item) => Boolean(item.light_source))
+                  .map((item) => <option key={item.id} value={item.id}>{item.display_name}</option>)}
+              </select>
+            </Field>
             <Field label="Infrastructure profile"><input className={inputClass} value={recipe.population.infrastructureProfileId || ""} onChange={(event) => patchPopulation({ infrastructureProfileId: event.target.value || undefined })} /></Field>
             <Field label="Ecology profile"><input className={inputClass} value={recipe.population.ecologyProfileId || ""} onChange={(event) => patchPopulation({ ecologyProfileId: event.target.value || undefined })} /></Field>
           </div>

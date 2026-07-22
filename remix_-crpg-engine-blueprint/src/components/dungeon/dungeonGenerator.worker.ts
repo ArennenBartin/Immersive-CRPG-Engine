@@ -1,45 +1,35 @@
 /// <reference lib="webworker" />
 
-import {
-  generateDungeon,
-  type DungeonRecipeDef,
-} from "../../dungeonGen";
-import type { GamePackage } from "../../schema/game";
-
-interface GenerateWorkerRequest {
-  type: "generate";
-  requestId: string;
-  recipe: DungeonRecipeDef;
-  gamePackage: GamePackage;
-  generatedAt: string;
-  debug: boolean;
-}
+import type {
+  DungeonGeneratorWorkerRequest,
+  DungeonGeneratorWorkerResponse,
+} from "./dungeonGeneratorWorkerProtocol";
+import { runDungeonGeneratorWorkerRequest } from "./dungeonGeneratorWorkerCore";
 
 const workerScope = self as unknown as DedicatedWorkerGlobalScope;
 
-workerScope.onmessage = (event: MessageEvent<GenerateWorkerRequest>) => {
+const post = (response: DungeonGeneratorWorkerResponse) => workerScope.postMessage(response);
+
+workerScope.onmessage = (event: MessageEvent<DungeonGeneratorWorkerRequest>) => {
   if (event.data.type !== "generate") return;
   const request = event.data;
   try {
-    const result = generateDungeon({
-      recipe: request.recipe,
-      gamePackage: request.gamePackage,
-      generatedAt: request.generatedAt,
-      debug: request.debug,
-      // Studio cancellation terminates this worker. The callback remains part
-      // of the deterministic core contract and never depends on wall-clock
-      // time or partial mutable UI state.
+    // Studio cancellation terminates this worker. Core callbacks therefore
+    // remain independent from wall-clock time and partial mutable UI state.
+    const result = runDungeonGeneratorWorkerRequest(request, {
       shouldCancel: () => false,
-      onProgress: (progress) => workerScope.postMessage({
+      onProgress: (progress) => post({
         type: "progress",
+        stage: request.stage,
         requestId: request.requestId,
         progress,
       }),
     });
-    workerScope.postMessage({ type: "result", requestId: request.requestId, result });
+    post(result);
   } catch (error) {
-    workerScope.postMessage({
+    post({
       type: "error",
+      stage: request.stage,
       requestId: request.requestId,
       error: error instanceof Error ? error.message : String(error),
     });
@@ -47,4 +37,3 @@ workerScope.onmessage = (event: MessageEvent<GenerateWorkerRequest>) => {
 };
 
 export {};
-

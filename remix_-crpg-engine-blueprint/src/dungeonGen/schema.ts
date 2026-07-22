@@ -111,6 +111,8 @@ export const DungeonRecipeSchema = z
       requireReturnPath: z.boolean(),
     }),
     architecture: z.object({
+      connectionMode: z.enum(["mixed_doors", "open_only"]).default("mixed_doors"),
+      layoutStyle: z.enum(["organic", "directional_crawl"]).default("organic"),
       roomArchetypePool: z.array(DungeonWeightedRefSchema).min(1),
       roomTemplatePool: z.array(DungeonWeightedRefSchema).default([]),
       proceduralRoomBuilderPool: z.array(DungeonWeightedRefSchema).default([]),
@@ -128,6 +130,7 @@ export const DungeonRecipeSchema = z
       hazardProfileId: NonEmptyIdSchema.optional(),
       rewardProfileId: NonEmptyIdSchema.optional(),
       narrativeProfileId: NonEmptyIdSchema.optional(),
+      startingLightItemId: NonEmptyIdSchema.optional(),
     }),
     difficulty: z.object({
       baseThreat: FiniteNumberSchema.nonnegative(),
@@ -181,6 +184,22 @@ export const DungeonRecipeSchema = z
         path: ["architecture", "allowVerticalTransitions"],
         message: "multi-floor recipes must allow vertical transitions",
       });
+    }
+    if (recipe.architecture.connectionMode === "open_only") {
+      if (recipe.topology.lockCount.min !== 0 || recipe.topology.lockCount.max !== 0) {
+        context.addIssue({
+          code: "custom",
+          path: ["topology", "lockCount"],
+          message: "open_only architecture cannot request locked connections",
+        });
+      }
+      if (recipe.topology.secretCount.min !== 0 || recipe.topology.secretCount.max !== 0) {
+        context.addIssue({
+          code: "custom",
+          path: ["topology", "secretCount"],
+          message: "open_only architecture cannot request secret connections",
+        });
+      }
     }
   });
 

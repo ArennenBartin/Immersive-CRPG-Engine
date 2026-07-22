@@ -774,7 +774,7 @@ function CampaignTab({
 
       <Section
         title="Intercessor succession"
-        hint="A death closes one life, records ghost and bundle requests, starts a fresh expedition, and returns the successor to this hub. The requests become world entities in later phases."
+        hint="A death closes one life, materializes a persistent ghost and independent death bundle at a safe reachable cell, starts a fresh expedition, and returns the successor to this hub. Communing with a ghost transfers its signature skill once."
       >
         <label className="flex items-center gap-2 text-sm text-neutral-200">
           <input
@@ -827,6 +827,23 @@ function CampaignTab({
           <Field label="Reserved names">
             <input className={inputCls} value={csvText(succession.reserved_names)} onChange={(event) => patchSuccession({ reserved_names: csvValues(event.target.value) })} />
           </Field>
+          <Field label="Successor base skills" hint="Comma-separated stable ability IDs. Leave empty for an untrained successor.">
+            <input className={`${inputCls} font-mono text-xs`} value={csvText(succession.base_known_skills)} onChange={(event) => patchSuccession({ base_known_skills: csvValues(event.target.value) })} />
+          </Field>
+          <Field label="Ghost world marker" hint="Compact glyph used by the lightweight persistent landmark renderer.">
+            <input className={inputCls} value={succession.ghost_marker_icon || "👻"} onChange={(event) => patchSuccession({ ghost_marker_icon: event.target.value || "👻" })} />
+          </Field>
+          <Field label="Death-bundle marker">
+            <input className={inputCls} value={succession.death_bundle_marker_icon || "🎒"} onChange={(event) => patchSuccession({ death_bundle_marker_icon: event.target.value || "🎒" })} />
+          </Field>
+          <label className="flex items-center gap-2 self-end pb-2 text-sm text-neutral-200">
+            <input
+              type="checkbox"
+              checked={succession.recover_artifacts_on_hub_entry !== false}
+              onChange={(event) => patchSuccession({ recover_artifacts_on_hub_entry: event.target.checked })}
+            />
+            Archive carried artifacts on hub entry
+          </label>
         </div>
         <div className="rounded-lg border border-indigo-800/60 bg-indigo-950/20 p-3">
           <div className="text-[11px] font-semibold uppercase tracking-widest text-indigo-300">Name-pool preview</div>

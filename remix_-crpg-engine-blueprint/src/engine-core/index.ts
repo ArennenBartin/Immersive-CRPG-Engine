@@ -535,6 +535,7 @@ export type {
 } from "./simulation";
 export {
   createImmersiveIlluminationSnapshotFromV1,
+  createImmersiveVisualAcquisitionResolver,
   createImmersiveViewerVisibilityFromV1,
   queryImmersiveIlluminationAtCell,
   queryImmersiveVisualAcquisition,
@@ -551,6 +552,7 @@ export type {
   ImmersiveViewerVisibilitySnapshot,
   ImmersiveVisualAcquisitionCause,
   ImmersiveVisualAcquisitionQuery,
+  ImmersiveVisualAcquisitionResolver,
   ImmersiveVisualAcquisitionResult,
 } from "./visibility";
 export {
@@ -645,6 +647,60 @@ export type {
   IntercessorNamePools,
   PreviewIntercessorNamesOptions,
 } from "./intercessorSuccession";
+export {
+  communeWithPersistentGhost,
+  consumeGlassFuel,
+  getArtifactRecords,
+  getDeathBundles,
+  getGlassBurden,
+  getPersistentGhosts,
+  getRecoverableGlassValue,
+  materializePendingLegacyRequests,
+  normalizeFractureCrawlCampaign,
+  recordArtifactPickup,
+  recordGlassHarvest,
+  recoverCarriedArtifactsToHub,
+  recoverDeathBundle,
+  transitionFractureCrawlOnDeath,
+} from "./fractureCrawlLegacy";
+export type {
+  ArtifactPickupOptions,
+  ArtifactTransitionResult,
+  DeathBundleRecoveryResult,
+  FractureCrawlDeathTransitionResult,
+  GhostCommunionResult,
+  GlassFuelConsumptionResult,
+  GlassFuelOptions,
+  GlassHarvestOptions,
+  GlassHarvestResult,
+  LegacyMaterializationResult,
+} from "./fractureCrawlLegacy";
+export {
+  FRACTURE_DUNGEON_DRAFT_CONTRACT_VERSION,
+  FRACTURE_DUNGEON_SOCKET_PROP_KIND,
+  bakeFractureDungeonDraft,
+  createFractureDungeonDraft,
+  fractureDungeonSocketsFromMap,
+  hashFractureDungeonProfile,
+  hashFractureDungeonTopology,
+  isFractureDungeonSocketProp,
+  relocateFractureDungeonSocket,
+  validateFractureDungeonDraft,
+} from "./fractureDungeonGeneration";
+export type {
+  BakeFractureDungeonDraftInput,
+  CreateFractureDungeonDraftInput,
+  CreateFractureDungeonDraftResult,
+  FractureDungeonBakeResult,
+  FractureDungeonDraft,
+  FractureDungeonDraftProvenance,
+  FractureDungeonDraftValidation,
+  FractureDungeonOpportunity,
+  FractureDungeonPlacedSocket,
+  FractureDungeonSocketCategory,
+  FractureDungeonSocketProp,
+  RelocateFractureDungeonSocketResult,
+} from "./fractureDungeonGeneration";
 export type {
   ImmersiveGasLayerState,
   ImmersiveCombatActorSnapshot,

@@ -245,6 +245,15 @@ console.log("suite: reference integrity");
   const persistenceHostile = persistenceMap?.entity_placements.find(
     (placement) => placement.id === "qa_persistence_hostile_placement",
   );
+  const persistenceArtifact = authored.items.find(
+    (item) => item.id === "qa_persistence_artifact",
+  );
+  const persistenceGlass = authored.items.find(
+    (item) => item.id === "qa_persistence_glass",
+  );
+  const persistenceLamp = authored.items.find(
+    (item) => item.id === "qa_persistence_emergency_lamp",
+  );
   const worldStatePolicy = authored.settings.world_state_policy as {
     campaign_switch_ids?: string[];
     expedition_switch_ids?: string[];
@@ -260,6 +269,7 @@ console.log("suite: reference integrity");
     name_suffixes?: string[];
     duplicate_name_policy?: string;
     history_keyword_id?: string;
+    base_known_skills?: string[];
   } | undefined;
   const historyKeyword = authored.keywords.find(
     (keyword) => keyword.id === succession?.history_keyword_id,
@@ -289,10 +299,11 @@ console.log("suite: reference integrity");
       ),
   );
   ok(
-    "persistence lab provides campaign, hazard, and lethal succession terminals",
+    "persistence lab provides campaign, hazard, signature, and lethal succession terminals",
     [
       "qa_trig_persistence_campaign",
       "qa_trig_persistence_hazard",
+      "qa_trig_persistence_signature",
       "qa_trig_persistence_succession",
     ].every((id) => persistenceMap?.triggers.some((trigger) => trigger.id === id)) &&
       authored.cutscenes.some(
@@ -316,6 +327,15 @@ console.log("suite: reference integrity");
       ) &&
       authored.cutscenes.some(
         (cutscene) =>
+          cutscene.id === "qa_cut_persistence_signature" &&
+          cutscene.actions.some(
+            (action) =>
+              action.type === "learn_skill" &&
+              action.skill_id === "qa_skill_first_aid",
+          ),
+      ) &&
+      authored.cutscenes.some(
+        (cutscene) =>
           cutscene.id === "qa_cut_persistence_succession" &&
           cutscene.actions.some(
             (action) =>
@@ -323,6 +343,30 @@ console.log("suite: reference integrity");
               (action.stats?.hp || 0) < 0,
           ),
       ),
+  );
+  ok(
+    "persistence lab authors the Phase 6-8 artifact and Glass tradeoff fixtures",
+    persistenceArtifact?.artifact?.artifact_id ===
+      "artifact:qa:violet_archive_seal" &&
+      persistenceArtifact.artifact.recovery_value === 90 &&
+      persistenceMap?.item_placements.some(
+        (placement) =>
+          placement.id === "qa_persistence_glass_placement" &&
+          placement.item_id === persistenceGlass?.id &&
+          placement.count === 6,
+      ) === true &&
+      persistenceGlass?.glass_resource?.recovery_value_per_unit === 12 &&
+      persistenceGlass.glass_resource.burden_per_unit === 0.2 &&
+      persistenceMap.item_placements.some(
+        (placement) =>
+          placement.id === "qa_persistence_emergency_lamp_placement" &&
+          placement.item_id === persistenceLamp?.id,
+      ) &&
+      persistenceLamp?.glass_fuel?.resource_item_id === persistenceGlass?.id &&
+      persistenceLamp.glass_fuel.units_per_ignition === 1 &&
+      persistenceLamp.light_source?.active_by_default === false &&
+      persistenceLamp.light_source.stimulus_tags.includes("light") &&
+      persistenceLamp.light_source.stimulus_tags.includes("glass"),
   );
   ok(
     "persistence lab returns to the canonical hub and is curator-accessible",
@@ -361,6 +405,7 @@ console.log("suite: reference integrity");
       Boolean(succession.name_roots?.length) &&
       Boolean(succession.name_suffixes?.length) &&
       succession.duplicate_name_policy === "avoid" &&
+      succession.base_known_skills?.length === 0 &&
       historyKeyword?.dynamic_capable === true &&
       historyKeyword.category === "intercessors",
   );

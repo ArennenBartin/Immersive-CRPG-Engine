@@ -32,6 +32,27 @@ export const auditDungeonRecipeReferences = (
   if (recipe.population.hazardProfileId) requireIds("hazard profile", [recipe.population.hazardProfileId], gamePackage.dungeon_hazard_profiles);
   if (recipe.population.rewardProfileId) requireIds("reward profile", [recipe.population.rewardProfileId], gamePackage.dungeon_reward_profiles);
   if (recipe.population.narrativeProfileId) requireIds("narrative profile", [recipe.population.narrativeProfileId], gamePackage.dungeon_narrative_profiles);
+  if (recipe.population.startingLightItemId) {
+    const startingLight = gamePackage.items.find(
+      (item) => item.id === recipe.population.startingLightItemId,
+    );
+    if (!startingLight) {
+      diagnostics.push(missingReference("starting light item", recipe.population.startingLightItemId));
+    } else if (
+      !startingLight.light_source ||
+      !startingLight.light_source.active_by_default ||
+      startingLight.light_source.mobility !== "portable" ||
+      !startingLight.light_source.extinguishable
+    ) {
+      diagnostics.push(dungeonDiagnostic(
+        "fatal",
+        "recipe",
+        "DNG_STARTING_LIGHT_ITEM_INVALID",
+        `Starting light item ${startingLight.id} must be an active, portable, extinguishable light source.`,
+        { relatedIds: [startingLight.id] },
+      ));
+    }
+  }
   const archetypeById = new Map(gamePackage.dungeon_room_archetypes.map((entry) => [entry.id, entry]));
   for (const archetypeId of recipe.architecture.roomArchetypePool.map((entry) => entry.id)) {
     const archetype = archetypeById.get(archetypeId) as DungeonRoomArchetypeDef | undefined;
