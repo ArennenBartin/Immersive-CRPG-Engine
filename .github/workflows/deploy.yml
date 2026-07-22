@@ -2,7 +2,7 @@ name: Deploy game to GitHub Pages
 
 on:
   push:
-    branches: [claude/environment-setup-znyu8m]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -35,7 +35,7 @@ jobs:
       - name: Build
         run: npx vite build
         env:
-          VITE_BASE: /Crpg-Engine-7/
+          VITE_BASE: /Immersive-CRPG-Engine/
 
       - name: Publish to gh-pages branch
         uses: peaceiris/actions-gh-pages@v4
