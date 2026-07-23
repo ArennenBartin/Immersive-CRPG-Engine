@@ -15,6 +15,9 @@ import {
   type QaSuiteInstallOptions,
 } from "../data/qaSuiteInstaller";
 import {
+  createPhase11IntegratedArchitectureFixture,
+} from "../data/qaSuite/integratedArchitectureScenario";
+import {
   assertUnconfirmedMapPreservation,
   finalizePackageMigration,
   type MigrationChange,
@@ -271,9 +274,22 @@ export const normalizePackageImportPayloadWithReport = (
 export const normalizePackageImportPayload = (input: unknown): GamePackage =>
   normalizePackageImportPayloadWithReport(input).package;
 
-/** The repository-owned workspace every fresh browser profile starts from. */
-export const createDefaultEnginePackage = (): GamePackage =>
-  normalizeImportedPackage(createQaSuitePackage()).package;
+let bundledDefaultPackage: GamePackage | undefined;
+
+/**
+ * The repository-owned workspace every fresh browser profile starts from.
+ *
+ * The fixed-seed build is cached because dungeon generation is deterministic
+ * but intentionally substantial. Callers receive a clone so a Studio edit can
+ * never mutate the repository-owned template for a later reset or test.
+ */
+export const createDefaultEnginePackage = (): GamePackage => {
+  bundledDefaultPackage ??= normalizeImportedPackage(
+    createPhase11IntegratedArchitectureFixture(createQaSuitePackage())
+      .gamePackage,
+  ).package;
+  return structuredClone(bundledDefaultPackage);
+};
 
 /**
  * Persisted browser workspaces are authored projects, even when they began as
