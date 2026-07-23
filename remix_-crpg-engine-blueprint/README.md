@@ -1,6 +1,6 @@
 # CRPG Engine Feature Demo
 
-This project is a 3D-presented, grid-simulated CRPG engine workspace with a built-in feature-test package. The demo exercises maps, object placement, fog of war, doors, containers, items, dialogue, documents, quests, shops, party recruitment, combat, simulation, saves, import/export, and the editor surfaces.
+This project is a 3D-presented, grid-simulated CRPG engine workspace. Fresh browser profiles open the fixed-seed Phase 11 integrated architecture scenario, which includes the complete feature-test package plus its expedition hub and generated single-map fracture. The demo exercises maps, object placement, fog of war, doors, containers, items, dialogue, documents, quests, shops, party recruitment, combat, simulation, saves, import/export, and the editor surfaces.
 
 ## Documentation
 

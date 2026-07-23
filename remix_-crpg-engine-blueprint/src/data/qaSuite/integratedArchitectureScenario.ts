@@ -26,10 +26,10 @@ import {
   type CellOverrides,
 } from "./shared";
 
-// Phase 11 is intentionally an explicit scenario builder rather than part of
-// ordinary package normalization. It proves that a committed generated map can
-// be edited into a complete vertical slice without adding a generator branch
-// to Play mode or overwriting the canonical QA suite during hydration.
+// Phase 11 is an explicit, deterministic scenario builder rather than part of
+// ordinary package normalization. Fresh browser profiles use its result as the
+// repository-owned starting workspace, while hydration still preserves every
+// persisted project exactly as authored.
 
 export const PHASE_11_SCENARIO_SEED =
   "phase-11-integrated-architecture-v1";

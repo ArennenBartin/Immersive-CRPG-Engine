@@ -73,7 +73,9 @@ Moving a socket through Studio marks generated provenance as manually edited and
 
 ## Integrated Phase 11 scenario
 
-The Project Dashboard provides **Install Phase 11 Scenario…**. This explicit destructive action first downloads a JSON backup, clears the prior Play run, builds the fixed-seed scenario, and opens Play at its dedicated hub.
+Fresh browser profiles now begin with the fixed-seed Phase 11 scenario as the canonical repository-owned workspace. The Project Dashboard also provides **Install Phase 11 Scenario…** for older or authored browser profiles. That explicit destructive action first downloads a JSON backup, clears the prior Play run, builds the scenario, and opens Play at its dedicated hub.
+
+Browser persistence is origin-specific: localhost and GitHub Pages keep separate IndexedDB workspaces. Deploying newer code never silently overwrites a persisted authored package, so an existing Pages profile may need the guarded installer once to adopt the canonical scenario.
 
 The scenario combines one generated single-map fracture with authored content for:
 

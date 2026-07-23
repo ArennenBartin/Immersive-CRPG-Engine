@@ -31,6 +31,10 @@ import {
   TEST_SUITE_START_SPAWN_ID,
 } from "../src/data/testingMapSuite";
 import {
+  PHASE_11_HUB_MAP_ID,
+  PHASE_11_HUB_SPAWN_ID,
+} from "../src/data/qaSuite/integratedArchitectureScenario";
+import {
   FINE_PER_MACRO,
   advanceChemistryForSave,
   applyChemistrySpillToSave,
@@ -72,9 +76,22 @@ console.log("suite: reference integrity");
   );
 
   ok(
-    "fresh Studio workspace is the canonical twelve-map QA suite",
-    defaultPackage.maps.length === TEST_SUITE_MAP_IDS.length &&
-      defaultPackage.maps.every((map) => TEST_SUITE_MAP_IDS.includes(map.id)),
+    "fresh Studio workspace is the canonical Phase 11 scenario",
+    defaultPackage.metadata.title ===
+      "Fracture Crawl — Integrated Architecture Scenario" &&
+      defaultPackage.metadata.version === "phase11.1.0" &&
+      defaultPackage.metadata.start_map_id === PHASE_11_HUB_MAP_ID &&
+      defaultPackage.metadata.start_spawn_id === PHASE_11_HUB_SPAWN_ID &&
+      defaultPackage.maps.length === TEST_SUITE_MAP_IDS.length + 2 &&
+      TEST_SUITE_MAP_IDS.every((id) =>
+        defaultPackage.maps.some((map) => map.id === id),
+      ) &&
+      defaultPackage.maps.some((map) => map.id === PHASE_11_HUB_MAP_ID) &&
+      defaultPackage.maps.filter(
+        (map) =>
+          !TEST_SUITE_MAP_IDS.includes(map.id) &&
+          map.id !== PHASE_11_HUB_MAP_ID,
+      ).length === 1,
   );
   ok(
     "fresh Studio workspace uses the animated GIF player",
