@@ -58,6 +58,10 @@ export interface SimulationSurfaceLayerRecord {
   scent?: number;
   slipperiness?: number;
   trace_potential?: number;
+  // Monotonic movement-stimulus sequence. Optional so legacy saves and
+  // authored layers remain valid; runtime movement uses it to retain a useful
+  // recent trail without serializing the entire expedition's footsteps.
+  trace_sequence?: number;
   decay_per_tick?: number;
   created_at_tick: number;
   expires_at_tick?: number;
@@ -475,6 +479,158 @@ export interface IntercessorCampaignState {
   last_transition?: SuccessionTransitionNotice;
 }
 
+export type PersistentGhostInteractionOutcome =
+  | "inherited"
+  | "already_inherited"
+  | "already_known"
+  | "no_signature_skill";
+
+export interface PersistentGhostInteractionRecord {
+  id: string;
+  intercessor_id: string;
+  clock_minutes: number;
+  outcome: PersistentGhostInteractionOutcome;
+  skill_id?: string;
+}
+
+export interface PersistentGhostRecord {
+  id: string;
+  request_id: string;
+  source_intercessor_id: string;
+  expedition_id: string;
+  requested_map_id: string;
+  requested_cell: [number, number];
+  map_id: string;
+  cell: [number, number];
+  facing: [number, number];
+  created_at_clock_minutes: number;
+  visual_object_id?: string;
+  marker_icon: string;
+  signature_skill_id?: string;
+  degraded_memory_ref?: string;
+  testimony_ref?: string;
+  archive_recovery_state: "unrecovered" | "recovered";
+  placement_fallback_used: boolean;
+  placement_fallback_reason?: string;
+  status: "present" | "archived";
+  interaction_order: string[];
+  interactions: Record<string, PersistentGhostInteractionRecord>;
+}
+
+export type DeathBundleStatus = "available" | "recovered" | "depleted";
+
+export interface DeathBundleRecord {
+  id: string;
+  request_id: string;
+  owner_intercessor_id: string;
+  expedition_id: string;
+  requested_map_id: string;
+  requested_cell: [number, number];
+  map_id: string;
+  cell: [number, number];
+  facing: [number, number];
+  created_at_clock_minutes: number;
+  visual_object_id?: string;
+  marker_icon: string;
+  placement_fallback_used: boolean;
+  placement_fallback_reason?: string;
+  status: DeathBundleStatus;
+  contents: IntercessorInventoryReference[];
+  artifact_ids: string[];
+  returned_artifact_ids: string[];
+  recovered_by_intercessor_id?: string;
+  recovered_at_clock_minutes?: number;
+}
+
+export type ArtifactLifecycleState =
+  | "AtOrigin"
+  | "Carried"
+  | "InDeathBundle"
+  | "RecoveredToHub";
+
+export interface ArtifactOriginRecord {
+  map_id: string;
+  placement_id: string;
+  cell: [number, number];
+  count: number;
+}
+
+export interface ArtifactTransitionRecord {
+  id: string;
+  from: ArtifactLifecycleState;
+  to: ArtifactLifecycleState;
+  clock_minutes: number;
+  intercessor_id?: string;
+  bundle_id?: string;
+  reason: string;
+}
+
+export interface ArtifactCampaignRecord {
+  id: string;
+  item_id: string;
+  origin: ArtifactOriginRecord;
+  recovery_value: number;
+  burden: number;
+  state: ArtifactLifecycleState;
+  carrier_intercessor_id?: string;
+  death_bundle_id?: string;
+  recovered_by_intercessor_id?: string;
+  recovered_at_clock_minutes?: number;
+  transition_order: string[];
+  transitions: Record<string, ArtifactTransitionRecord>;
+}
+
+export interface GlassResourceLedgerRecord {
+  item_id: string;
+  units_per_item: number;
+  units_harvested: number;
+  units_consumed: number;
+  recovery_value_per_unit: number;
+  burden_per_unit: number;
+  harvest_event_ids: string[];
+  fuel_event_ids: string[];
+}
+
+export interface GlassHarvestEventRecord {
+  id: string;
+  item_id: string;
+  source_id: string;
+  item_count: number;
+  units: number;
+  clock_minutes: number;
+}
+
+export interface GlassFuelEventRecord {
+  id: string;
+  light_item_id: string;
+  resource_item_id: string;
+  item_count_consumed: number;
+  units_consumed: number;
+  started_at_tick: number;
+  expires_at_tick: number;
+  clock_minutes: number;
+}
+
+export interface GlassCampaignState {
+  resources: Record<string, GlassResourceLedgerRecord>;
+  harvest_events: Record<string, GlassHarvestEventRecord>;
+  fuel_events: Record<string, GlassFuelEventRecord>;
+}
+
+// Canonical Phases 6–8 build on, but do not replace, the Phase 4–5 lifecycle
+// archive. This campaign-owned projection stores physical ghosts, recoverable
+// death bundles, artifact locations, and the Glass value/burden ledger.
+export interface FractureCrawlCampaignState {
+  schema_version: 1;
+  ghost_order: string[];
+  ghosts: Record<string, PersistentGhostRecord>;
+  death_bundle_order: string[];
+  death_bundles: Record<string, DeathBundleRecord>;
+  artifact_order: string[];
+  artifacts: Record<string, ArtifactCampaignRecord>;
+  glass: GlassCampaignState;
+}
+
 export interface PlaySave {
   schema: "crpg_engine_save_v1";
   package_version: string;
@@ -548,6 +704,7 @@ export interface PlaySave {
   // legacy saves; the runtime migration initializes both deterministically.
   world_state_layers?: WorldStateLayerMetadata;
   intercessor_campaign?: IntercessorCampaignState;
+  fracture_crawl_campaign?: FractureCrawlCampaignState;
   // Save-backed fog of war: per-map set of explored cell keys ("x:z") the
   // player has ever seen. Persisting these makes fog survive reloads. Absent
   // for saves/content that never enabled fog.

@@ -143,18 +143,32 @@ const isSafeStagingNode = (
     (tags.has("quiet") && node.mandatory);
 };
 
-const roomCenterCell = (input: DungeonPopulationInput, nodeId: string): MacroCell | undefined => {
-  const walkable = input.spatial.roomGeometry[nodeId]?.cells
+const spatialRoomCenterCell = (spatial: DungeonSpatialResult, nodeId: string): MacroCell | undefined => {
+  const walkable = spatial.roomGeometry[nodeId]?.cells
     .filter((entry) => entry.walkable)
     .map((entry) => entry.cell) ?? [];
   if (!walkable.length) return undefined;
-  const room = input.spatial.embedded.rooms.find((entry) => entry.nodeId === nodeId);
+  const room = spatial.embedded.rooms.find((entry) => entry.nodeId === nodeId);
   const center: MacroCell = room
     ? [room.bounds.x + Math.floor(room.bounds.width / 2), room.bounds.z + Math.floor(room.bounds.depth / 2)]
     : walkable[0];
   return [...walkable].sort((left, right) =>
     Math.abs(left[0] - center[0]) + Math.abs(left[1] - center[1]) -
       (Math.abs(right[0] - center[0]) + Math.abs(right[1] - center[1])) || compareMacroCells(left, right))[0];
+};
+
+/** The authored safe-spawn socket wins; room center is the compatibility fallback. */
+export const dungeonPrimarySpawnCell = (
+  spatial: DungeonSpatialResult,
+  nodeId: string,
+): MacroCell | undefined => {
+  const geometry = spatial.roomGeometry[nodeId];
+  const walkable = new Set(geometry?.cells.filter((entry) => entry.walkable).map((entry) => macroCellKey(entry.cell)) ?? []);
+  const authored = [...(geometry?.populationSockets ?? [])]
+    .filter((socket) => socket.tags.includes("safe_spawn"))
+    .sort((left, right) => left.id.localeCompare(right.id))
+    .find((socket) => walkable.has(macroCellKey(socket.cell)));
+  return authored ? [...authored.cell] : spatialRoomCenterCell(spatial, nodeId);
 };
 
 /**
@@ -190,7 +204,9 @@ const infrastructureCellsForRoom = (input: DungeonPopulationInput, nodeId: strin
     }
   });
   if (ownsTransitionEndpoint || nodeId === input.spatial.graph.entranceNodeId || nodeId === input.spatial.graph.objectiveNodeId) {
-    reserve(roomCenterCell(input, nodeId));
+    reserve(nodeId === input.spatial.graph.entranceNodeId
+      ? dungeonPrimarySpawnCell(input.spatial, nodeId)
+      : spatialRoomCenterCell(input.spatial, nodeId));
   }
   return [...result.values()].sort(compareMacroCells);
 };
@@ -505,7 +521,11 @@ const populateRewards = (
   const existingObjects = new Set(input.gamePackage.object_library.map((entry) => entry.id));
   const eligible = rng.shuffleById(input.spatial.graph.nodes.filter((node) => {
     const tags = nodeTags(node, archetypeById);
-    return tags.has("resource") || tags.has("reward") || tags.has("branch_end") || node.secret;
+    const protectedDirectionalStaging =
+      input.recipe.architecture.layoutStyle === "directional_crawl" &&
+      isSafeStagingNode(node, archetypeById);
+    return !protectedDirectionalStaging &&
+      (tags.has("resource") || tags.has("reward") || tags.has("branch_end") || node.secret);
   }));
   let budget = input.recipe.difficulty.resourceBudget;
   const target = Math.min(profile.guaranteedResourceRooms, eligible.length);
@@ -521,7 +541,8 @@ const populateRewards = (
     const objectId = rng.weighted(containerPool.map((entry) => ({ ...entry, value: entry.id })), `reward-container:${node.id}`);
     const count = rng.intBetween(tier.minItemCount, tier.maxItemCount);
     const items = Array.from({ length: count }, (_, index) => {
-      const pool = tier.itemPool.filter((entry) => itemIds.has(entry.id));
+      const pool = tier.itemPool.filter((entry) =>
+        itemIds.has(entry.id) && entry.id !== input.recipe.population.startingLightItemId);
       return pool.length ? rng.weighted(pool.map((entry) => ({ ...entry, value: entry.id })), `reward:${node.id}:${index}`) : undefined;
     }).filter((id): id is string => Boolean(id));
     if (!items.length) continue;
@@ -536,6 +557,78 @@ const populateRewards = (
     budget -= tier.resourceCost;
   }
   return rewardRooms;
+};
+
+const populateStartingLight = (
+  input: DungeonPopulationInput,
+  maps: Record<string, DungeonMapPopulation>,
+  occupied: Map<string, Set<string>>,
+  diagnostics: DungeonDiagnostic[],
+): number => {
+  const itemId = input.recipe.population.startingLightItemId;
+  if (!itemId) return 0;
+  const item = input.gamePackage.items.find((candidate) => candidate.id === itemId);
+  if (!item) {
+    diagnostics.push(dungeonDiagnostic(
+      "fatal", "population", "DNG_STARTING_LIGHT_ITEM_MISSING",
+      `Starting light item ${itemId} does not exist in the package.`,
+      { relatedIds: [itemId] },
+    ));
+    return 0;
+  }
+  const profile = item.light_source;
+  if (!profile || !profile.active_by_default || profile.mobility !== "portable" || !profile.extinguishable) {
+    diagnostics.push(dungeonDiagnostic(
+      "fatal", "population", "DNG_STARTING_LIGHT_ITEM_INVALID",
+      `Starting light item ${itemId} must be an active, portable, extinguishable light source.`,
+      { relatedIds: [itemId] },
+    ));
+    return 0;
+  }
+  const entranceNodeId = input.spatial.graph.entranceNodeId;
+  const geometry = input.spatial.roomGeometry[entranceNodeId];
+  const room = input.spatial.embedded.rooms.find((candidate) => candidate.nodeId === entranceNodeId);
+  const spawn = dungeonPrimarySpawnCell(input.spatial, entranceNodeId);
+  if (!geometry || !room || !spawn || !maps[geometry.mapId]) {
+    diagnostics.push(dungeonDiagnostic(
+      "fatal", "population", "DNG_STARTING_LIGHT_ENTRANCE_MISSING",
+      "The generated entrance has no valid room, map, or primary-spawn cell for its starting light.",
+      { nodeId: entranceNodeId, relatedIds: [itemId] },
+    ));
+    return 0;
+  }
+  const walkable = geometry.cells.filter((entry) => entry.walkable).map((entry) => entry.cell);
+  const walkableKeys = new Set(walkable.map(macroCellKey));
+  const connectionKeys = new Set(room.sockets.map((socket) => macroCellKey(socket.cell)));
+  const distanceFromSpawn = (cell: MacroCell) =>
+    Math.abs(cell[0] - spawn[0]) + Math.abs(cell[1] - spawn[1]);
+  const authored = [...geometry.populationSockets]
+    .filter((socket) => socket.kind === "light" || socket.tags.includes("light"))
+    .sort((left, right) => left.id.localeCompare(right.id))
+    .map((socket) => [...socket.cell] as MacroCell)
+    .find((cell) => walkableKeys.has(macroCellKey(cell)) &&
+      macroCellKey(cell) !== macroCellKey(spawn) && distanceFromSpawn(cell) <= 2);
+  const fallback = [...walkable]
+    .filter((cell) => macroCellKey(cell) !== macroCellKey(spawn) &&
+      !connectionKeys.has(macroCellKey(cell)) && distanceFromSpawn(cell) <= 2)
+    .sort((left, right) => distanceFromSpawn(left) - distanceFromSpawn(right) || compareMacroCells(left, right))[0];
+  const cell = authored ?? fallback;
+  if (!cell) {
+    diagnostics.push(dungeonDiagnostic(
+      "fatal", "population", "DNG_STARTING_LIGHT_CELL_UNAVAILABLE",
+      `No walkable entrance cell within two steps of the primary spawn can host ${itemId}.`,
+      { nodeId: entranceNodeId, mapId: geometry.mapId, cell: [...spawn], relatedIds: [itemId] },
+    ));
+    return 0;
+  }
+  maps[geometry.mapId].items.push({
+    semanticKey: "starting-light",
+    item_id: itemId,
+    cell: [...cell],
+    count: 1,
+  });
+  occupied.get(entranceNodeId)?.add(macroCellKey(cell));
+  return 1;
 };
 
 const populateNarrative = (
@@ -695,6 +788,7 @@ export const populateDungeon = (
     node.id,
     new Set(infrastructureCellsForRoom(input, node.id).map(macroCellKey)),
   ]));
+  const startingLights = populateStartingLight(input, maps, occupied, diagnostics);
   const activeHazardCells = populateHazards(input, maps, occupied, diagnostics);
   const manipulationObjects = populateManipulationObject(input, maps, occupied, diagnostics);
   const rewardRooms = populateRewards(input, maps, occupied);
@@ -713,6 +807,7 @@ export const populateDungeon = (
   });
   const value = { maps, activeHazardCells, encounterRooms, quietRooms, rewardRooms, narrativeRooms };
   const metrics = { activeHazardCells, encounterRooms, quietRooms, rewardRooms, narrativeRooms,
+    startingLights,
     manipulationObjects,
     objects: Object.values(maps).reduce((sum, entry) => sum + entry.objects.length, 0),
     entities: Object.values(maps).reduce((sum, entry) => sum + entry.entities.length, 0) };

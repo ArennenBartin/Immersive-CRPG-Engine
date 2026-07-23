@@ -216,9 +216,22 @@ import { ActorPhysicalStateRecord, InventoryLayoutEntry, MapDelta, PlaySave, Sim
 import {
   acknowledgeSuccessionTransition,
   getIntercessorHistory,
-  normalizeIntercessorCampaign,
-  transitionIntercessorOnDeath,
 } from "../engine-core/intercessorSuccession";
+import {
+  communeWithPersistentGhost,
+  consumeGlassFuel,
+  getArtifactRecords,
+  getDeathBundles,
+  getGlassBurden,
+  getPersistentGhosts,
+  getRecoverableGlassValue,
+  normalizeFractureCrawlCampaign,
+  recordArtifactPickup,
+  recordGlassHarvest,
+  recoverCarriedArtifactsToHub,
+  recoverDeathBundle,
+  transitionFractureCrawlOnDeath,
+} from "../engine-core/fractureCrawlLegacy";
 import { beginNewExpedition } from "../engine-core/worldStateLayers";
 import {
   playMusic,
@@ -429,8 +442,11 @@ const PLAY_RENDER_RADIUS_MACRO: Record<VisualScalePreset, number> = {
 const PLAY_FRAME_INTERVAL_MS: Record<VisualScalePreset, number> = {
   performance: 1000 / 30,
   balanced: 1000 / 30,
-  high: 1000 / 45,
-  ultra: 1000 / 60,
+  // The authored GIFs top out at 12.5 fps and the scene is grid-driven.
+  // Submitting an otherwise unchanged High/Ultra scene at 45/60 Hz only
+  // multiplies shadows and post-processing cost without adding visual detail.
+  high: 1000 / 30,
+  ultra: 1000 / 45,
 };
 
 // These cap only the cosmetic Three.js point-light accents. The authoritative
@@ -1993,14 +2009,35 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   useEffect(() => {
     const current = usePlayStore.getState().saveData;
     if (!current) return;
-    const normalized = normalizeIntercessorCampaign(baseGamePackage, current);
+    let normalized = normalizeFractureCrawlCampaign(baseGamePackage, current);
+    const succession = (baseGamePackage.settings?.intercessor_succession || {}) as Record<string, any>;
+    const hubMapId = succession.hub_map_id || baseGamePackage.metadata.start_map_id;
+    let recoveredArtifactIds: string[] = [];
+    if (
+      succession.recover_artifacts_on_hub_entry !== false &&
+      normalized.current_map_id === hubMapId
+    ) {
+      const recovery = recoverCarriedArtifactsToHub(baseGamePackage, normalized);
+      normalized = recovery.save;
+      recoveredArtifactIds = recovery.artifactIds;
+    }
     if (normalized !== current) commitRuntimeSave(normalized);
+    if (recoveredArtifactIds.length > 0) {
+      addLog(
+        `${recoveredArtifactIds.length} artifact${recoveredArtifactIds.length === 1 ? "" : "s"} recovered to the campaign archive.`,
+      );
+    }
   }, [
+    addLog,
     baseGamePackage,
     commitRuntimeSave,
+    saveData?.current_map_id,
     saveData?.world_state_layers?.schema_version,
     saveData?.world_state_layers?.authored.package_version,
     saveData?.intercessor_campaign?.current_intercessor_id,
+    saveData?.intercessor_campaign?.last_transition?.id,
+    saveData?.fracture_crawl_campaign?.schema_version,
+    saveData?.fracture_crawl_campaign?.artifacts,
     saveData?.dialogue_memory?.current_intercessor_id,
   ]);
   const largeMapWindowKeyRef = useRef("");
@@ -2121,6 +2158,20 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   // Last behavior we narrated per exploration actor, so the log announces
   // "bolts in terror" once per state change instead of every pump.
   const explorationBehaviorNoteRef = useRef<Map<string, string>>(new Map());
+  // Exploration pathing is deliberately deterministic, so a valid remainder
+  // of the previous route can be consumed on later fine steps. Re-running the
+  // same bounded BFS for every equal-speed NPC on every player cell was one of
+  // the largest CPU spikes on populated maps.
+  const explorationRouteCacheRef = useRef<
+    Map<
+      string,
+      {
+        mapId: string;
+        targetKey: string;
+        path: [number, number][];
+      }
+    >
+  >(new Map());
   useEffect(() => {
     if (!verbFeedback) return undefined;
     const timeout = window.setTimeout(() => {
@@ -2382,6 +2433,13 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       ),
     [gamePackage.object_library],
   );
+  const entityByIdForPlay = useMemo(
+    () =>
+      new Map(
+        gamePackage.entities.map((entity) => [entity.id, entity]),
+      ),
+    [gamePackage.entities],
+  );
   const activeMapDelta = activeMap
     ? saveData?.map_deltas?.[activeMap.id]
     : undefined;
@@ -2590,6 +2648,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     });
     return centers;
   }, [baseWalkableCells]);
+  useEffect(() => {
+    // A map transition or collision edit can invalidate more than the next
+    // cached step (for example, a door opening midway down the route).
+    explorationRouteCacheRef.current.clear();
+  }, [activeMap?.id, footprintWalkableCells]);
 
   const moveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const moveIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -3812,14 +3875,21 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   toggleStealthRef.current = toggleStealthMode;
 
   // Death is an atomic campaign transition, not a destructive run reset. The
-  // pure operator is naturally idempotent, so React replay and browser refresh
-  // cannot create duplicate deaths, ghosts, bundles, or successors.
+  // Phase 6–8 wrapper consumes the stable Phase 5 requests immediately: it
+  // materializes one persistent ghost and one independent bundle, conserves
+  // registered artifacts, and remains idempotent under React replay/refresh.
   useEffect(() => {
     if ((saveData?.playerStats.hp ?? 1) > 0) return;
     const current = usePlayStore.getState().saveData;
     if (!current) return;
-    const transition = transitionIntercessorOnDeath(baseGamePackage, current);
-    if (!transition.changed || !transition.deceased || !transition.successor) return;
+    const transition = transitionFractureCrawlOnDeath(baseGamePackage, current);
+    const deceased = transition.deceasedIntercessorId
+      ? transition.save.intercessor_campaign?.records[transition.deceasedIntercessorId]
+      : undefined;
+    const successor = transition.successorIntercessorId
+      ? transition.save.intercessor_campaign?.records[transition.successorIntercessorId]
+      : undefined;
+    if (!transition.changed || !deceased || !successor) return;
 
     clearInputState();
     setActiveCutscene(null);
@@ -3842,7 +3912,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     );
     if (successorMap) setActiveMap(successorMap);
     addLog(
-      `${transition.deceased.display_name} died. ${transition.successor.display_name} takes up the expedition record.`,
+      `${deceased.display_name} died. ${successor.display_name} takes up the expedition record; a ghost and death bundle remain behind.`,
     );
     playSfx("enemy_defeat", { volume: 0.55, cooldownMs: 250 });
   }, [
@@ -5434,7 +5504,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       const initializedSave = usePlayStore.getState().saveData;
       if (initializedSave) {
         commitRuntimeSave(
-          normalizeIntercessorCampaign(gamePackage, initializedSave),
+          normalizeFractureCrawlCampaign(gamePackage, initializedSave),
         );
       }
     }
@@ -5567,7 +5637,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     // Live, audible NPCs on this map with their final cell for the turn.
     const npcs = (map.entity_placements || [])
       .map((placement, index) => {
-        const def = gp.entities.find((e) => e.id === placement.entity_id);
+        const def = entityByIdForPlay.get(placement.entity_id);
         const key = entityPlacementStateKey(map.id, placement, index);
         const st = states[key] || {};
         return {
@@ -5637,7 +5707,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             actorId: actorOf(line.speaker),
             text: line.text,
             speaker:
-              gp.entities.find((e) => e.id === line.speaker)?.display_name ||
+              entityByIdForPlay.get(line.speaker)?.display_name ||
               "",
           })),
         );
@@ -5663,20 +5733,29 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       let playerCell = [...sData.player.cell];
 
       const messages: string[] = [];
-      let nextEntities = { ...(sData.entity_states || {}) };
+      const originalEntities = sData.entity_states || {};
+      let nextEntities = originalEntities;
+      let entitiesChanged = false;
+      const ensureMutableEntities = () => {
+        if (!entitiesChanged) {
+          nextEntities = { ...originalEntities };
+          entitiesChanged = true;
+        }
+        return nextEntities;
+      };
 
+      const partyMembers = new Set(sData.party_members || []);
       const mapEntities =
         activeMap.entity_placements
-          ?.map((p, index) => ({ p, index }))
           // Party members don't simulate — they follow the player and act
           // only on their combat turns.
-          ?.filter(({ p }) => !(sData.party_members || []).includes(p.entity_id))
-          ?.map(({ p, index }) => {
-            const def = gp.entities.find((e) => e.id === p.entity_id);
+          ?.flatMap((p, index) => {
+            if (partyMembers.has(p.entity_id)) return [];
+            const def = entityByIdForPlay.get(p.entity_id);
             // Use instance key
             const key = entityPlacementStateKey(activeMap.id, p, index);
             const saved = nextEntities[key] || {};
-            return {
+            return [{
               key,
               def,
               placement: p,
@@ -5685,7 +5764,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
               energy: saved.energy ?? 0,
               isDead: !!saved.dead || !!saved.hidden,
               facing: (saved.facing || p.facing || [0, 1]) as [number, number],
-                    };
+            }];
                   })
                   .filter((n) => {
                     if (!n.def || n.isDead) return false;
@@ -5701,6 +5780,30 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                       : dist <= CHASE_RADIUS + 4;
                   }) || [];
 
+      // Resolve placement/entity identity once per pump. Reactive assistance
+      // used to scan all placements and entity definitions again for every
+      // acting NPC and every historical attack fact.
+      const placementDefinitionByActorId = new Map<string, (typeof mapEntities)[number]["def"]>();
+      (activeMap.entity_placements || []).forEach((placement, index) => {
+        const definition = entityByIdForPlay.get(placement.entity_id);
+        placementDefinitionByActorId.set(placement.entity_id, definition);
+        placementDefinitionByActorId.set(
+          entityPlacementStateKey(activeMap.id, placement, index),
+          definition,
+        );
+      });
+      const recentAttackFacts = [] as NonNullable<PlaySave["world_facts"]>;
+      for (let index = (sData.world_facts || []).length - 1; index >= 0; index -= 1) {
+        const fact = sData.world_facts![index]!;
+        if (
+          fact.map_id === activeMap.id &&
+          fact.action_type === "immersive_combat_attack_resolved" &&
+          fact.target_id
+        ) {
+          recentAttackFacts.push(fact);
+        }
+      }
+
       let walkableMapCache: Set<string> | null = null;
       const getTurnWalkableMap = () => {
         if (walkableMapCache) return walkableMapCache;
@@ -5710,17 +5813,26 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         return walkableMapCache;
       };
 
-      // Occupancy for footprint actors: a candidate CENTER is occupied when
-      // it would overlap another actor's footprint — dilate each occupant's
-      // center by (FINE_PER_MACRO - 1) in Chebyshev distance.
-      const addOccupiedFootprint = (set: Set<string>, cell: [number, number]) => {
-        const reach = FINE_PER_MACRO - 1;
+      // Occupancy for footprint actors: keep reference counts for the dilated
+      // centers once per pump. Previously each actor action rebuilt a complete
+      // Set by walking every other actor's footprint.
+      const occupancyReach = FINE_PER_MACRO - 1;
+      const occupancyCounts = new Map<string, number>();
+      const adjustOccupiedFootprint = (cell: [number, number], delta: 1 | -1) => {
+        const reach = occupancyReach;
         for (let dx = -reach; dx <= reach; dx += 1) {
           for (let dz = -reach; dz <= reach; dz += 1) {
-            set.add(pathCellKey(cell[0] + dx, cell[1] + dz));
+            const key = pathCellKey(cell[0] + dx, cell[1] + dz);
+            const next = (occupancyCounts.get(key) || 0) + delta;
+            if (next > 0) occupancyCounts.set(key, next);
+            else occupancyCounts.delete(key);
           }
         }
       };
+      mapEntities.forEach((entity) => {
+        if (!entity.isDead) adjustOccupiedFootprint([entity.cell[0], entity.cell[1]], 1);
+      });
+      adjustOccupiedFootprint([playerCell[0], playerCell[1]], 1);
 
       // One bounded BFS returns the first few route cells. A macro-paced NPC
       // action therefore searches once instead of repeating the same search
@@ -5730,7 +5842,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         sz: number,
         isGoal: (x: number, z: number) => boolean,
         walkableMap: Set<string>,
-        occupiedMap: Set<string>,
+        isOccupied: (x: number, z: number) => boolean,
         maxPathLength: number,
         stepLimit: number,
       ): [number, number][] => {
@@ -5772,7 +5884,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             const cellKey = pathCellKey(nx, nz);
             if (visited.has(cellKey)) continue;
             visited.add(cellKey);
-            if (walkableMap.has(cellKey) && !occupiedMap.has(cellKey)) {
+            if (walkableMap.has(cellKey) && !isOccupied(nx, nz)) {
               queue.push({
                 x: nx,
                 z: nz,
@@ -5859,25 +5971,14 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           // then remembered on the witnessing entity so it cannot loop.
           if (!reactive) {
             const seenFactIds = new Set<string>(actorState.behavior_seen_fact_ids || []);
-            const attackFact = [...(sData.world_facts || [])]
-              .reverse()
-              .find((fact) => {
+            const attackFact = recentAttackFacts.find((fact) => {
                 if (
-                  fact.map_id !== activeMap.id ||
-                  fact.action_type !== "immersive_combat_attack_resolved" ||
-                  !fact.target_id ||
                   seenFactIds.has(fact.id) ||
                   fact.actor_id === readyNpc.key ||
                   fact.target_id === readyNpc.key
                 )
                   return false;
-                const targetPlacement = (activeMap.entity_placements || []).find((placement, index) => {
-                  const key = entityPlacementStateKey(activeMap.id, placement, index);
-                  return key === fact.target_id || placement.entity_id === fact.target_id;
-                });
-                const targetDef = targetPlacement
-                  ? gp.entities.find((entity) => entity.id === targetPlacement.entity_id)
-                  : undefined;
+                const targetDef = placementDefinitionByActorId.get(fact.target_id!);
                 if (!targetDef || targetDef.is_npc !== readyNpc.def!.is_npc) return false;
                 const witnessCell = fact.cells?.at(-1);
                 return Boolean(
@@ -5949,17 +6050,20 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             explorationBehaviorNoteRef.current.set(readyNpc.key, noteKey);
             if (distToPlayer <= scaleMacroDistanceToFine(8)) messages.push(line);
           };
-          const occupiedForTurn = () => {
-            const occupiedMap = new Set<string>();
-            mapEntities
-              .filter((n) => !n.isDead && n !== readyNpc)
-              .forEach((n) => addOccupiedFootprint(occupiedMap, [n.cell[0], n.cell[1]]));
-            addOccupiedFootprint(occupiedMap, [playerCell[0], playerCell[1]]);
-            return occupiedMap;
+          const isOccupiedForReadyNpc = (x: number, z: number) => {
+            let count = occupancyCounts.get(pathCellKey(x, z)) || 0;
+            // The global counts include the actor that is asking. Its own
+            // dilated footprint must not block its route origin/neighbours.
+            if (
+              Math.abs(x - readyNpc.cell[0]) <= occupancyReach &&
+              Math.abs(z - readyNpc.cell[1]) <= occupancyReach
+            ) {
+              count -= 1;
+            }
+            return count > 0;
           };
           const fleeOneStep = (danger: [number, number]) => {
             const walkableMap = getTurnWalkableMap();
-            const occupiedMap = occupiedForTurn();
             const fromDist =
               Math.abs(readyNpc.cell[0] - danger[0]) +
               Math.abs(readyNpc.cell[1] - danger[1]);
@@ -5974,7 +6078,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
               .filter(
                 ([x, z]) =>
                   walkableMap.has(pathCellKey(x, z)) &&
-                  !occupiedMap.has(pathCellKey(x, z)),
+                  !isOccupiedForReadyNpc(x, z),
               )
               .sort(
                 (a, b) =>
@@ -5997,21 +6101,45 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             maxPathLength = NPC_SCHEDULE_PATH_LIMIT,
           ) => {
             const walkableMap = getTurnWalkableMap();
-            const occupiedMap = occupiedForTurn();
-            const path = findPathSteps(
-              readyNpc.cell[0],
-              readyNpc.cell[1],
-              (x, z) =>
-                stopAdjacent
-                  ? areAdjacentMacro([x, z], target)
-                  : x === target[0] && z === target[1],
-              walkableMap,
-              occupiedMap,
-              maxPathLength,
-              1,
+            const targetKey = `${target[0]}:${target[1]}:${stopAdjacent ? 1 : 0}:${maxPathLength}`;
+            let cached = explorationRouteCacheRef.current.get(readyNpc.key);
+            let destination =
+              cached?.mapId === activeMap.id && cached.targetKey === targetKey
+                ? cached.path[0]
+                : undefined;
+            const cachedStepIsValid = Boolean(
+              destination &&
+                Math.abs(destination[0] - readyNpc.cell[0]) +
+                    Math.abs(destination[1] - readyNpc.cell[1]) ===
+                  1 &&
+                walkableMap.has(pathCellKey(destination[0], destination[1])) &&
+                !isOccupiedForReadyNpc(destination[0], destination[1]),
             );
-            const destination = path.at(-1);
-            if (destination) readyNpc.cell = [destination[0], destination[1]];
+            if (!cachedStepIsValid) {
+              const path = findPathSteps(
+                readyNpc.cell[0],
+                readyNpc.cell[1],
+                (x, z) =>
+                  stopAdjacent
+                    ? areAdjacentMacro([x, z], target)
+                    : x === target[0] && z === target[1],
+                walkableMap,
+                isOccupiedForReadyNpc,
+                maxPathLength,
+                Math.min(32, maxPathLength),
+              );
+              cached = {
+                mapId: activeMap.id,
+                targetKey,
+                path,
+              };
+              explorationRouteCacheRef.current.set(readyNpc.key, cached);
+              destination = path[0];
+            }
+            if (destination) {
+              readyNpc.cell = [destination[0], destination[1]];
+              cached!.path.shift();
+            }
           };
           const updateTask = (state: "active" | "done") => {
             if (!decision.source_task_id) return;
@@ -6111,7 +6239,6 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           } else if (decision.action === "wander") {
             const home = readyNpc.placement.cell as [number, number];
             const walkableMap = getTurnWalkableMap();
-            const occupiedMap = occupiedForTurn();
             const options: [number, number][] = [
               [readyNpc.cell[0] + 1, readyNpc.cell[1]],
               [readyNpc.cell[0], readyNpc.cell[1] + 1],
@@ -6123,7 +6250,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                 Math.abs(x - home[0]) + Math.abs(z - home[1]) <=
                   scaleMacroDistanceToFine(1) &&
                 walkableMap.has(pathCellKey(x, z)) &&
-                !occupiedMap.has(pathCellKey(x, z)),
+                !isOccupiedForReadyNpc(x, z),
             );
             if (step) {
               readyNpc.cell = [step[0], step[1]];
@@ -6144,12 +6271,14 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             readyNpc.cell[0] !== turnStartCell[0] ||
             readyNpc.cell[1] !== turnStartCell[1]
           ) {
+            adjustOccupiedFootprint(turnStartCell, -1);
+            adjustOccupiedFootprint([readyNpc.cell[0], readyNpc.cell[1]], 1);
             readyNpc.facing = combatPrimaryDirection(
               turnStartCell,
               [readyNpc.cell[0], readyNpc.cell[1]],
             );
           }
-          nextEntities[readyNpc.key] = {
+          ensureMutableEntities()[readyNpc.key] = {
             ...recordedState,
             cell: readyNpc.cell,
             facing: readyNpc.facing,
@@ -6174,11 +6303,20 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                   playerEnergy += playerSpeed * ticks;
                   mapEntities.forEach((n) => {
                     n.energy += Math.max(1, n.def!.speed || 10) * ticks;
-                    nextEntities[n.key] = {
-                      ...(nextEntities[n.key] || {}),
+                    const current = nextEntities[n.key] || {};
+                    const nextEnergy = n.energy;
+                    const stateAlreadyMatches =
+                      current.cell?.[0] === n.cell[0] &&
+                      current.cell?.[1] === n.cell[1] &&
+                      current.hp === n.hp &&
+                      current.energy === nextEnergy &&
+                      Boolean(current.dead) === n.isDead;
+                    if (stateAlreadyMatches) return;
+                    ensureMutableEntities()[n.key] = {
+                      ...current,
                       cell: n.cell,
                       hp: n.hp,
-                      energy: n.energy,
+                      energy: nextEnergy,
                       dead: n.isDead,
                     };
                   });
@@ -6193,7 +6331,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             hp: playerHp,
             energy: playerEnergy,
           },
-          entity_states: nextEntities,
+          entity_states: entitiesChanged ? nextEntities : sData.entity_states,
           map_deltas: npcTasksChanged
             ? {
                 ...(sData.map_deltas || {}),
@@ -7504,10 +7642,19 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       }
     }
     if (verb === "drop") {
-      const firstStack = (saveData?.inventory || []).find((entry) => entry.count > 0);
+      const firstStack = (saveData?.inventory || []).find(
+        (entry) =>
+          entry.count > 0 &&
+          !gamePackage.items.find((item) => item.id === entry.id)?.artifact &&
+          !gamePackage.items.find((item) => item.id === entry.id)?.glass_resource,
+      );
       if (!firstStack) {
         playSfx("warning", { volume: 0.28, cooldownMs: 180 });
-        addLog("Nothing to drop.");
+        addLog(
+          (saveData?.inventory || []).some((entry) => entry.count > 0)
+            ? "Registered artifacts and tracked Glass cannot be dropped; recover or consume them through their campaign rules."
+            : "Nothing to drop.",
+        );
         return;
       }
       setVerbTargeting({ verb, itemId: firstStack.id });
@@ -7549,6 +7696,20 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     const currentSave = usePlayStore.getState().saveData;
     const gp = getRuntimeGamePackage();
     if (!currentSave || !activeMap) return;
+    if (
+      targeting.verb === "drop" &&
+      (gp.items.find((item) => item.id === targeting.itemId)?.artifact ||
+        gp.items.find((item) => item.id === targeting.itemId)?.glass_resource)
+    ) {
+      presentImmersiveVerbFailure(
+        targeting.verb,
+        [x, z],
+        "Campaign-tracked artifacts and Glass stay with their carrier until recovered, consumed, or bundled by death.",
+      );
+      setVerbTargeting(null);
+      setHoveredCell(null);
+      return;
+    }
     const currentWorldState = evaluateImmersiveWorldStateForSave(gp, currentSave, {
       mapId: activeMap.id,
       cell: currentSave.player.cell,
@@ -7986,6 +8147,84 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       return; // a whiff costs nothing — reposition instead
     }
 
+    // Persistent campaign landmarks are deliberately not ordinary entities or
+    // item drops: they do not join AI, collision, combat, or remembered-fog
+    // state. Act reaches a faced/underfoot ghost or bundle by macro footprint.
+    const landmarkCells: [number, number][] = [[tx, tz], actorCell];
+    const reachableGhost = getPersistentGhosts(saveData).find(
+      (ghost) =>
+        ghost.status === "present" &&
+        ghost.map_id === activeMap.id &&
+        landmarkCells.some((cell) => sameMacroCoord(ghost.cell, cell)),
+    );
+    if (reachableGhost) {
+      const communion = communeWithPersistentGhost(gp, saveData, reachableGhost.id);
+      const source = saveData.intercessor_campaign?.records[reachableGhost.source_intercessor_id];
+      const skill = communion.skillId
+        ? gp.abilities.find((ability) => ability.id === communion.skillId)
+        : undefined;
+      const nextSave = communion.changed
+        ? {
+            ...communion.save,
+            playerStats: {
+              ...communion.save.playerStats,
+              energy: Math.max(0, (communion.save.playerStats.energy || 0) - 1000),
+            },
+          }
+        : communion.save;
+      if (nextSave !== saveData) commitRuntimeSave(nextSave);
+      if (communion.outcome === "inherited") {
+        addLog(
+          `${source?.display_name || "The ghost"} teaches ${skill?.display_name || communion.skillId}. The inheritance is permanent.`,
+        );
+        useFxStore.getState().addPopup(reachableGhost.cell, "Skill inherited", "#c4b5fd", 1.9);
+        playSfx("level_up", { volume: 0.42, cooldownMs: 180 });
+      } else if (communion.outcome === "already_known") {
+        addLog(
+          `${source?.display_name || "The ghost"}'s signature is ${skill?.display_name || communion.skillId}; you already know it.`,
+        );
+        playSfx("dialogue_open", { volume: 0.22, cooldownMs: 120 });
+      } else if (communion.outcome === "already_inherited") {
+        addLog(`${source?.display_name || "The ghost"} has already given this life all it can.`);
+        playSfx("ui_back", { volume: 0.16, cooldownMs: 120 });
+      } else {
+        addLog(`${source?.display_name || "The ghost"} remembers no transferable signature skill.`);
+        playSfx("dialogue_open", { volume: 0.18, cooldownMs: 120 });
+      }
+      return;
+    }
+
+    const reachableBundle = getDeathBundles(saveData).find(
+      (bundle) =>
+        bundle.status === "available" &&
+        bundle.map_id === activeMap.id &&
+        landmarkCells.some((cell) => sameMacroCoord(bundle.cell, cell)),
+    );
+    if (reachableBundle) {
+      const recovery = recoverDeathBundle(gp, saveData, reachableBundle.id);
+      if (recovery.outcome === "recovered") {
+        const nextSave: PlaySave = {
+          ...recovery.save,
+          playerStats: {
+            ...recovery.save.playerStats,
+            energy: Math.max(0, (recovery.save.playerStats.energy || 0) - 1000),
+          },
+        };
+        commitRuntimeSave(nextSave);
+        const owner = saveData.intercessor_campaign?.records[reachableBundle.owner_intercessor_id];
+        const itemCount = reachableBundle.contents.reduce((total, entry) => total + entry.count, 0);
+        addLog(
+          `Recovered ${owner?.display_name || "a prior Intercessor"}'s death bundle: ${itemCount} item${itemCount === 1 ? "" : "s"}${recovery.artifactIds.length ? ` and ${recovery.artifactIds.length} registered artifact${recovery.artifactIds.length === 1 ? "" : "s"}` : ""}.`,
+        );
+        useFxStore.getState().addPopup(reachableBundle.cell, "Bundle recovered", "#f5d0fe", 1.8);
+        playSfx("item_pickup", { volume: 0.4, cooldownMs: 120 });
+      } else {
+        addLog("That death bundle has already been recovered or returned.");
+        playSfx("warning", { volume: 0.2, cooldownMs: 120 });
+      }
+      return;
+    }
+
     // Check interact triggers on the faced cell first, then the actor's cell.
     // Some authored interactables are walkable, so standing on the target
     // should be as valid as facing it from an adjacent tile.
@@ -8182,7 +8421,26 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         energyCost: 1000,
       });
       if (pickup.ok) {
-        commitWithFacts(saveData, pickup);
+        let lifecycleSave = pickup.save;
+        let harvestedValue: number | undefined;
+        if (!worldItem.dropped) {
+          lifecycleSave = recordArtifactPickup(gp, lifecycleSave, {
+            mapId: activeMap.id,
+            placementId: worldItem.id,
+            itemId: worldItem.item_id,
+          }).save;
+          const harvest = recordGlassHarvest(gp, lifecycleSave, {
+            itemId: worldItem.item_id,
+            itemCount: worldItem.count,
+            sourceId: `${activeMap.id}:${worldItem.id}`,
+          });
+          lifecycleSave = harvest.save;
+          if (harvest.outcome === "recorded") harvestedValue = harvest.recoverableValue;
+        }
+        commitWithFacts(saveData, { ...pickup, save: lifecycleSave });
+        if (harvestedValue !== undefined) {
+          addLog(`Recoverable Glass value is now ${harvestedValue}.`);
+        }
       } else {
         // Fallback to the legacy mutators if the adapter can't resolve it.
         usePlayStore.getState().giveItem(worldItem.item_id, worldItem.count);
@@ -8194,6 +8452,20 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         usePlayStore.getState().updatePlayerStats({
           energy: (saveData.playerStats.energy || 0) - 1000,
         });
+        const fallbackSave = usePlayStore.getState().saveData;
+        if (fallbackSave && !worldItem.dropped) {
+          let lifecycleSave = recordArtifactPickup(gp, fallbackSave, {
+            mapId: activeMap.id,
+            placementId: worldItem.id,
+            itemId: worldItem.item_id,
+          }).save;
+          lifecycleSave = recordGlassHarvest(gp, lifecycleSave, {
+            itemId: worldItem.item_id,
+            itemCount: worldItem.count,
+            sourceId: `${activeMap.id}:${worldItem.id}`,
+          }).save;
+          commitRuntimeSave(lifecycleSave);
+        }
       }
       addLog(
         `Picked up ${worldItem.count > 1 ? `${worldItem.count}x ` : ""}${itemDef?.display_name || worldItem.item_id}.`,
@@ -8369,6 +8641,16 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       addLog("Not ready to act.");
       return;
     }
+    const itemDef = gamePackage.items.find((i) => i.id === itemId);
+    if (itemDef?.artifact || itemDef?.glass_resource) {
+      playSfx("warning", { volume: 0.24, cooldownMs: 120 });
+      addLog(
+        itemDef.artifact
+          ? `${itemDef.display_name} is a registered artifact. Carry it to the hub, or it will remain with your death bundle.`
+          : `${itemDef.display_name} is tracked Glass. It can be recovered or consumed as configured fuel, but not discarded.`,
+      );
+      return;
+    }
 
     const { cell, facing } = currentSave.player;
     const groundItems = getEffectiveWorldItems(
@@ -8425,7 +8707,6 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       return;
     }
 
-    const itemDef = gamePackage.items.find((i) => i.id === itemId);
     const dropResult = dispatchV1DropItem({
       gamePackage,
       save: currentSave,
@@ -8496,7 +8777,40 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         ...((currentSave.flags?.immersive_light_states || {}) as Record<string, boolean>),
       };
       const stateKey = `item:${itemId}`;
-      const active = lightStates[stateKey] ?? itemDef.light_source.active_by_default;
+      const currentTick = Math.max(0, Math.floor(currentSave.clock_minutes || 0));
+      const expiresAt = Number(
+        (currentSave.flags?.immersive_light_expires_at as Record<string, number> | undefined)?.[
+          stateKey
+        ],
+      );
+      const activeByState = lightStates[stateKey] ?? itemDef.light_source.active_by_default;
+      const active =
+        activeByState && (!Number.isFinite(expiresAt) || expiresAt > currentTick);
+
+      if (!active && itemDef.glass_fuel) {
+        const ignitionOrdinal =
+          Object.keys(currentSave.fracture_crawl_campaign?.glass.fuel_events || {}).length + 1;
+        const fuel = consumeGlassFuel(gamePackage, currentSave, {
+          lightItemId: itemId,
+          currentTick,
+          eventId: `glass-fuel:${stateKey}:${currentTick}:${ignitionOrdinal}`,
+        });
+        if (fuel.outcome !== "ignited") {
+          playSfx("warning", { volume: 0.24, cooldownMs: 120 });
+          addLog(
+            fuel.outcome === "insufficient_glass"
+              ? `${itemDef.display_name} needs ${itemDef.glass_fuel.units_per_ignition} unit${itemDef.glass_fuel.units_per_ignition === 1 ? "" : "s"} of ${gamePackage.items.find((item) => item.id === itemDef.glass_fuel?.resource_item_id)?.display_name || "Glass"}.`
+              : `${itemDef.display_name} cannot use its configured Glass fuel.`,
+          );
+          return;
+        }
+        store.commitRuntimeSave(fuel.save);
+        playSfx("ui_click", { volume: 0.28, cooldownMs: 120 });
+        addLog(
+          `Lit ${itemDef.display_name} by burning ${fuel.unitsConsumed} Glass. Recoverable value ${fuel.recoverableValue}; burden ${Math.round(fuel.burden * 10) / 10}.`,
+        );
+        return;
+      }
       if (active && !itemDef.light_source.extinguishable) {
         playSfx("warning", { volume: 0.24, cooldownMs: 120 });
         addLog(`${itemDef.display_name} cannot be extinguished.`);
@@ -8650,6 +8964,32 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     }
   };
 
+  const visualSurfaceLayersCacheRef = useRef<{
+    signature: string;
+    value: MapDelta["surface_layers"];
+  }>({ signature: "", value: undefined });
+  const visualSurfaceLayers = useMemo<MapDelta["surface_layers"]>(() => {
+    const source = activeMapDelta?.surface_layers;
+    if (!source) {
+      visualSurfaceLayersCacheRef.current = { signature: "", value: undefined };
+      return undefined;
+    }
+    const visible: NonNullable<MapDelta["surface_layers"]> = {};
+    Object.entries(source).forEach(([cellKey, layers]) => {
+      const drawable = layers.filter((layer) => layer.source !== "trace");
+      if (drawable.length > 0) visible[cellKey] = drawable;
+    });
+    // Footsteps replace the source surface-layer object with trace-only data.
+    // Preserve the previous render identity when its drawable projection is
+    // unchanged so WorldOverlays3D does not rebuild all overlay geometry.
+    const signature = JSON.stringify(visible);
+    if (visualSurfaceLayersCacheRef.current.signature === signature) {
+      return visualSurfaceLayersCacheRef.current.value;
+    }
+    visualSurfaceLayersCacheRef.current = { signature, value: visible };
+    return visible;
+  }, [activeMapDelta?.surface_layers]);
+
   // Stable render inputs for GameRenderer (recomputed only when something
   // visible changes, not when a mechanical footstep pulse is appended).
   const renderMapDelta = useMemo<MapDelta | undefined>(() => {
@@ -8664,7 +9004,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       carried_objects: activeMapDelta.carried_objects,
       removed_objects: activeMapDelta.removed_objects,
       simulation_conditions: activeMapDelta.simulation_conditions,
-      surface_layers: activeMapDelta.surface_layers,
+      surface_layers: visualSurfaceLayers,
       environment_fields: activeVisualEnvironmentFields,
       npc_tasks: activeMapDelta.npc_tasks,
       simulation_processes: activeMapDelta.simulation_processes,
@@ -8680,7 +9020,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     activeMapDelta?.carried_objects,
     activeMapDelta?.removed_objects,
     activeMapDelta?.simulation_conditions,
-    activeMapDelta?.surface_layers,
+    visualSurfaceLayers,
     activeVisualEnvironmentFields,
     activeMapDelta?.npc_tasks,
     activeMapDelta?.simulation_processes,
@@ -8694,17 +9034,40 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       })),
     [activeMap?.container_placements],
   );
+  const campaignLandmarkItems = useMemo(() => {
+    if (!activeMap || !saveData) {
+      return [] as { id: string; cell: [number, number]; icon: string }[];
+    }
+    const ghosts = getPersistentGhosts(saveData)
+      .filter((ghost) => ghost.status === "present" && ghost.map_id === activeMap.id)
+      .map((ghost) => ({
+        id: ghost.id,
+        cell: [ghost.cell[0], ghost.cell[1]] as [number, number],
+        icon: ghost.marker_icon || "✧",
+      }));
+    const bundles = getDeathBundles(saveData)
+      .filter((bundle) => bundle.status === "available" && bundle.map_id === activeMap.id)
+      .map((bundle) => ({
+        id: bundle.id,
+        cell: [bundle.cell[0], bundle.cell[1]] as [number, number],
+        icon: bundle.marker_icon || "▣",
+      }));
+    return [...ghosts, ...bundles];
+  }, [activeMap?.id, saveData?.fracture_crawl_campaign]);
   const worldItemsRender = useMemo(() => {
     if (!activeMap)
       return [] as { id: string; cell: [number, number]; icon: string }[];
     const iconOf = (itemId: string) =>
       gamePackage.items.find((i) => i.id === itemId)?.icon || "📦";
-    return getEffectiveWorldItems(activeMap, renderMapDelta).map((w) => ({
-      id: w.id,
-      cell: w.cell,
-      icon: iconOf(w.item_id),
-    }));
-  }, [activeMap, renderMapDelta, gamePackage.items]);
+    return [
+      ...getEffectiveWorldItems(activeMap, renderMapDelta).map((w) => ({
+        id: w.id,
+        cell: w.cell,
+        icon: iconOf(w.item_id),
+      })),
+      ...campaignLandmarkItems,
+    ];
+  }, [activeMap, renderMapDelta, gamePackage.items, campaignLandmarkItems]);
 
   // Living hostiles in threat range — drives the danger HUD panel and the
   // engaged feel (HP bars + threat rings render in GameRenderer).
@@ -8861,10 +9224,18 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
 
   const visibleNearbyHostiles = useMemo(() => {
     if (!viewerVisibility) return [] as NearbyHostile[];
+    const illuminationByKey = new Map(
+      viewerVisibility.illumination.cells.map((entry) => [
+        fineCoordKey(entry.cell[0], entry.cell[1]),
+        entry.value,
+      ]),
+    );
     const actorVisible = new Set(
-      viewerVisibility.currently_visible.map((cell) =>
-        fineCoordKey(cell[0], cell[1]),
-      ),
+      viewerVisibility.currently_visible
+        .map((cell) => fineCoordKey(cell[0], cell[1]))
+        .filter((key) =>
+          hasAuthoritativePresentLight(illuminationByKey.get(key) ?? 0),
+        ),
     );
     return nearbyHostiles.filter((hostile) =>
       actorVisible.has(fineCoordKey(hostile.cell[0], hostile.cell[1])),
@@ -9121,6 +9492,25 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     updateKeywordConversation,
   ]);
 
+  const fractureCampaignView = useMemo(() => {
+    if (!saveData) {
+      return {
+        ghosts: [] as ReturnType<typeof getPersistentGhosts>,
+        bundles: [] as ReturnType<typeof getDeathBundles>,
+        artifacts: [] as ReturnType<typeof getArtifactRecords>,
+        glassValue: 0,
+        glassBurden: 0,
+      };
+    }
+    return {
+      ghosts: getPersistentGhosts(saveData),
+      bundles: getDeathBundles(saveData),
+      artifacts: getArtifactRecords(saveData),
+      glassValue: getRecoverableGlassValue(saveData),
+      glassBurden: getGlassBurden(saveData),
+    };
+  }, [saveData?.fracture_crawl_campaign]);
+
   if (!activeMap || !saveData) {
     return (
       <div className="flex-1 flex items-center justify-center">
@@ -9137,6 +9527,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     ? intercessorCampaign.records[intercessorCampaign.current_intercessor_id]
     : undefined;
   const intercessorHistory = getIntercessorHistory(saveData);
+  const persistentGhosts = fractureCampaignView.ghosts;
+  const deathBundles = fractureCampaignView.bundles;
+  const artifactRecords = fractureCampaignView.artifacts;
+  const recoverableGlassValue = fractureCampaignView.glassValue;
+  const carriedGlassBurden = fractureCampaignView.glassBurden;
   const successionNotice = intercessorCampaign?.last_transition;
   const successionDeceased = successionNotice
     ? intercessorCampaign?.records[successionNotice.deceased_intercessor_id]
@@ -11419,7 +11814,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
               {successionDeceased.display_name} died
             </h1>
             <p className="mx-auto mt-4 max-w-md font-serif text-sm leading-relaxed text-neutral-300">
-              The map remembers. A ghost request and death-bundle request have been recorded at {successionDeceased.death?.map_id || "the last map"}
+              The map remembers. A persistent ghost and an independent death bundle now remain at {successionDeceased.death?.map_id || "the last map"}
               {successionDeceased.death ? ` · ${successionDeceased.death.cell[0]},${successionDeceased.death.cell[1]}` : ""}.
             </p>
             <div className="mx-auto mt-6 max-w-sm border-y border-violet-900/70 py-4">
@@ -11593,6 +11988,12 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                     const deathMap = record.death
                       ? gamePackage.maps.find((map) => map.id === record.death?.map_id)
                       : undefined;
+                    const ghost = persistentGhosts.find(
+                      (candidate) => candidate.source_intercessor_id === record.id,
+                    );
+                    const bundle = deathBundles.find(
+                      (candidate) => candidate.owner_intercessor_id === record.id,
+                    );
                     return (
                       <div
                         key={record.id}
@@ -11617,7 +12018,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                           <div className="mt-2 border-t border-neutral-800 pt-2 text-[10px] leading-relaxed text-neutral-400">
                             Died in {deathMap?.display_name || record.death.map_id} at {record.death.cell[0]},{record.death.cell[1]} · Day {Math.floor(record.death.clock_minutes / 1440) + 1}, {String(Math.floor((record.death.clock_minutes % 1440) / 60)).padStart(2, "0")}:{String(record.death.clock_minutes % 60).padStart(2, "0")}
                             <div className="mt-1 text-violet-400/80">
-                              Ghost {record.ghost_request_id ? "requested" : "not requested"} · Bundle {record.bundle_request_id ? "requested" : "not requested"}
+                              Ghost {ghost?.status || (record.ghost_request_id ? "pending" : "none")} · Bundle {bundle?.status || (record.bundle_request_id ? "pending" : "none")}
                             </div>
                           </div>
                         )}
@@ -11647,6 +12048,69 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                       QA: end expedition here
                     </button>
                   )}
+                </div>
+
+                <div className="space-y-2" data-testid="fracture-crawl-legacy-registry">
+                  <div className="flex items-center justify-between gap-2">
+                    <h3 className="text-xs font-semibold uppercase tracking-wide text-fuchsia-300">Ghosts, Recovery & Glass</h3>
+                    <span className="text-[10px] font-bold uppercase tracking-wide text-neutral-600">
+                      {persistentGhosts.filter((ghost) => ghost.status === "present").length} ghosts · {deathBundles.filter((bundle) => bundle.status === "available").length} bundles
+                    </span>
+                  </div>
+                  {persistentGhosts.map((ghost) => {
+                    const source = intercessorCampaign?.records[ghost.source_intercessor_id];
+                    const skill = ghost.signature_skill_id
+                      ? gamePackage.abilities.find((ability) => ability.id === ghost.signature_skill_id)
+                      : undefined;
+                    return (
+                      <div key={ghost.id} className="rounded border border-violet-900/60 bg-violet-950/10 px-3 py-2 text-[10px] text-neutral-400">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-serif text-sm font-semibold text-violet-100">{ghost.marker_icon} {source?.display_name || ghost.source_intercessor_id}</span>
+                          <span className="font-bold uppercase tracking-widest text-violet-400">{ghost.status}</span>
+                        </div>
+                        <div className="mt-1">{ghost.map_id} · {ghost.cell[0]},{ghost.cell[1]} · {skill?.display_name || ghost.signature_skill_id || "no signature"}</div>
+                      </div>
+                    );
+                  })}
+                  {deathBundles.map((bundle) => {
+                    const owner = intercessorCampaign?.records[bundle.owner_intercessor_id];
+                    const count = bundle.contents.reduce((total, entry) => total + entry.count, 0);
+                    return (
+                      <div key={bundle.id} className="rounded border border-rose-950 bg-rose-950/10 px-3 py-2 text-[10px] text-neutral-400">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-serif text-sm font-semibold text-rose-100">{bundle.marker_icon} {owner?.display_name || bundle.owner_intercessor_id}</span>
+                          <span className="font-bold uppercase tracking-widest text-rose-400">{bundle.status}</span>
+                        </div>
+                        <div className="mt-1">{bundle.map_id} · {bundle.cell[0]},{bundle.cell[1]} · {count} item{count === 1 ? "" : "s"} · {bundle.artifact_ids.length} artifact{bundle.artifact_ids.length === 1 ? "" : "s"}</div>
+                      </div>
+                    );
+                  })}
+                  {artifactRecords.length > 0 ? (
+                    artifactRecords.map((artifact) => {
+                      const definition = gamePackage.items.find((item) => item.id === artifact.item_id);
+                      return (
+                        <div key={artifact.id} className="rounded border border-fuchsia-950 bg-fuchsia-950/10 px-3 py-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="truncate text-sm text-fuchsia-100">{definition?.display_name || artifact.id}</span>
+                            <span className="text-[9px] font-bold uppercase tracking-widest text-fuchsia-400">{artifact.state}</span>
+                          </div>
+                          <div className="mt-1 font-mono text-[9px] text-neutral-600">{artifact.id}</div>
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <p className="text-xs text-neutral-600">No registered artifacts in this package.</p>
+                  )}
+                  <div className="grid grid-cols-2 gap-2 rounded border border-neutral-800 bg-neutral-900/80 p-2 text-center">
+                    <div>
+                      <div className="text-[9px] font-bold uppercase tracking-widest text-neutral-500">Glass value</div>
+                      <div className="mt-0.5 text-sm font-semibold text-amber-200">{recoverableGlassValue}</div>
+                    </div>
+                    <div>
+                      <div className="text-[9px] font-bold uppercase tracking-widest text-neutral-500">Glass burden</div>
+                      <div className="mt-0.5 text-sm font-semibold text-fuchsia-200">{Math.round(carriedGlassBurden * 10) / 10}</div>
+                    </div>
+                  </div>
                 </div>
 
                 <div className="space-y-2">
@@ -12103,7 +12567,10 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                   })()}
                   {(() => {
                     const sellableInventory = (saveData.inventory || []).filter(
-                      (entry) => entry.count > 0,
+                      (entry) => {
+                        const item = gamePackage.items?.find((candidate) => candidate.id === entry.id);
+                        return entry.count > 0 && !item?.artifact && !item?.glass_resource;
+                      },
                     );
                     if (sellableInventory.length === 0) return null;
                     const stock = getAvailableShopStock(shop, shopConditionCtx);
@@ -12224,6 +12691,14 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
               );
             };
             const stowItem = (itemId: string) => {
+              const itemDef = gamePackage.items.find((i) => i.id === itemId);
+              if (itemDef?.artifact || itemDef?.glass_resource) {
+                playSfx("warning", { volume: 0.22, cooldownMs: 100 });
+                addLog(
+                  `${itemDef.display_name} is campaign-tracked and must remain with its carrier.`,
+                );
+                return;
+              }
               const transfer = dispatchV1StowInContainer({
                 gamePackage,
                 save: saveData,
@@ -12239,11 +12714,13 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
               commitRuntimeSave(transfer.save);
               usePlayStore.getState().pushEngineEvents(transfer.events);
               playSfx("ui_click", { volume: 0.22, cooldownMs: 100 });
-              const itemDef = gamePackage.items.find((i) => i.id === itemId);
               addLog(`Stowed ${itemDef?.display_name || itemId}.`);
             };
             const stowableInventory = (saveData.inventory || []).filter(
-              (entry) => entry.count > 0,
+              (entry) =>
+                entry.count > 0 &&
+                !gamePackage.items.find((item) => item.id === entry.id)?.artifact &&
+                !gamePackage.items.find((item) => item.id === entry.id)?.glass_resource,
             );
 
             return (

@@ -14,6 +14,7 @@ import { generateDungeonGraph } from "./topology";
 import { embedDungeon } from "./embedding";
 import { populateDungeon } from "./population";
 import { bakeDungeonMaps } from "./bake";
+import { evaluateDungeonQuality } from "./quality";
 import { auditDungeonRecipeReferences, validateDungeonBake } from "./validation";
 
 export interface DungeonGenerationProgress {
@@ -272,8 +273,7 @@ export const generateDungeon = (options: GenerateDungeonOptions): DungeonGenerat
       initialActiveChemistryCells,
       estimatedSaveBytes: new TextEncoder().encode(JSON.stringify(maps)).byteLength,
     };
-    report("audit", attempt, totalStages, "Dungeon generation complete");
-    return {
+    const candidate: DungeonGenerationResult = {
       success: true,
       recipeId: recipe.id,
       recipeVersion: recipe.version,
@@ -286,13 +286,38 @@ export const generateDungeon = (options: GenerateDungeonOptions): DungeonGenerat
       bakedMapIds: maps.map((map) => map.id),
       maps,
       validationReports: validation.value.reports,
+      diagnostics: [],
+      attemptCount: attempt,
+      metrics,
+    };
+    const quality = evaluateDungeonQuality({ recipe, gamePackage, result: candidate });
+    if (quality.thresholdsEnforced && !quality.ready) {
+      const qualityDiagnostics = quality.checks
+        .filter((entry) => !entry.passed)
+        .map((entry) => dungeonDiagnostic(
+          "fatal",
+          "audit",
+          entry.code,
+          `${entry.label}: found ${entry.actual}; expected ${entry.expected}.`,
+        ));
+      lastDiagnostics = [...lastDiagnostics, ...qualityDiagnostics];
+      incrementCodes(rejectionCodes, qualityDiagnostics);
+      rejectedAttempts.push(dungeonDiagnostic(
+        "info",
+        "audit",
+        "DNG_ATTEMPT_REJECTED",
+        `Attempt ${attempt} was rejected by the single-map quality contract.`,
+      ));
+      continue;
+    }
+    report("audit", attempt, totalStages, "Dungeon generation complete");
+    return {
+      ...candidate,
       diagnostics: sortDungeonDiagnostics([
         ...rejectedAttempts,
         ...lastDiagnostics,
         ...weightedChoiceDiagnostics(seedContext),
       ]),
-      attemptCount: attempt,
-      metrics,
     };
   }
   const exhausted = dungeonDiagnostic(

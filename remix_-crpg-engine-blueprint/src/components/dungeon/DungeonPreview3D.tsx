@@ -6,7 +6,7 @@ import {
   PerspectiveCamera,
 } from "@react-three/drei";
 import { Box, Layers3, Mountain, Move } from "lucide-react";
-import type { MapData } from "../../schema/game";
+import type { MapData, MapGenerationSocketData } from "../../schema/game";
 import type {
   DungeonDiagnostic,
   DungeonGraph,
@@ -155,6 +155,7 @@ export function DungeonPreview3D({
             corridors={corridors}
             graph={graph}
             diagnostics={diagnosticsForMap}
+            sockets={map.generation_sockets ?? []}
             showRooms={showRooms}
             showRoutes={showRoutes}
           />
@@ -181,6 +182,7 @@ function DungeonPreviewOverlays({
   corridors,
   graph,
   diagnostics,
+  sockets,
   showRooms,
   showRoutes,
 }: {
@@ -188,12 +190,36 @@ function DungeonPreviewOverlays({
   corridors: NonNullable<EmbeddedDungeon["corridors"]>;
   graph?: DungeonGraph;
   diagnostics: DungeonDiagnostic[];
+  sockets: MapGenerationSocketData[];
   showRooms: boolean;
   showRoutes: boolean;
 }) {
   const nodeById = new Map(graph?.nodes.map((node) => [node.id, node]) || []);
   return (
     <group>
+      {sockets.map((socket) => {
+        const color = socket.kind === "entrance"
+          ? "#22c55e"
+          : socket.kind === "culmination"
+            ? "#ef4444"
+            : socket.kind === "artifact_origin"
+              ? "#f59e0b"
+              : socket.kind === "extraction"
+                ? "#06b6d4"
+                : "#e879f9";
+        return (
+          <group key={socket.id} position={[socket.cell[0], 2.65, socket.cell[1]]}>
+            <mesh rotation={[-Math.PI / 2, 0, 0]} raycast={() => null}>
+              <torusGeometry args={[0.34, socket.required ? 0.09 : 0.055, 8, 18]} />
+              <meshBasicMaterial color={color} depthTest={false} transparent opacity={0.95} />
+            </mesh>
+            <mesh position={[0, 0.28, 0]} raycast={() => null}>
+              <sphereGeometry args={[0.11, 10, 8]} />
+              <meshBasicMaterial color={color} depthTest={false} />
+            </mesh>
+          </group>
+        );
+      })}
       {showRooms && rooms.map((room) => {
         const node = nodeById.get(room.nodeId);
         const color = node?.secret ? "#c084fc" : node?.mandatory ? "#38bdf8" : "#94a3b8";

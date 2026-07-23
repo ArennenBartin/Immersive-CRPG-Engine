@@ -22,6 +22,11 @@ import {
   validateStudioProject,
   type StudioValidationReport,
 } from "../utils/studioValidation";
+import { createQaSuitePackage } from "../data/qaSuiteInstaller";
+import {
+  createPhase11IntegratedArchitectureFixture,
+  PHASE_11_HUB_MAP_ID,
+} from "../data/qaSuite/integratedArchitectureScenario";
 
 export function AppShell() {
   const { storageHydrated, mode, setMode, undo, redo, undoStack, redoStack } = useEngineStore();
@@ -218,12 +223,14 @@ export function AppShell() {
 
 function PlaySessionBar() {
   const setMode = useEngineStore((state) => state.setMode);
-  const saveData = usePlayStore((state) => state.saveData);
+  // The session bar only needs run presence. Subscribing to the complete save
+  // made this otherwise-static shell reconcile on every fine-grid movement.
+  const hasSave = usePlayStore((state) => Boolean(state.saveData));
   const resetRun = usePlayStore((state) => state.resetRun);
 
   const discardRunAndReturn = () => {
     if (
-      saveData &&
+      usePlayStore.getState().saveData &&
       !window.confirm(
         "Discard the current runtime session and return to Studio? Authored project data will not be changed.",
       )
@@ -250,7 +257,7 @@ function PlaySessionBar() {
           </button>
           <button
             onClick={discardRunAndReturn}
-            disabled={!saveData}
+            disabled={!hasSave}
             className="flex items-center gap-1.5 rounded-md border border-rose-500/40 bg-rose-500/10 px-2.5 py-1.5 font-medium text-rose-100 hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-40"
           >
             <RotateCcw className="h-3.5 w-3.5" />
@@ -285,6 +292,7 @@ function HomePanel() {
     detail?: string;
   } | null>(null);
   const [isImportingPackage, setIsImportingPackage] = useState(false);
+  const [isBuildingPhase11, setIsBuildingPhase11] = useState(false);
   const [isValidatingProject, setIsValidatingProject] = useState(false);
   const [validationReport, setValidationReport] = useState<StudioValidationReport | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
@@ -464,6 +472,45 @@ function HomePanel() {
     });
   };
 
+  const handlePhase11Install = () => {
+    if (
+      !window.confirm(
+        "Replace this project with the fixed-seed Phase 11 integrated architecture scenario and discard the current runtime session? A JSON backup will be downloaded first.",
+      )
+    ) return;
+
+    const backupJson = exportPackage();
+    const backupTitle = gamePackage.metadata.title
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "") || "game";
+    downloadBackup(`${backupTitle}-before-phase-11.json`, backupJson);
+    usePlayStore.getState().resetRun();
+    setIsBuildingPhase11(true);
+    setPackageIoMessage(null);
+    window.setTimeout(() => {
+      try {
+        const fixture = createPhase11IntegratedArchitectureFixture(createQaSuitePackage());
+        setGamePackage(fixture.gamePackage);
+        setSelectedMapId(PHASE_11_HUB_MAP_ID);
+        setMode("play");
+        setPackageIoMessage({
+          tone: "success",
+          text: "Phase 11 integrated scenario installed. Play begins in its expedition hub.",
+          detail: `${fixture.generation.maps.length} deterministic fracture floors · seed ${fixture.generation.seed}`,
+        });
+      } catch (error) {
+        setPackageIoMessage({
+          tone: "error",
+          text: "Phase 11 scenario generation failed; the active project was not replaced.",
+          detail: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        setIsBuildingPhase11(false);
+      }
+    }, 0);
+  };
+
   return (
     <div className="p-4 sm:p-8 max-w-4xl mx-auto space-y-6 sm:space-y-8">
       <div>
@@ -551,6 +598,16 @@ function HomePanel() {
             </div>
             <p className="text-xs text-neutral-500">
               QA content is optional. Merge preserves existing IDs; Replace requires confirmation and downloads a backup first.
+            </p>
+            <button
+              onClick={handlePhase11Install}
+              disabled={isBuildingPhase11}
+              className="rounded-lg border border-fuchsia-500/40 bg-fuchsia-500/10 px-3 py-2 text-sm font-medium text-fuchsia-100 hover:bg-fuchsia-500/20 disabled:cursor-wait disabled:opacity-60"
+            >
+              {isBuildingPhase11 ? "Generating Phase 11…" : "Install Phase 11 Scenario…"}
+            </button>
+            <p className="text-xs text-neutral-500">
+              Fixed-seed end-to-end route: generated fracture, sensory creatures, three light forms, smoke, Glass, artifact, shortcut, succession, ghost, bundle, extraction, and hub recovery.
             </p>
             {packageIoMessage && (
               <div

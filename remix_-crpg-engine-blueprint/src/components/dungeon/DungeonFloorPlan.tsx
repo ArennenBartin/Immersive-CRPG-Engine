@@ -235,6 +235,25 @@ export function DungeonFloorPlan({
               const p = point(exit.cell[0] + 0.5, exit.cell[1] + 0.5);
               return <rect key={exit.id || index} x={p.x - 6} y={p.y - 6} width={12} height={12} fill="#8b5cf6" stroke="#ede9fe" />;
             })}
+            {activeMap?.generation_sockets?.map((socket) => {
+              const p = point(socket.cell[0] + 0.5, socket.cell[1] + 0.5);
+              const color = socket.kind === "entrance"
+                ? "#22c55e"
+                : socket.kind === "culmination"
+                  ? "#ef4444"
+                  : socket.kind === "artifact_origin"
+                    ? "#f59e0b"
+                    : socket.kind === "extraction"
+                      ? "#06b6d4"
+                      : "#e879f9";
+              return (
+                <g key={socket.id} transform={`translate(${p.x} ${p.y})`}>
+                  <circle r={socket.required ? 8 : 6} fill="#09090b" stroke={color} strokeWidth={socket.required ? 3 : 2} />
+                  <circle r={2.5} fill={color} />
+                  <title>{`${socket.kind}${socket.label ? ` · ${socket.label}` : ""}`}</title>
+                </g>
+              );
+            })}
             {diagnosticCells.map((diagnostic, index) => {
               const p = point(diagnostic.cell![0] + 0.5, diagnostic.cell![1] + 0.5);
               const color = diagnostic.severity === "fatal" || diagnostic.severity === "error" ? "#ef4444" : diagnostic.severity === "warning" ? "#f59e0b" : "#3b82f6";

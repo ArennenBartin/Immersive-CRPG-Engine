@@ -123,11 +123,14 @@ const isArchetypeLegal = (
   const isObjective = node.tags.includes("objective");
   const entranceDefinition = isSpecialArchetype(definition, "entrance");
   const objectiveDefinition = isSpecialArchetype(definition, "objective");
+  const quietOrientationDefinition = definition.tags.some((tag) =>
+    tag === "quiet" || tag === "orientation" || tag === "resource" || tag === "rest");
   const verticalDefinition = definition.tags.includes("vertical") ||
     definition.requiredSocketKinds.includes("vertical") || definition.id.toLowerCase().includes("vertical");
   if (node.tags.includes("vertical_landing") && !verticalDefinition) return false;
   if (isEntrance ? !entranceDefinition || objectiveDefinition : entranceDefinition) return false;
   if (isObjective ? !objectiveDefinition || entranceDefinition : objectiveDefinition) return false;
+  if (!isEntrance && node.tags.includes("orientation") && node.tags.includes("quiet") && !quietOrientationDefinition) return false;
   for (const edge of edges) {
     const nodeIsFrom = edge.fromNodeId === node.id;
     const neighborId = nodeIsFrom ? edge.toNodeId : edge.toNodeId === node.id ? edge.fromNodeId : undefined;
@@ -361,6 +364,7 @@ export const generateDungeonGraph = (
 
   const nodes: DungeonGraphNode[] = [];
   const edges: DungeonGraphEdge[] = [];
+  const ordinaryConnectionKind = recipe.architecture.connectionMode === "open_only" ? "open" : "door";
   for (let index = 0; index < criticalLength; index += 1) {
     const depth = criticalLength === 1 ? 0 : index / (criticalLength - 1);
     const tags = ["critical"];
@@ -368,13 +372,17 @@ export const generateDungeonGraph = (
     if (index === criticalLength - 1) tags.push("objective", "climax");
     else if (index === criticalLength - 2) tags.push("pre_objective", "staging", "quiet");
     else if (index > 0 && index < criticalLength - 1 && index % 3 === 0) tags.push("junction");
+    if (recipe.architecture.layoutStyle === "directional_crawl" && index <= 2) {
+      tags.push("orientation", "quiet");
+      if (index === 1) tags.push("resource");
+    }
     nodes.push(makeNode(`node_critical_${String(index).padStart(3, "0")}`, depth, true, tags));
     if (index > 0) {
       edges.push({
         id: `edge_critical_${String(index - 1).padStart(3, "0")}`,
         fromNodeId: nodes[index - 1].id,
         toNodeId: nodes[index].id,
-        kind: "door",
+        kind: ordinaryConnectionKind,
         oneWay: false,
         tags: ["critical"],
       });
@@ -406,7 +414,7 @@ export const generateDungeonGraph = (
         id: `edge_${branchId}_${String(member).padStart(2, "0")}`,
         fromNodeId: previous.id,
         toNodeId: node.id,
-        kind: member === 0 ? "door" : "open",
+        kind: member === 0 ? ordinaryConnectionKind : "open",
         oneWay: false,
         tags: ["branch", branchId],
       });
@@ -491,12 +499,18 @@ export const generateDungeonGraph = (
       }
     }
     if (!candidates.length) break;
-    const selected = topologyRng.pick(topologyRng.shuffleById(candidates).slice(0, Math.min(8, candidates.length)));
+    const compactCandidates = recipe.architecture.layoutStyle === "directional_crawl"
+      ? (() => {
+          const minimumDistance = Math.min(...candidates.map((candidate) => candidate.distance));
+          return candidates.filter((candidate) => candidate.distance <= minimumDistance + 1);
+        })()
+      : candidates;
+    const selected = topologyRng.pick(topologyRng.shuffleById(compactCandidates).slice(0, Math.min(8, compactCandidates.length)));
     edges.push({
       id: `edge_loop_${String(loopIndex).padStart(2, "0")}`,
       fromNodeId: selected.left.id,
       toNodeId: selected.right.id,
-      kind: "door",
+      kind: ordinaryConnectionKind,
       oneWay: false,
       tags: ["loop", "shortcut", `distance_${selected.distance}`],
     });

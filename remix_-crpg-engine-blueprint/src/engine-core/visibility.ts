@@ -175,6 +175,19 @@ interface VisualAcquisitionContext {
   sourceById: Map<string, ImmersiveResolvedLightSource>;
 }
 
+/**
+ * A prepared visual query session. Perception commonly asks the same physical
+ * world dozens of observer/target questions in one tick; the simulation,
+ * illumination field, and LOS cache are shared across those questions.
+ */
+export interface ImmersiveVisualAcquisitionResolver {
+  map_id: string;
+  illumination: ImmersiveIlluminationSnapshot;
+  query: (
+    query: ImmersiveVisualAcquisitionQuery,
+  ) => ImmersiveVisualAcquisitionResult;
+}
+
 const DEFAULT_AMBIENT_LIGHT = 0.08;
 const DEFAULT_MINIMUM_LIGHT = 0.06;
 const DEFAULT_VISUAL_RANGE_MACRO = 8;
@@ -267,6 +280,17 @@ const lightStateOverrides = (save: PlaySave): Record<string, boolean> => {
   );
 };
 
+const lightExpiryOverrides = (save: PlaySave): Record<string, number> => {
+  const value = save.flags?.immersive_light_expires_at;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value).filter(
+      (entry): entry is [string, number] =>
+        typeof entry[1] === "number" && Number.isFinite(entry[1]),
+    ),
+  );
+};
+
 const sourceActive = (
   overrides: Record<string, boolean>,
   sourceId: string,
@@ -335,10 +359,13 @@ const profileSource = ({
   carrierActorId?: string;
 }): ImmersiveResolvedLightSource | undefined => {
   const tick = currentTick(save);
+  const expiryOverrides = lightExpiryOverrides(save);
   const expiresAtTick =
-    profile.duration_ticks !== undefined
-      ? (createdAtTick || 0) + profile.duration_ticks
-      : undefined;
+    expiryOverrides[sourceId] ??
+    expiryOverrides[definitionKey] ??
+    (profile.duration_ticks !== undefined && createdAtTick !== undefined
+      ? createdAtTick + profile.duration_ticks
+      : undefined);
   if (
     !sourceActive(
       lightStateOverrides(save),
@@ -1002,7 +1029,22 @@ export const queryImmersiveVisualAcquisition = (
   query: ImmersiveVisualAcquisitionQuery,
 ): ImmersiveVisualAcquisitionResult => {
   const mapId = query.map_id || save.current_map_id || gamePackage.metadata.start_map_id;
-  const simulation = createVisibilitySimulation(gamePackage, save, mapId);
+  return createImmersiveVisualAcquisitionResolver(
+    gamePackage,
+    save,
+    mapId,
+  ).query(query);
+};
+
+export const createImmersiveVisualAcquisitionResolver = (
+  gamePackage: GamePackage,
+  save: PlaySave,
+  mapId = save.current_map_id || gamePackage.metadata.start_map_id,
+  preparedSimulation?: SimulationMapSnapshot,
+): ImmersiveVisualAcquisitionResolver => {
+  const simulation = preparedSimulation
+    ? applyAuthoredSmokeToSimulation(gamePackage, mapId, preparedSimulation)
+    : createVisibilitySimulation(gamePackage, save, mapId);
   const sources = resolveImmersiveLightSources(gamePackage, save, mapId);
   const visionByKey = prepareVisionMap(simulation, spatialRatio(gamePackage));
   const lineCache = new Map<string, LightLineAnalysis>();
@@ -1021,15 +1063,22 @@ export const queryImmersiveVisualAcquisition = (
     visionByKey,
     lineCache,
   );
-  return acquisitionFromContext(
-    save,
-    {
-      ...query,
-      map_id: mapId,
-      max_range: query.max_range ?? DEFAULT_VISUAL_RANGE_MACRO * spatialRatio(gamePackage),
-    },
-    context,
-  );
+  return {
+    map_id: mapId,
+    illumination,
+    query: (query) =>
+      acquisitionFromContext(
+        save,
+        {
+          ...query,
+          map_id: mapId,
+          max_range:
+            query.max_range ??
+            DEFAULT_VISUAL_RANGE_MACRO * spatialRatio(gamePackage),
+        },
+        context,
+      ),
+  };
 };
 
 export const createImmersiveViewerVisibilityFromV1 = (

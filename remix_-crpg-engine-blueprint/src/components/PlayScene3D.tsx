@@ -50,6 +50,7 @@ export const PLAY_CAMERA_PROFILES: Record<PlayCameraMode, PlayCameraProfile> = {
 const CAMERA_ROTATION_DAMPING = 7.5;
 const CAMERA_FOLLOW_SNAP_DISTANCE = 6;
 const CAMERA_FOV_UPDATE_EPSILON = 0.001;
+const CAMERA_TRANSFORM_UPDATE_EPSILON_SQ = 0.00000001;
 const TWO_PI = Math.PI * 2;
 const targetVec = new THREE.Vector3();
 const lookAtVec = new THREE.Vector3();
@@ -132,6 +133,7 @@ export function IsometricCameraRig({
   );
   const azimuthRef = useRef(azimuth);
   const profileRef = useRef<PlayCameraProfile>({ ...initialProfile });
+  const appliedFocusRef = useRef(new THREE.Vector3(Number.NaN, Number.NaN, Number.NaN));
 
   useEffect(() => {
     const focus = focusRef.current;
@@ -143,6 +145,7 @@ export function IsometricCameraRig({
     );
     camera.position.set(...position);
     camera.lookAt(focus.x, focus.y, focus.z);
+    appliedFocusRef.current.copy(focus);
     if (camera instanceof THREE.PerspectiveCamera) {
       camera.fov = profileRef.current.fov;
       camera.updateProjectionMatrix();
@@ -193,14 +196,29 @@ export function IsometricCameraRig({
         ? azimuth
         : nextAzimuth;
 
-    const position = cameraPosition(
-      [focus.x, focus.z],
-      azimuthRef.current,
-      profile,
-      focus.y,
-    );
-    camera.position.set(...position);
-    camera.lookAt(focus.x, focus.y, focus.z);
+    // Avoid allocating a coordinate tuple and rebuilding the camera matrices
+    // after the damped follow has settled. Demand frames still advance GIFs
+    // and feedback, but a stationary camera no longer performs lookAt work on
+    // every Balanced-mode tick.
+    const cameraX =
+      focus.x + Math.cos(azimuthRef.current) * profile.horizontalDistance;
+    const cameraY = focus.y + profile.height;
+    const cameraZ =
+      focus.z + Math.sin(azimuthRef.current) * profile.horizontalDistance;
+    const cameraDx = camera.position.x - cameraX;
+    const cameraDy = camera.position.y - cameraY;
+    const cameraDz = camera.position.z - cameraZ;
+    const cameraMoved =
+      cameraDx * cameraDx + cameraDy * cameraDy + cameraDz * cameraDz >
+      CAMERA_TRANSFORM_UPDATE_EPSILON_SQ;
+    const focusMoved =
+      appliedFocusRef.current.distanceToSquared(focus) >
+      CAMERA_TRANSFORM_UPDATE_EPSILON_SQ;
+    if (cameraMoved) camera.position.set(cameraX, cameraY, cameraZ);
+    if (cameraMoved || focusMoved) {
+      camera.lookAt(focus.x, focus.y, focus.z);
+      appliedFocusRef.current.copy(focus);
+    }
     if (camera instanceof THREE.PerspectiveCamera) {
       const nextFov = THREE.MathUtils.damp(camera.fov, profile.fov, 8, delta);
       if (Math.abs(nextFov - camera.fov) >= CAMERA_FOV_UPDATE_EPSILON) {

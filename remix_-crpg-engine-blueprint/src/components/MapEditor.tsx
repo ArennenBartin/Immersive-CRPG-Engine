@@ -10,6 +10,7 @@ import { usePlayStore } from "../store/playStore";
 import { GameRenderer3D } from "./GameRenderer3D";
 import {
   MapData,
+  MapGenerationSocketData,
   CellData,
   ContainerPlacementData,
   EntityPlacementData,
@@ -56,7 +57,10 @@ import { validateOrdinaryMap } from "../engine-core/mapReadinessValidator";
 import { normalizeJamMapElevations } from "../utils/legacyJamCompatibility";
 // Side-effect: registers stamps with the DSL registry.
 import { STAMP_PRESETS } from "../utils/basicStamps";
-import { remapGeneratedMapNamespace } from "../generation-facing/deterministicIds";
+import {
+  generatedIdNamespace,
+  remapGeneratedMapNamespace,
+} from "../generation-facing/deterministicIds";
 
 type InspectorSelection =
   | { kind: "entity"; index: number }
@@ -64,6 +68,7 @@ type InspectorSelection =
   | { kind: "exit"; index: number }
   | { kind: "item"; index: number }
   | { kind: "container"; index: number }
+  | { kind: "generation_socket"; index: number }
   | null;
 
 type MapProblem = {
@@ -85,6 +90,7 @@ export function MapEditor() {
   const {
     gamePackage,
     addMap,
+    deleteMap,
     updateMap,
     updateSettings,
     setMode,
@@ -97,6 +103,7 @@ export function MapEditor() {
     selectedMapId || gamePackage.maps[0]?.id || null,
   );
   const [activeMap, setActiveMap] = useState<MapData | null>(null);
+  const [pendingDeleteMapId, setPendingDeleteMapId] = useState<string | null>(null);
   const activeGroundCellByCoord = React.useMemo(() => {
     const cells = new Map<string, CellData>();
     activeMap?.cells.forEach((cell) => {
@@ -290,6 +297,14 @@ export function MapEditor() {
     addMap(newMap);
     setActiveMapId(id);
     setSelectedMapId(id);
+  };
+
+  const handleDeleteMap = () => {
+    if (!activeMap || pendingDeleteMapId !== activeMap.id) return;
+    const deletedMapId = activeMap.id;
+    if (!deleteMap(deletedMapId)) return;
+    if (saveData?.current_map_id === deletedMapId) resetRun();
+    setPendingDeleteMapId(null);
   };
 
   const handleResizeMap = (newWidth: number, newHeight: number) => {
@@ -897,6 +912,14 @@ export function MapEditor() {
             <Copy className="w-4 h-4" />
           </button>
           <button
+            onClick={() => activeMap && setPendingDeleteMapId(activeMap.id)}
+            disabled={!activeMap || activeMap.id === gamePackage.metadata.start_map_id || gamePackage.maps.length <= 1}
+            className="p-2 text-neutral-400 hover:bg-red-950 hover:text-red-300 disabled:cursor-not-allowed disabled:opacity-30 rounded-md transition-colors"
+            title={activeMap?.id === gamePackage.metadata.start_map_id ? "The start map cannot be deleted" : "Delete Map"}
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
+          <button
             onClick={() => setTopDown((value) => !value)}
             className={`p-2 rounded-md transition-colors flex items-center gap-1.5 px-3 text-sm font-medium ${
               topDown
@@ -942,6 +965,24 @@ export function MapEditor() {
             <span className="hidden sm:inline">Play map</span>
           </button>
         </div>
+
+        {activeMap && pendingDeleteMapId === activeMap.id && (
+          <div className="flex w-full items-center gap-3 border-t border-red-500/30 bg-red-950/40 px-4 py-2 text-sm text-red-100">
+            <span className="mr-auto">Delete <strong>{activeMap.display_name}</strong>? Incoming exits to this map will also be removed.</span>
+            <button
+              onClick={() => setPendingDeleteMapId(null)}
+              className="rounded-md px-3 py-1.5 text-neutral-300 hover:bg-neutral-800"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleDeleteMap}
+              className="rounded-md bg-red-600 px-3 py-1.5 font-semibold text-white hover:bg-red-500"
+            >
+              Confirm Delete Map
+            </button>
+          </div>
+        )}
       </div>
 
       {/* 3D Canvas + docked inspector */}
@@ -995,6 +1036,39 @@ export function MapEditor() {
             renderCenter={editorRenderCenter}
             renderRadius={editorRenderRadius}
           />
+          <group>
+            {(activeMap.generation_sockets ?? []).map((socket, index) => {
+              const selected = selection?.kind === "generation_socket" && selection.index === index;
+              const color = socket.kind === "entrance"
+                ? "#22c55e"
+                : socket.kind === "culmination"
+                  ? "#ef4444"
+                  : socket.kind === "artifact_origin"
+                    ? "#f59e0b"
+                    : socket.kind === "extraction"
+                      ? "#06b6d4"
+                      : "#e879f9";
+              return (
+                <group key={socket.id} position={[socket.cell[0], 2.72, socket.cell[1]]}>
+                  <mesh
+                    rotation={[-Math.PI / 2, 0, 0]}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setSelection({ kind: "generation_socket", index });
+                      setInspectorOpen(true);
+                    }}
+                  >
+                    <torusGeometry args={[selected ? 0.44 : 0.34, selected ? 0.11 : 0.075, 8, 20]} />
+                    <meshBasicMaterial color={color} depthTest={false} transparent opacity={0.96} />
+                  </mesh>
+                  <mesh position={[0, 0.28, 0]} raycast={() => null}>
+                    <sphereGeometry args={[selected ? 0.16 : 0.11, 10, 8]} />
+                    <meshBasicMaterial color={color} depthTest={false} />
+                  </mesh>
+                </group>
+              );
+            })}
+          </group>
           {lintEnabled && (
             <group>
               {lintProblems.map((problem, index) => {
@@ -1586,6 +1660,32 @@ function MapPlacementInspector({
     setSelection({ kind: "container", index: container_placements.length - 1 });
   };
 
+  const addGenerationSocket = () => {
+    const existing = new Set((map.generation_sockets || []).map((entry) => entry.id));
+    let suffix = (map.generation_sockets?.length || 0) + 1;
+    const prefix = map.generation
+      ? `${generatedIdNamespace(map.id)}:generation_socket:author_`
+      : `generation_socket_author_`;
+    let id = `${prefix}${suffix}`;
+    while (existing.has(id)) {
+      suffix += 1;
+      id = `${prefix}${suffix}`;
+    }
+    const generation_sockets = [
+      ...(map.generation_sockets || []),
+      {
+        id,
+        kind: "landmark",
+        cell: defaultCell,
+        label: "Authoring opportunity",
+        required: false,
+        tags: [],
+      } as MapGenerationSocketData,
+    ];
+    updateMap({ generation_sockets });
+    setSelection({ kind: "generation_socket", index: generation_sockets.length - 1 });
+  };
+
   const selectedData = selection ? ((map as any)[selection.kind === "entity"
     ? "entity_placements"
     : selection.kind === "trigger"
@@ -1594,7 +1694,9 @@ function MapPlacementInspector({
         ? "exits"
         : selection.kind === "item"
           ? "item_placements"
-          : "container_placements"] || [])[selection.index] : null;
+          : selection.kind === "container"
+            ? "container_placements"
+            : "generation_sockets"] || [])[selection.index] : null;
 
   return (
     <>
@@ -1635,6 +1737,7 @@ function MapPlacementInspector({
           <MiniButton onClick={addExit} disabled={gamePackage.maps.length === 0}>Exit</MiniButton>
           <MiniButton onClick={addItem} disabled={!gamePackage.items?.length}>Item</MiniButton>
           <MiniButton onClick={addContainer} disabled={!gamePackage.object_library?.length}>Container</MiniButton>
+          <MiniButton onClick={addGenerationSocket}>Gen Socket</MiniButton>
         </div>
       </div>
 
@@ -1695,6 +1798,17 @@ function MapPlacementInspector({
           }}
           setSelection={setSelection}
         />
+        <InspectorList
+          title="Generation Sockets"
+          count={map.generation_sockets?.length || 0}
+          selected={selection}
+          kind="generation_socket"
+          getLabel={(index) => {
+            const socket = map.generation_sockets![index];
+            return `${socket.kind} @ ${socket.cell.join(",")}`;
+          }}
+          setSelection={setSelection}
+        />
 
         <div className="border-t border-neutral-800 pt-4">
           {!selection || !selectedData ? (
@@ -1729,6 +1843,12 @@ function MapPlacementInspector({
               item={selectedData as WorldItemPlacementData}
               onChange={(next) => replaceInArray("item_placements", selection.index, next)}
               onDelete={() => removeFromArray("item_placements", selection.index)}
+            />
+          ) : selection.kind === "generation_socket" ? (
+            <GenerationSocketEditor
+              socket={selectedData as MapGenerationSocketData}
+              onChange={(next) => replaceInArray("generation_sockets", selection.index, next)}
+              onDelete={() => removeFromArray("generation_sockets", selection.index)}
             />
           ) : (
             <ContainerEditor
@@ -1781,6 +1901,69 @@ function InspectorList({
         </button>
       ))}
       {count === 0 && <p className="text-xs text-neutral-700">None.</p>}
+    </div>
+  );
+}
+
+function GenerationSocketEditor({
+  socket,
+  onChange,
+  onDelete,
+}: {
+  socket: MapGenerationSocketData;
+  onChange: (socket: MapGenerationSocketData) => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div className="space-y-3">
+      <InspectorHeader title="Generation Socket" onDelete={onDelete} />
+      <InspectorText label="Stable ID" value={socket.id} onChange={(id) => onChange({ ...socket, id })} />
+      <InspectorSelect
+        label="Opportunity"
+        value={socket.kind}
+        onChange={(kind) => onChange({ ...socket, kind: kind as MapGenerationSocketData["kind"] })}
+      >
+        <option value="entrance">Entrance</option>
+        <option value="culmination">Culmination</option>
+        <option value="landmark">Landmark</option>
+        <option value="artifact_origin">Artifact origin</option>
+        <option value="extraction">Extraction</option>
+        <option value="encounter">Encounter</option>
+        <option value="light_control">Light control</option>
+        <option value="darkness">Darkness</option>
+      </InspectorSelect>
+      <CellInputs cell={asCell(socket.cell)} onChange={(cell) => onChange({ ...socket, cell })} />
+      <InspectorText
+        label="Label"
+        value={socket.label || ""}
+        onChange={(label) => onChange({ ...socket, label: label.trim() || undefined })}
+      />
+      <InspectorText
+        label="Graph node"
+        value={socket.node_id || ""}
+        onChange={(node_id) => onChange({ ...socket, node_id: node_id.trim() || undefined })}
+      />
+      <InspectorText
+        label="Tags (comma separated)"
+        value={(socket.tags || []).join(", ")}
+        onChange={(value) => onChange({
+          ...socket,
+          tags: [...new Set(value.split(",").map((tag) => tag.trim()).filter(Boolean))],
+        })}
+      />
+      <label className="flex items-center gap-2 text-xs text-neutral-300">
+        <input
+          type="checkbox"
+          checked={socket.required}
+          onChange={(event) => onChange({ ...socket, required: event.target.checked })}
+        />
+        Required opportunity
+      </label>
+      {socket.source_opportunity_id && (
+        <p className="rounded border border-neutral-800 bg-neutral-900/70 p-2 font-mono text-[10px] text-neutral-500">
+          Draft source: {socket.source_opportunity_id}
+        </p>
+      )}
     </div>
   );
 }

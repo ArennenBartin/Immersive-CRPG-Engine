@@ -183,6 +183,36 @@ interface PreparedRoom {
   builderId?: string;
 }
 
+type DungeonLayoutStyle = "organic" | "directional_crawl";
+
+const recipeLayoutStyle = (recipe: DungeonRecipeDef): DungeonLayoutStyle =>
+  ((recipe.architecture as DungeonRecipeDef["architecture"] & { layoutStyle?: DungeonLayoutStyle }).layoutStyle ?? "organic");
+
+const proceduralLocalCells = (
+  builderId: string,
+  width: number,
+  depth: number,
+): MacroCell[] => {
+  const cells: MacroCell[] = [];
+  const lArmWidth = Math.max(2, Math.ceil(width / 3));
+  const lArmDepth = Math.max(2, Math.ceil(depth / 3));
+  const junctionMinX = Math.floor((width - 2) / 2);
+  const junctionMaxX = junctionMinX + 1;
+  const junctionMinZ = Math.floor((depth - 2) / 2);
+  const junctionMaxZ = junctionMinZ + 1;
+  for (let z = 0; z < depth; z += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const walkable = builderId === "l_room_v1"
+        ? x < lArmWidth || z >= depth - lArmDepth
+        : builderId === "junction_room_v1"
+          ? (x >= junctionMinX && x <= junctionMaxX) || (z >= junctionMinZ && z <= junctionMaxZ)
+          : true;
+      if (walkable) cells.push([x, z]);
+    }
+  }
+  return cells;
+};
+
 const proceduralSockets = (
   nodeId: string,
   x: number,
@@ -190,33 +220,71 @@ const proceduralSockets = (
   width: number,
   depth: number,
   socketWidth: number,
-): PlacedRoom["sockets"] => [
-  { id: `${nodeId}:north`, cell: [x + Math.floor(width / 2), z], facing: [0, -1], width: socketWidth, elevation: 0, tags: ["main"] },
-  { id: `${nodeId}:east`, cell: [x + width - 1, z + Math.floor(depth / 2)], facing: [1, 0], width: socketWidth, elevation: 0, tags: ["side"] },
-  { id: `${nodeId}:south`, cell: [x + Math.floor(width / 2), z + depth - 1], facing: [0, 1], width: socketWidth, elevation: 0, tags: ["main"] },
-  { id: `${nodeId}:west`, cell: [x, z + Math.floor(depth / 2)], facing: [-1, 0], width: socketWidth, elevation: 0, tags: ["side"] },
-];
+  localCells: readonly MacroCell[],
+): PlacedRoom["sockets"] => {
+  const centeredBoundaryCell = (
+    candidates: readonly MacroCell[],
+    axis: 0 | 1,
+    target: number,
+  ) => [...candidates].sort((left, right) =>
+    Math.abs(left[axis] - target) - Math.abs(right[axis] - target) || compareMacroCells(left, right))[0];
+  const north = centeredBoundaryCell(localCells.filter((cell) => cell[1] === 0), 0, Math.floor(width / 2));
+  const east = centeredBoundaryCell(localCells.filter((cell) => cell[0] === width - 1), 1, Math.floor(depth / 2));
+  const south = centeredBoundaryCell(localCells.filter((cell) => cell[1] === depth - 1), 0, Math.floor(width / 2));
+  const west = centeredBoundaryCell(localCells.filter((cell) => cell[0] === 0), 1, Math.floor(depth / 2));
+  const socket = (
+    id: string,
+    local: MacroCell,
+    facing: MacroCell,
+    tags: string[],
+  ): PlacedRoom["sockets"][number] => ({
+    id: `${nodeId}:${id}`,
+    cell: [x + local[0], z + local[1]],
+    facing,
+    width: socketWidth,
+    elevation: 0,
+    tags,
+  });
+  return [
+    socket("north", north, [0, -1], ["main"]),
+    socket("east", east, [1, 0], ["side"]),
+    socket("south", south, [0, 1], ["main"]),
+    socket("west", west, [-1, 0], ["side"]),
+  ];
+};
 
 const proceduralRoom = (
   prepared: PreparedRoom,
   origin: MacroCell,
   socketWidth: number,
 ): { room: PlacedRoom; geometry: DungeonRoomGeometry } => {
-  const cells: DungeonRoomGeometry["cells"] = [];
-  for (let z = origin[1]; z < origin[1] + prepared.depth; z += 1) {
-    for (let x = origin[0]; x < origin[0] + prepared.width; x += 1) {
-      cells.push({ cell: [x, z], walkable: true, height: 0, visualHeight: 0, surfaceTag: "none", tag: "procedural_room" });
-    }
-  }
+  const builderId = prepared.builderId ?? "rectangular_room_v1";
+  const localCells = proceduralLocalCells(builderId, prepared.width, prepared.depth);
+  const cells: DungeonRoomGeometry["cells"] = localCells.map((cell) => ({
+    cell: [origin[0] + cell[0], origin[1] + cell[1]],
+    walkable: true,
+    height: 0,
+    visualHeight: 0,
+    surfaceTag: "none",
+    tag: "procedural_room",
+  }));
   return {
     room: {
       nodeId: prepared.nodeId,
       mapId: prepared.mapId,
-      builderId: prepared.builderId ?? "rectangular_room_v1",
+      builderId,
       origin: [...origin],
       rotation: prepared.rotation,
       bounds: { x: origin[0], z: origin[1], width: prepared.width, depth: prepared.depth },
-      sockets: proceduralSockets(prepared.nodeId, origin[0], origin[1], prepared.width, prepared.depth, socketWidth),
+      sockets: proceduralSockets(
+        prepared.nodeId,
+        origin[0],
+        origin[1],
+        prepared.width,
+        prepared.depth,
+        socketWidth,
+        localCells,
+      ),
       reservedCells: [],
     },
     geometry: { nodeId: prepared.nodeId, mapId: prepared.mapId, cells, populationSockets: [] },
@@ -266,7 +334,7 @@ const placedCenter = (room: PlacedRoom): MacroCell => [
   room.bounds.z + Math.floor(room.bounds.depth / 2),
 ];
 
-const candidateOrigins = (
+const organicCandidateOrigins = (
   prepared: PreparedRoom,
   placed: ReadonlyMap<string, PlacedRoom>,
   graph: DungeonGraph,
@@ -311,7 +379,161 @@ const candidateOrigins = (
     .map((candidate) => candidate.cell);
 };
 
-const floorPlacementOrder = (graph: DungeonGraph, nodeIds: readonly string[]) => {
+const connectedPlacedRooms = (
+  nodeId: string,
+  placed: ReadonlyMap<string, PlacedRoom>,
+  graph: DungeonGraph,
+) => graph.edges.flatMap((edge) =>
+  edge.fromNodeId === nodeId ? [edge.toNodeId] : edge.toNodeId === nodeId ? [edge.fromNodeId] : [])
+  .filter((id) => placed.has(id))
+  .map((id) => placed.get(id)!)
+  .sort((left, right) => left.nodeId.localeCompare(right.nodeId));
+
+const clamp = (value: number, minimum: number, maximum: number) =>
+  Math.max(minimum, Math.min(maximum, value));
+
+const directionalTargetCenter = (
+  prepared: PreparedRoom,
+  placed: ReadonlyMap<string, PlacedRoom>,
+  graph: DungeonGraph,
+  bounds: MacroGridBounds,
+  padding: number,
+): MacroCell => {
+  const node = graph.nodes.find((entry) => entry.id === prepared.nodeId)!;
+  const inset = Math.max(4, padding + 3);
+  const halfWidth = Math.floor(prepared.width / 2);
+  const halfDepth = Math.floor(prepared.depth / 2);
+  const minCenterX = bounds.minX + halfWidth + inset;
+  const maxCenterX = bounds.maxX - (prepared.width - halfWidth - 1) - inset;
+  const minCenterZ = bounds.minZ + halfDepth + inset;
+  const maxCenterZ = bounds.maxZ - (prepared.depth - halfDepth - 1) - inset;
+  const mandatory = criticalNodes(graph);
+  if (node.mandatory) {
+    const criticalIndex = Math.max(0, mandatory.findIndex((entry) => entry.id === node.id));
+    const progress = mandatory.length <= 1 ? 0 : criticalIndex / (mandatory.length - 1);
+    const laneReach = Math.min(13, Math.max(0, Math.floor((maxCenterX - minCenterX) / 3)));
+    const lanePattern = [0, -1, 0, 1] as const;
+    const targetX = clamp(lanePattern[criticalIndex % lanePattern.length] * laneReach, minCenterX, maxCenterX);
+    const targetZ = Math.round(maxCenterZ + (minCenterZ - maxCenterZ) * progress);
+    return [targetX, clamp(targetZ, minCenterZ, maxCenterZ)];
+  }
+
+  const branchNodes = graph.nodes.filter((entry) => entry.branchId === node.branchId)
+    .sort((left, right) => left.id.localeCompare(right.id));
+  const branchMember = Math.max(0, branchNodes.findIndex((entry) => entry.id === node.id));
+  const attachmentId = graph.edges.flatMap((edge) => {
+    if (edge.fromNodeId === branchNodes[0]?.id) return [edge.toNodeId];
+    if (edge.toNodeId === branchNodes[0]?.id) return [edge.fromNodeId];
+    return [];
+  }).find((id) => graph.nodes.find((entry) => entry.id === id)?.mandatory);
+  const attachment = attachmentId ? placed.get(attachmentId) : undefined;
+  const anchor = attachment ? placedCenter(attachment) : connectedPlacedRooms(node.id, placed, graph).map(placedCenter)[0] ?? [0, 0];
+  const branchNumber = Number(node.branchId?.match(/(\d+)$/)?.[1] ?? 0);
+  const side = branchNumber % 2 === 0 ? -1 : 1;
+  const lateralStep = 9 + branchMember * 7;
+  const targetX = clamp(anchor[0] + side * lateralStep, minCenterX, maxCenterX);
+  const targetZ = clamp(anchor[1] - 2 - branchMember * 2 + (branchNumber % 3 - 1) * 2, minCenterZ, maxCenterZ);
+  return [targetX, targetZ];
+};
+
+const directionalCandidateOrigins = (
+  prepared: PreparedRoom,
+  placed: ReadonlyMap<string, PlacedRoom>,
+  graph: DungeonGraph,
+  bounds: MacroGridBounds,
+  padding: number,
+  rng: DungeonRandom,
+): MacroCell[] => {
+  const target = directionalTargetCenter(prepared, placed, graph, bounds, padding);
+  const neighbors = connectedPlacedRooms(prepared.nodeId, placed, graph);
+  const candidates = new Map<string, { id: string; cell: MacroCell; score: number }>();
+  const addCandidate = (cell: MacroCell) => {
+    const opposite: MacroCell = [cell[0] + prepared.width - 1, cell[1] + prepared.depth - 1];
+    if (!macroCellInBounds(cell, bounds) || !macroCellInBounds(opposite, bounds)) return;
+    const center: MacroCell = [cell[0] + Math.floor(prepared.width / 2), cell[1] + Math.floor(prepared.depth / 2)];
+    const neighborDistances = neighbors.map((room) => {
+      const roomCenter = placedCenter(room);
+      return Math.abs(center[0] - roomCenter[0]) + Math.abs(center[1] - roomCenter[1]);
+    });
+    const maximumNeighborDistance = Math.max(0, ...neighborDistances);
+    const neighborDistance = neighborDistances.reduce((sum, distance) => sum + distance, 0);
+    const targetDistance = Math.abs(center[0] - target[0]) + Math.abs(center[1] - target[1]);
+    const node = graph.nodes.find((entry) => entry.id === prepared.nodeId)!;
+    let directionPenalty = 0;
+    if (node.mandatory) {
+      for (const room of neighbors) {
+        const neighbor = graph.nodes.find((entry) => entry.id === room.nodeId);
+        if (!neighbor?.mandatory || neighbor.depth >= node.depth) continue;
+        const northwardProgress = placedCenter(room)[1] - center[1];
+        if (northwardProgress < 2) directionPenalty += (2 - northwardProgress) * 120;
+      }
+    }
+    const loopDistancePenalty = graph.edges
+      .filter((edge) => edge.tags.includes("loop") &&
+        (edge.fromNodeId === node.id || edge.toNodeId === node.id))
+      .flatMap((edge) => {
+        const otherId = edge.fromNodeId === node.id ? edge.toNodeId : edge.fromNodeId;
+        const other = placed.get(otherId);
+        if (!other) return [];
+        const otherCenter = placedCenter(other);
+        const distance = Math.abs(center[0] - otherCenter[0]) + Math.abs(center[1] - otherCenter[1]);
+        return [Math.max(0, distance - 18) * 80];
+      }).reduce((sum, penalty) => sum + penalty, 0);
+    const longConnectionPenalty = Math.max(0, maximumNeighborDistance - 24) ** 2 * 40;
+    const key = `${cell[0]}:${cell[1]}`;
+    candidates.set(key, {
+      id: `${prepared.nodeId}:${key}`,
+      cell,
+      score: targetDistance * 5 + neighborDistance * 2 + maximumNeighborDistance * 2 +
+        directionPenalty + loopDistancePenalty + longConnectionPenalty,
+    });
+  };
+  const originForCenter = (center: MacroCell): MacroCell =>
+    [center[0] - Math.floor(prepared.width / 2), center[1] - Math.floor(prepared.depth / 2)];
+  for (const dx of [0, -3, 3, -6, 6]) {
+    for (const dz of [0, -2, 2, -4, 4]) addCandidate(originForCenter([target[0] + dx, target[1] + dz]));
+  }
+  for (const anchor of neighbors.length ? neighbors : [...placed.values()]) {
+    for (const gap of [2 + padding, 4 + padding, 6 + padding]) {
+      const alignedZ = anchor.bounds.z + Math.floor((anchor.bounds.depth - prepared.depth) / 2);
+      const alignedX = anchor.bounds.x + Math.floor((anchor.bounds.width - prepared.width) / 2);
+      addCandidate([anchor.bounds.x + anchor.bounds.width + gap, alignedZ]);
+      addCandidate([anchor.bounds.x - prepared.width - gap, alignedZ]);
+      addCandidate([alignedX, anchor.bounds.z + anchor.bounds.depth + gap]);
+      addCandidate([alignedX, anchor.bounds.z - prepared.depth - gap]);
+    }
+  }
+  return rng.shuffleById([...candidates.values()]).sort((left, right) => left.score - right.score)
+    .map((candidate) => candidate.cell);
+};
+
+const candidateOrigins = (
+  prepared: PreparedRoom,
+  placed: ReadonlyMap<string, PlacedRoom>,
+  graph: DungeonGraph,
+  bounds: MacroGridBounds,
+  padding: number,
+  rng: DungeonRandom,
+  layoutStyle: DungeonLayoutStyle,
+) => layoutStyle === "directional_crawl"
+  ? directionalCandidateOrigins(prepared, placed, graph, bounds, padding, rng)
+  : organicCandidateOrigins(prepared, placed, graph, bounds, padding, rng);
+
+const floorPlacementOrder = (
+  graph: DungeonGraph,
+  nodeIds: readonly string[],
+  layoutStyle: DungeonLayoutStyle = "organic",
+) => {
+  if (layoutStyle === "directional_crawl") {
+    const allowed = new Set(nodeIds);
+    const critical = criticalNodes(graph).filter((node) => allowed.has(node.id)).map((node) => node.id);
+    const optional = graph.nodes.filter((node) => allowed.has(node.id) && !node.mandatory)
+      .sort((left, right) => (left.branchId ?? "").localeCompare(right.branchId ?? "") ||
+        left.id.localeCompare(right.id))
+      .map((node) => node.id);
+    const included = new Set([...critical, ...optional]);
+    return [...critical, ...optional, ...nodeIds.filter((id) => !included.has(id)).sort()];
+  }
   const allowed = new Set(nodeIds);
   const degree = new Map(nodeIds.map((id) => [id, 0]));
   graph.edges.forEach((edge) => {
@@ -349,6 +571,11 @@ const choosePreparedRooms = (
   const archetypeById = new Map(input.archetypes.map((archetype) => [archetype.id, archetype]));
   const templateById = new Map(input.templates.map((template) => [template.id, template]));
   const mapByNode = new Map(floors.flatMap((floor) => floor.nodeIds.map((id) => [id, floor.mapId] as const)));
+  const layoutStyle = recipeLayoutStyle(input.recipe);
+  const requiredDirectionalBuilders = layoutStyle === "directional_crawl"
+    ? ["rectangular_room_v1", "l_room_v1", "junction_room_v1"].filter((id) =>
+      input.recipe.architecture.proceduralRoomBuilderPool.some((entry) => entry.id === id))
+    : [];
   let templateCount = 0;
   let proceduralCount = 0;
   return [...input.graph.nodes].sort((left, right) => left.id.localeCompare(right.id)).map((node, index) => {
@@ -360,6 +587,8 @@ const choosePreparedRooms = (
     const hasProcedural = input.recipe.architecture.proceduralRoomBuilderPool.length > 0;
     let useTemplate = compatibleTemplates.length > 0 && (!hasProcedural ||
       templateCount === 0 || (proceduralCount > 0 && shapeRng.chance(0.3)));
+    if (layoutStyle === "directional_crawl" &&
+      node.tags.includes("entrance") && compatibleTemplates.length) useTemplate = true;
     // Keep the objective procedural unless an objective-compatible template exists.
     if (node.tags.includes("objective") && !compatibleTemplates.length) useTemplate = false;
     if (useTemplate) {
@@ -371,19 +600,30 @@ const choosePreparedRooms = (
       templateCount += 1;
       return { nodeId: node.id, mapId: mapByNode.get(node.id)!, width: bounds.width, depth: bounds.depth, rotation, template };
     }
-    const builder = shapeRng.weighted(input.recipe.architecture.proceduralRoomBuilderPool.map((entry) => ({
-      id: entry.id, weight: entry.weight, value: entry.id,
-    })), `room-builder:${node.id}`);
+    const builder = requiredDirectionalBuilders.length
+      ? requiredDirectionalBuilders[proceduralCount % requiredDirectionalBuilders.length]
+      : shapeRng.weighted(input.recipe.architecture.proceduralRoomBuilderPool.map((entry) => ({
+        id: entry.id, weight: entry.weight, value: entry.id,
+      })), `room-builder:${node.id}`);
     proceduralCount += 1;
     const widthMin = Math.max(input.recipe.scale.roomWidth.min, archetype?.minWidth ?? 1);
     const widthMax = Math.min(input.recipe.scale.roomWidth.max, archetype?.maxWidth ?? input.recipe.scale.roomWidth.max);
     const depthMin = Math.max(input.recipe.scale.roomDepth.min, archetype?.minDepth ?? 1);
     const depthMax = Math.min(input.recipe.scale.roomDepth.max, archetype?.maxDepth ?? input.recipe.scale.roomDepth.max);
+    // The directional preset spends its scale on route length and lateral
+    // branches. Capping ordinary room footprints keeps the one-map result
+    // under the fine-cell budget without shrinking objective/entrance minima.
+    const directionalWidthMax = layoutStyle === "directional_crawl"
+      ? Math.max(widthMin, Math.min(widthMax, 9))
+      : widthMax;
+    const directionalDepthMax = layoutStyle === "directional_crawl"
+      ? Math.max(depthMin, Math.min(depthMax, 9))
+      : depthMax;
     return {
       nodeId: node.id,
       mapId: mapByNode.get(node.id)!,
-      width: shapeRng.intBetween(widthMin, widthMax),
-      depth: shapeRng.intBetween(depthMin, depthMax),
+      width: shapeRng.intBetween(widthMin, directionalWidthMax),
+      depth: shapeRng.intBetween(depthMin, directionalDepthMax),
       rotation: 0,
       builderId: builder,
     };
@@ -509,6 +749,7 @@ export const embedDungeon = (
   const corridorRng = input.seedContext.stream("corridors");
   const preparedRooms = choosePreparedRooms({ ...input, graph }, floors, shapeRng);
   const preparedByNode = new Map(preparedRooms.map((room) => [room.nodeId, room]));
+  const layoutStyle = recipeLayoutStyle(input.recipe);
   const rooms: PlacedRoom[] = [];
   const roomGeometry: Record<string, DungeonRoomGeometry> = {};
   let embeddingBacktracks = 0;
@@ -518,12 +759,20 @@ export const embedDungeon = (
     const occupancy = new DungeonOccupancy(bounds);
     const placed = new Map<string, PlacedRoom>();
     const geometry = new Map<string, DungeonRoomGeometry>();
-    const order = floorPlacementOrder(graph, floor.nodeIds);
+    const order = floorPlacementOrder(graph, floor.nodeIds, layoutStyle);
     const recurse = (index: number, current: DungeonOccupancy): DungeonOccupancy | undefined => {
       if (input.shouldCancel?.()) return undefined;
       if (index >= order.length) return current;
       const prepared = preparedByNode.get(order[index])!;
-      const origins = candidateOrigins(prepared, placed, graph, bounds, input.recipe.architecture.roomPadding, embeddingRng);
+      const origins = candidateOrigins(
+        prepared,
+        placed,
+        graph,
+        bounds,
+        input.recipe.architecture.roomPadding,
+        embeddingRng,
+        layoutStyle,
+      );
       for (const origin of origins) {
         const roomCells = rectangleCells(origin[0], origin[1], prepared.width, prepared.depth);
         const paddingCells = paddedRectangleCells(
@@ -563,7 +812,16 @@ export const embedDungeon = (
   const transitions: PlacedTransition[] = [];
   const edgeSockets: DungeonSpatialResult["edgeSockets"] = {};
   let corridorSearchVisited = 0;
-  for (const edge of [...graph.edges].sort((left, right) => left.id.localeCompare(right.id))) {
+  const edgeRouteRank = (edge: DungeonGraph["edges"][number]) => {
+    if (edge.tags.includes("critical")) return 0;
+    if (edge.tags.includes("branch")) return 1;
+    if (edge.tags.includes("loop")) return 3;
+    return 2;
+  };
+  const edgeOrder = [...graph.edges].sort((left, right) =>
+    (layoutStyle === "directional_crawl" ? edgeRouteRank(left) - edgeRouteRank(right) : 0) ||
+      left.id.localeCompare(right.id));
+  for (const edge of edgeOrder) {
     const from = roomByNode.get(edge.fromNodeId)!;
     const to = roomByNode.get(edge.toNodeId)!;
     const pair = chooseSocketPair(from, to);
@@ -613,6 +871,13 @@ export const embedDungeon = (
       return failedStage([dungeonDiagnostic(
         "fatal", "corridors", "DNG_CORRIDOR_ROUTE_FAILED",
         `Could not route edge ${edge.id}: ${route.reason}.`, { mapId: from.mapId, relatedIds: [edge.id] },
+      )], { embeddingBacktracks, corridorSearchVisited });
+    }
+    if (layoutStyle === "directional_crawl" && route.cells.length - 1 > 28) {
+      return failedStage([dungeonDiagnostic(
+        "fatal", "corridors", "DNG_DIRECTIONAL_CORRIDOR_TOO_LONG",
+        `Directional corridor ${edge.id} is ${route.cells.length - 1} cells long; the limit is 28.`,
+        { mapId: from.mapId, relatedIds: [edge.id] },
       )], { embeddingBacktracks, corridorSearchVisited });
     }
     const width = corridorRng.intBetween(input.recipe.architecture.corridorWidth.min, input.recipe.architecture.corridorWidth.max);

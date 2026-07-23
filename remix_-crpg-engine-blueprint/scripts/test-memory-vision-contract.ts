@@ -12,7 +12,10 @@ import {
 } from "../src/utils/fogOfWar";
 import {
   MEMORY_FOG_COLOR,
+  MEMORY_FOG_FAR_COLOR,
   UNKNOWN_FOG_COLOR,
+  resolveMemoryFogColor,
+  resolveMemoryFogDistanceFactor,
   resolveStaticFogMaterialPolicy,
 } from "../src/utils/lightRendering";
 
@@ -201,18 +204,23 @@ assert.deepEqual(
 );
 assert.deepEqual(
   rememberedStructure,
-  { render: true, postFog: false, cameraFaded: false },
-  "remembered structure must stay rendered without a camera fade",
+  { render: true, postFog: false, cameraFaded: true },
+  "a remembered camera occluder must fade without changing its memory material",
 );
 assert.deepEqual(
   unknownStructure,
-  { render: true, postFog: false, cameraFaded: false },
-  "unknown structure must stay rendered as black geometry without a camera fade",
+  { render: true, postFog: false, cameraFaded: true },
+  "an unknown foreground occluder must fade so it cannot hide the player",
 );
 assert.equal(
   resolveStructureFogCompositePolicy("visible", false).cameraFaded,
   false,
   "visible structure that does not occlude the camera must remain fully opaque",
+);
+assert.equal(
+  resolveStructureFogCompositePolicy("explored", false).cameraFaded,
+  false,
+  "remembered structure outside the camera corridor must remain fully opaque",
 );
 
 const visibleMaterial = resolveStaticFogMaterialPolicy("visible");
@@ -244,6 +252,79 @@ assert.equal(unknownMaterial.forceOpaque, true);
 assert.equal(unknownMaterial.preserveTextureMaps, false);
 assert.equal(unknownMaterial.tint, UNKNOWN_FOG_COLOR);
 assert.equal(unknownMaterial.tintStrength, 1);
+
+const memoryDistanceSamples = [-100, 0, 1, 2, 3, 4, 5, 7, 9, 100].map(
+  resolveMemoryFogDistanceFactor,
+);
+assert.deepEqual(
+  [
+    resolveMemoryFogDistanceFactor(-100),
+    resolveMemoryFogDistanceFactor(0),
+    resolveMemoryFogDistanceFactor(1),
+    resolveMemoryFogDistanceFactor(3),
+    resolveMemoryFogDistanceFactor(5),
+    resolveMemoryFogDistanceFactor(9),
+    resolveMemoryFogDistanceFactor(100),
+  ],
+  [0, 0, 0, 0.25, 0.5, 1, 1],
+  "remembered color distance must clamp at both ends and retain its authored quarter/half landmarks",
+);
+assert.ok(
+  memoryDistanceSamples.every(
+    (factor, index) =>
+      Number.isFinite(factor) &&
+      factor >= 0 &&
+      factor <= 1 &&
+      (index === 0 || factor >= memoryDistanceSamples[index - 1]),
+  ),
+  "remembered color distance must remain finite, clamped, and monotonic",
+);
+assert.equal(
+  resolveMemoryFogColor(-100),
+  MEMORY_FOG_COLOR,
+  "remembered structure at or inside the near radius must retain the indigo memory color",
+);
+assert.equal(
+  resolveMemoryFogColor(1),
+  MEMORY_FOG_COLOR,
+  "the indigo memory color must include the complete near radius",
+);
+assert.equal(
+  resolveMemoryFogColor(9),
+  MEMORY_FOG_FAR_COLOR,
+  "remembered structure at the far radius must reach the black-pink color",
+);
+assert.equal(
+  resolveMemoryFogColor(100),
+  MEMORY_FOG_FAR_COLOR,
+  "remembered structure beyond the far radius must stay clamped to black-pink",
+);
+assert.notEqual(
+  resolveMemoryFogColor(5),
+  MEMORY_FOG_COLOR,
+  "the midpoint must no longer use the near indigo color",
+);
+assert.notEqual(
+  resolveMemoryFogColor(5),
+  MEMORY_FOG_FAR_COLOR,
+  "the midpoint must not reach the far black-pink color early",
+);
+
+assert.deepEqual(
+  resolveStaticFogMaterialPolicy("visible"),
+  visibleMaterial,
+  "the remembered distance palette must not alter visible material behavior",
+);
+assert.deepEqual(
+  resolveStaticFogMaterialPolicy("explored"),
+  rememberedMaterial,
+  "the remembered distance palette must not alter the explored-state material contract",
+);
+assert.deepEqual(
+  resolveStaticFogMaterialPolicy("unseen"),
+  unknownMaterial,
+  "the remembered distance palette must not alter the fully black unknown material",
+);
 
 const darkEntityContext = {
   viewerCell: [10, 10] as const,
@@ -359,5 +440,5 @@ assert.deepEqual(
 usePlayStore.getState().resetRun();
 
 console.log(
-  "Memory Vision contract passed: state priority, retained static structure, visible-only camera fade, flat fog materials, and per-run exploration union/reset.",
+  "Memory Vision contract passed: state priority, retained static structure, fog-independent camera fade, flat fog materials, and per-run exploration union/reset.",
 );

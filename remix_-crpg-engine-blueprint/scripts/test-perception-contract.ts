@@ -6,6 +6,7 @@ import {
   FINE_PER_MACRO,
   advanceImmersivePerceptionForSave,
   createImmersiveIlluminationSnapshotFromV1,
+  createImmersiveVisualAcquisitionResolver,
   createSimulationSnapshotFromV1,
   createImmersiveViewerVisibilityFromV1,
   dispatchV1EmitSound,
@@ -350,6 +351,18 @@ console.log("perception contract: reciprocal sight, occlusion, and fog layers");
     target_actor_id: "player",
     max_range: 13,
   });
+  const preparedAcquisition = createImmersiveVisualAcquisitionResolver(
+    gamePackage,
+    carriedSave,
+    map.id,
+    createSimulationSnapshotFromV1(gamePackage, carriedSave, map.id),
+  ).query({
+    map_id: map.id,
+    observer_cell: [0, -5],
+    target_cell: carriedSave.player.cell,
+    target_actor_id: "player",
+    max_range: 13,
+  });
   const extinguishedSave: PlaySave = {
     ...carriedSave,
     flags: {
@@ -368,6 +381,10 @@ console.log("perception contract: reciprocal sight, occlusion, and fog layers");
     exposed.acquired &&
       exposed.cause === "carried_light_exposure" &&
       exposed.exposing_source_ids.length === 1,
+  );
+  check(
+    "prepared acquisition reuses one world solve without changing sight evidence",
+    JSON.stringify(preparedAcquisition) === JSON.stringify(exposed),
   );
   check(
     "extinguishing the light removes its source and breaks visual contact",

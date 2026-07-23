@@ -11,7 +11,7 @@ import type { DungeonDiagnostic, DungeonRecipeDef, DungeonThemeProfileDef } from
 import { dungeonDiagnostic, failedStage, successfulStage, type DungeonStageOutput } from "../diagnostics";
 import type { DungeonSpatialResult } from "../embedding";
 import { compareMacroCells, macroCellKey, centeredMacroBounds, macroCellInBounds, type MacroCell } from "../embedding/gridSearch";
-import type { DungeonPopulationResult } from "../population";
+import { dungeonPrimarySpawnCell, type DungeonPopulationResult } from "../population";
 
 export interface DungeonBakeInput {
   recipe: DungeonRecipeDef;
@@ -155,6 +155,15 @@ export const bakeDungeonMaps = (
     "fatal", "bake", "DNG_GENERATION_CANCELED", "Dungeon bake was canceled.",
   )]);
   const diagnostics: DungeonDiagnostic[] = [];
+  if (input.recipe.architecture.connectionMode === "open_only") {
+    const blockedConnections = input.spatial.graph.edges.filter((edge) =>
+      edge.kind === "door" || edge.kind === "locked" || edge.kind === "secret");
+    if (blockedConnections.length) diagnostics.push(dungeonDiagnostic(
+      "fatal", "infrastructure", "DNG_OPEN_ONLY_CONNECTION_VIOLATION",
+      `Open-only recipe ${input.recipe.id} produced ${blockedConnections.length} door, locked, or secret connection(s).`,
+      { relatedIds: blockedConnections.map((edge) => edge.id) },
+    ));
+  }
   const allocators = new Map<string, DeterministicIdAllocator>();
   for (const floor of input.spatial.embedded.maps) {
     const existingEntityIds = (input.population.maps[floor.mapId]?.entities ?? []).flatMap((entry) => entry.id ? [entry.id] : []);
@@ -170,7 +179,11 @@ export const bakeDungeonMaps = (
     if (entrance) {
       const id = allocator.semantic("spawn", "primary");
       primarySpawnIds[floor.mapId] = id;
-      spawns.push({ id, cell: roomCenterCell(input.spatial, entrance.id), facing: [0, 1] });
+      spawns.push({
+        id,
+        cell: dungeonPrimarySpawnCell(input.spatial, entrance.id) ?? roomCenterCell(input.spatial, entrance.id),
+        facing: [0, 1],
+      });
     }
     for (const transition of input.spatial.embedded.transitions.filter((entry) => entry.fromMapId === floor.mapId)) {
       const id = allocator.semantic("spawn", `transition-${transition.id}`);
@@ -213,7 +226,10 @@ export const bakeDungeonMaps = (
       const to = input.spatial.graph.nodes.find((node) => node.id === edge.toNodeId);
       return from?.floorHint === floor.floorIndex && to?.floorHint === floor.floorIndex && edge.kind !== "vertical";
     }).sort((left, right) => Number(right.kind === "locked") - Number(left.kind === "locked") || left.id.localeCompare(right.id));
-    for (const edge of sameFloorEdges.filter((entry) => entry.kind !== "open")) {
+    const doorEdges = input.recipe.architecture.connectionMode === "open_only"
+      ? []
+      : sameFloorEdges.filter((entry) => entry.kind !== "open");
+    for (const edge of doorEdges) {
       const placement = chooseDoorCell(input, edge.id, cells, blockingCells);
       if (!placement) {
         diagnostics.push(dungeonDiagnostic(

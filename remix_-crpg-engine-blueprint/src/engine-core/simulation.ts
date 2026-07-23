@@ -13,6 +13,8 @@ import type {
   PlaySave,
   SimulationConditionRecord,
   SimulationEnvironmentFieldRecord,
+  SimulationNpcTaskRecord,
+  SimulationProcessRecord,
   SimulationSurfaceLayerRecord,
 } from "../schema/save";
 import { doorPlacementKey, isBuildingDoorPlacement, isDoorPlacementOpen } from "../utils/doorPlacement";
@@ -28,6 +30,66 @@ import { coordKey } from "./gridCoordinates";
 import { isFineExpandedPackage } from "./fineWorld";
 
 export type SimulationSurfaceKind = Exclude<CellData["surface_tag"], "none">;
+
+// Reactive jobs and workstation processes are durable while active, but their
+// completed records are historical diagnostics rather than live simulation
+// inputs. Keep a useful recent per-actor/per-workstation archive so long-running
+// expeditions do not serialize every superseded search or finished recipe.
+export const compactNpcTaskHistory = (
+  tasks: SimulationNpcTaskRecord[],
+  maxTerminal = 128,
+  maxTerminalPerActor = 8,
+): SimulationNpcTaskRecord[] => {
+  let terminalCount = 0;
+  const terminalByActor = new Map<string, number>();
+  const retained: SimulationNpcTaskRecord[] = [];
+  for (let index = tasks.length - 1; index >= 0; index -= 1) {
+    const task = tasks[index];
+    const terminal = task.state === "done" || task.state === "failed";
+    if (!terminal) {
+      retained.push(task);
+      continue;
+    }
+    const actorCount = terminalByActor.get(task.actor_id) || 0;
+    if (terminalCount >= maxTerminal || actorCount >= maxTerminalPerActor)
+      continue;
+    terminalCount += 1;
+    terminalByActor.set(task.actor_id, actorCount + 1);
+    retained.push(task);
+  }
+  retained.reverse();
+  return retained;
+};
+
+export const compactSimulationProcessHistory = (
+  processes: SimulationProcessRecord[],
+  maxTerminal = 64,
+  maxTerminalPerWorkstation = 8,
+): SimulationProcessRecord[] => {
+  let terminalCount = 0;
+  const terminalByWorkstation = new Map<string, number>();
+  const retained: SimulationProcessRecord[] = [];
+  for (let index = processes.length - 1; index >= 0; index -= 1) {
+    const process = processes[index];
+    const terminal = process.state === "complete" || process.state === "failed";
+    if (!terminal) {
+      retained.push(process);
+      continue;
+    }
+    const key = process.workstation_id || process.process_type || "unassigned";
+    const workstationCount = terminalByWorkstation.get(key) || 0;
+    if (
+      terminalCount >= maxTerminal ||
+      workstationCount >= maxTerminalPerWorkstation
+    )
+      continue;
+    terminalCount += 1;
+    terminalByWorkstation.set(key, workstationCount + 1);
+    retained.push(process);
+  }
+  retained.reverse();
+  return retained;
+};
 export type SimulationOccupantKind =
   | "base_blocker"
   | "container"

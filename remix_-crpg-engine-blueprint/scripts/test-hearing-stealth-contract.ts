@@ -92,6 +92,16 @@ const makeSave = (
 const soundFields = (save: PlaySave): SimulationEnvironmentFieldRecord[] =>
   Object.values(save.map_deltas?.[map.id]?.environment_fields || {}).flat();
 
+const movementTraceLayers = (save: PlaySave) =>
+  Object.values(save.map_deltas?.[map.id]?.surface_layers || {})
+    .flat()
+    .filter(
+      (layer) =>
+        layer.source === "trace" &&
+        (layer.trace_action === "move" ||
+          layer.trace_action === "residue_transfer"),
+    );
+
 const latestFootstep = (save: PlaySave) =>
   soundFields(save)
     .filter(
@@ -318,6 +328,73 @@ console.log("hearing/stealth contract: compact movement history remains bounded"
         field.frequency_tag === "watch_bell" &&
         field.action === "scripted_event",
     ),
+  );
+  const traces = movementTraceLayers(persisted);
+  check(
+    "movement traces carry stable sequences and retain only a recent navigable trail",
+    traces.length <= 73 &&
+      traces.some((layer) => layer.trace_sequence === latestSequence) &&
+      traces.every(
+        (layer) =>
+          Number(layer.trace_sequence || 0) >= latestSequence - 72,
+      ),
+    `latest=${latestSequence} traces=${traces.length}`,
+  );
+}
+
+console.log("hearing/stealth contract: legacy movement traces migrate safely");
+{
+  const legacySurfaceLayers = Object.fromEntries(
+    Array.from({ length: 300 }, (_, index) => [
+      `legacy:${index}`,
+      [
+        {
+          id: `legacy_trace_${index}`,
+          kind: "footprint",
+          amount: 0.35,
+          age_ticks: 0,
+          source: "trace" as const,
+          trace_actor_id: "player",
+          trace_action: "move",
+          created_at_tick: 1,
+        },
+      ],
+    ]),
+  );
+  legacySurfaceLayers["legacy:cleaned"] = [
+    {
+      id: "legacy_cleaned_trace",
+      kind: "cleaned_trace",
+      amount: 0.1,
+      age_ticks: 0,
+      source: "trace",
+      trace_actor_id: "player",
+      trace_action: "clean",
+      created_at_tick: 1,
+    },
+  ];
+  const moved = dispatchV1MoveEntity({
+    gamePackage,
+    save: makeSave([-7, -2], {
+      map_deltas: {
+        [map.id]: { surface_layers: legacySurfaceLayers },
+      },
+    }),
+    actorId: "player",
+    dx: 0,
+    dy: -1,
+  });
+  const migratedTraces = movementTraceLayers(moved.save);
+  const allLayers = Object.values(
+    moved.save.map_deltas?.[map.id]?.surface_layers || {},
+  ).flat();
+  check(
+    "legacy saves retain recent movement evidence while shedding unbounded history",
+    moved.ok &&
+      migratedTraces.length <= 257 &&
+      migratedTraces.some((layer) => layer.trace_sequence === 1) &&
+      allLayers.some((layer) => layer.id === "legacy_cleaned_trace"),
+    `movement=${migratedTraces.length} all=${allLayers.length}`,
   );
 }
 

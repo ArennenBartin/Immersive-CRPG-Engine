@@ -46,7 +46,12 @@ import {
   appendKernelFactsToSave,
   createKernelFactsFromEngineEvents,
 } from "./kernel";
-import { recordSimulationCondition, resolveObjectManipulationAffordance } from "./simulation";
+import {
+  compactNpcTaskHistory,
+  compactSimulationProcessHistory,
+  recordSimulationCondition,
+  resolveObjectManipulationAffordance,
+} from "./simulation";
 import {
   CombatAttackOutcome,
   CombatPartyFollowerRef,
@@ -118,6 +123,10 @@ import {
   recordEntityBehaviorDecision,
   type BehaviorCommitmentRecord,
 } from "./behaviorArbiter";
+import {
+  recordArtifactPickup,
+  recordGlassHarvest,
+} from "./fractureCrawlLegacy";
 
 export const PLAYER_ENTITY_ID = "player";
 
@@ -467,6 +476,9 @@ const cloneSaveForRuntime = (save: PlaySave): PlaySave => ({
     : undefined,
   intercessor_campaign: save.intercessor_campaign
     ? structuredClone(save.intercessor_campaign)
+    : undefined,
+  fracture_crawl_campaign: save.fracture_crawl_campaign
+    ? structuredClone(save.fracture_crawl_campaign)
     : undefined,
   explored_cells: save.explored_cells
     ? Object.fromEntries(
@@ -3069,7 +3081,7 @@ export class V1GridWorld implements InteractiveGridWorld {
           [key]: [
             ...current.slice(-7),
             {
-              id: `trace_${this.tick}_${actorId}_${cell[0]}_${cell[1]}_${current.length}`,
+              id: `trace_${this.tick}_${actorId}_${cell[0]}_${cell[1]}_${options.trace_sequence || current.length}`,
               kind,
               amount,
               age_ticks: 0,
@@ -3087,6 +3099,7 @@ export class V1GridWorld implements InteractiveGridWorld {
               scent: options.scent,
               slipperiness: options.slipperiness,
               trace_potential: options.trace_potential,
+              trace_sequence: options.trace_sequence,
               decay_per_tick: options.decay_per_tick,
               created_at_tick: this.tick,
               expires_at_tick: options.expires_at_tick ?? this.tick + decayTicks,
@@ -3100,6 +3113,12 @@ export class V1GridWorld implements InteractiveGridWorld {
   private recordMovementSurfaceTransfer(actorId: string, cell: [number, number]): void {
     const targetCell = this.getActiveCell(cell[0], cell[1]);
     const baseProfile = this.surfaceTraceProfile(targetCell, "footprint");
+    // emitSoundAt commits this same next sequence immediately after the
+    // movement trace. Pairing the records lets the save retain a bounded,
+    // recent mechanical trail even when fine-grid walking does not advance the
+    // world clock.
+    const traceSequence =
+      Math.max(0, Number(this.save.flags?.immersive_sound_sequence || 0)) + 1;
     this.recordSurfaceTrace(actorId, cell, "footprint", "move", {
       amount: baseProfile.trace_potential,
       residue_kind: baseProfile.residue_kind,
@@ -3107,6 +3126,7 @@ export class V1GridWorld implements InteractiveGridWorld {
       scent: baseProfile.scent,
       slipperiness: baseProfile.slipperiness,
       trace_potential: baseProfile.trace_potential,
+      trace_sequence: traceSequence,
       cleaning_difficulty: baseProfile.cleaning_difficulty,
       decay_per_tick: baseProfile.decay_per_tick,
       expires_at_tick: this.tick + baseProfile.decay_ticks,
@@ -3124,6 +3144,7 @@ export class V1GridWorld implements InteractiveGridWorld {
           scent: profile.scent,
           slipperiness: profile.slipperiness,
           trace_potential: profile.trace_potential,
+          trace_sequence: traceSequence,
           cleaning_difficulty: profile.cleaning_difficulty,
           decay_per_tick: profile.decay_per_tick,
           expires_at_tick: this.tick + profile.decay_ticks,
@@ -3146,6 +3167,7 @@ export class V1GridWorld implements InteractiveGridWorld {
           scent: layer.scent ?? profile.scent,
           slipperiness: layer.slipperiness ?? profile.slipperiness,
           trace_potential: layer.trace_potential ?? profile.trace_potential,
+          trace_sequence: traceSequence,
           cleaning_difficulty: layer.cleaning_difficulty ?? profile.cleaning_difficulty,
           decay_per_tick: layer.decay_per_tick ?? profile.decay_per_tick,
           expires_at_tick: this.tick + profile.decay_ticks,
@@ -3255,7 +3277,7 @@ export class V1GridWorld implements InteractiveGridWorld {
         });
         added += 1;
       }
-      return { ...delta, npc_tasks: next };
+      return { ...delta, npc_tasks: compactNpcTaskHistory(next) };
     });
     return added;
   }
@@ -3583,7 +3605,10 @@ export class V1GridWorld implements InteractiveGridWorld {
       };
     });
 
-    this.updateMapDelta((current) => ({ ...current, npc_tasks: nextTasks }));
+    this.updateMapDelta((current) => ({
+      ...current,
+      npc_tasks: compactNpcTaskHistory(nextTasks),
+    }));
     return outcome;
   }
 
@@ -3730,10 +3755,21 @@ export class V1GridWorld implements InteractiveGridWorld {
   startSimulationProcess(options: SimulationProcessStartOptions): SimulationProcessOutcome {
     const materialized = this.materializeProcessOptions(options);
     this.consumeInventoryStacks(materialized.inputItems || []);
+    const processSequence = Math.max(
+      Number(this.save.flags?.simulation_process_sequence || 0),
+      this.getMapDelta()?.simulation_processes?.length || 0,
+    ) + 1;
+    this.save = {
+      ...this.save,
+      flags: {
+        ...(this.save.flags || {}),
+        simulation_process_sequence: processSequence,
+      },
+    };
     let processId = "";
     this.updateMapDelta((delta) => {
       const current = delta.simulation_processes || [];
-      processId = `proc_${materialized.processType}_${this.tick}_${current.length}`;
+      processId = `proc_${materialized.processType}_${this.tick}_${processSequence}`;
       const record: SimulationProcessRecord = {
         id: processId,
         process_def_id: materialized.processId,
@@ -3753,7 +3789,13 @@ export class V1GridWorld implements InteractiveGridWorld {
         created_at_tick: this.tick,
         updated_at_tick: this.tick,
       };
-      return { ...delta, simulation_processes: [...current, record] };
+      return {
+        ...delta,
+        simulation_processes: compactSimulationProcessHistory([
+          ...current,
+          record,
+        ]),
+      };
     });
     this.appendSimulationWorldFact("simulation_process_started", {
       actorId: materialized.actorIds?.[0],
@@ -4681,6 +4723,51 @@ export class V1GridWorld implements InteractiveGridWorld {
           0,
           soundSequence - FINE_PER_MACRO * 4,
         );
+        // Surface traces used clock ticks for expiry, but exploration walking
+        // intentionally does not advance the clock. Before sequence-backed
+        // pruning, a long walk therefore left one permanent save record per
+        // fine cell and made every later immutable map-delta update slower.
+        // Keep a generous 24-macro-tile recent trail for tracking gameplay.
+        // Legacy movement traces have no sequence; preserve the newest 256 on
+        // their first migration pass, while authored/cleaned layers are never
+        // pruned here.
+        const oldestTraceSequence = Math.max(
+          0,
+          soundSequence - FINE_PER_MACRO * 24,
+        );
+        const surfaceEntries = Object.entries(delta.surface_layers || {});
+        const legacyMovementTraceIds = surfaceEntries
+          .flatMap(([, layers]) => layers)
+          .filter(
+            (layer) =>
+              layer.source === "trace" &&
+              !layer.trace_sequence &&
+              (layer.trace_action === "move" ||
+                layer.trace_action === "residue_transfer"),
+          )
+          .slice(-256)
+          .map((layer) => layer.id);
+        const retainedLegacyMovementTraceIds = new Set(
+          legacyMovementTraceIds,
+        );
+        const surfaceLayers = surfaceEntries.reduce<
+          Record<string, SimulationSurfaceLayerRecord[]>
+        >((result, [key, layers]) => {
+          const retained = layers.filter((layer) => {
+            if (
+              layer.source !== "trace" ||
+              (layer.trace_action !== "move" &&
+                layer.trace_action !== "residue_transfer")
+            )
+              return true;
+            const sequence = Number(layer.trace_sequence || 0);
+            return sequence > 0
+              ? sequence >= oldestTraceSequence
+              : retainedLegacyMovementTraceIds.has(layer.id);
+          });
+          if (retained.length > 0) result[key] = retained;
+          return result;
+        }, {});
         const environmentFields = Object.entries(
           delta.environment_fields || {},
         ).reduce<Record<string, SimulationEnvironmentFieldRecord[]>>(
@@ -4725,7 +4812,11 @@ export class V1GridWorld implements InteractiveGridWorld {
             },
           ];
         });
-        return { ...delta, environment_fields: environmentFields };
+        return {
+          ...delta,
+          surface_layers: surfaceLayers,
+          environment_fields: environmentFields,
+        };
       });
     }
     return {
@@ -5344,6 +5435,26 @@ const buildV1DispatchResult = (
   return { ...result, events, save, world, kernelFacts };
 };
 
+const isCampaignTrackedInventoryItem = (
+  gamePackage: GamePackage,
+  itemId: string,
+) => {
+  const item = gamePackage.items.find((candidate) => candidate.id === itemId);
+  return Boolean(item?.artifact || item?.glass_resource);
+};
+
+const buildCampaignTrackedItemBlock = (
+  options: V1GridWorldOptions,
+  itemId: string,
+) => {
+  const world = createV1GridWorld(options);
+  return buildV1DispatchResult(options, world, world.events.getLog().length, {
+    ok: false,
+    reason: `campaign-tracked item ${itemId} requires its lifecycle operation`,
+    events: [],
+  });
+};
+
 const v1StealthActionBlocked = (
   options: V1GridWorldOptions & V1ActionCostOptions,
   actorId: string,
@@ -5504,6 +5615,35 @@ const dispatchV1ContainerCommand = (
       events: [],
     });
   }
+  const stowedItemId = type === "stow_in_container" ? String(params.itemId || "") : "";
+  if (
+    stowedItemId &&
+    isCampaignTrackedInventoryItem(options.gamePackage, stowedItemId)
+  ) {
+    return buildV1DispatchResult(options, world, before, {
+      ok: false,
+      reason: `campaign-tracked item ${stowedItemId} must remain with its carrier`,
+      events: [],
+    });
+  }
+  const takenItems =
+    type === "take_from_container"
+      ? [world.getContainerItem(options.containerId, Number(params.entryIndex) || 0)].filter(
+          (entry): entry is ContainerItemRef => Boolean(entry),
+        )
+      : type === "take_all_from_container"
+        ? world.getContainerItems(options.containerId)
+        : [];
+  const trackedContainerItem = takenItems.find((entry) =>
+    isCampaignTrackedInventoryItem(options.gamePackage, entry.itemId),
+  );
+  if (trackedContainerItem) {
+    return buildV1DispatchResult(options, world, before, {
+      ok: false,
+      reason: `campaign-tracked item ${trackedContainerItem.itemId} requires its lifecycle operation`,
+      events: [],
+    });
+  }
   const result = engine.dispatch(
     {
       type,
@@ -5578,9 +5718,52 @@ const dispatchV1CellCommand = (type: string, options: V1CellDispatchOptions) => 
 // Pick up the ground item at cell (x,y): adds it to the save inventory and marks
 // it taken/removes the drop, emitting an `item_acquired` event.
 export const dispatchV1TakeItem = (options: V1CellDispatchOptions) =>
-  dispatchV1CellCommand("take_item", options);
+  {
+    const engine = new Engine();
+    registerCoreCommands(engine);
+    const world = createV1GridWorld(options);
+    const before = world.events.getLog().length;
+    const actorId = options.actorId || PLAYER_ENTITY_ID;
+    if (v1StealthActionBlocked(options, actorId)) {
+      return buildV1DispatchResult(options, world, before, {
+        ok: false,
+        reason: "stealth stance",
+        events: [],
+      });
+    }
+    const groundItem = world.getGroundItemAt(options.x, options.y);
+    const result = engine.dispatch(
+      {
+        type: "take_item",
+        actorId,
+        params: { x: options.x, y: options.y },
+      },
+      world,
+    );
+    if (result.ok) world.applyActionCost(actorId, options);
+    const dispatched = buildV1DispatchResult(options, world, before, result);
+    if (!result.ok || !groundItem || groundItem.dropped) return dispatched;
+
+    const mapId = options.mapId || options.save.current_map_id;
+    let lifecycleSave = recordArtifactPickup(options.gamePackage, dispatched.save, {
+      mapId,
+      placementId: groundItem.id,
+      itemId: groundItem.itemId,
+    }).save;
+    lifecycleSave = recordGlassHarvest(options.gamePackage, lifecycleSave, {
+      itemId: groundItem.itemId,
+      itemCount: groundItem.count,
+      sourceId: `${mapId}:${groundItem.id}`,
+    }).save;
+    return lifecycleSave === dispatched.save
+      ? dispatched
+      : { ...dispatched, save: lifecycleSave };
+  };
 
 export const dispatchV1DropItem = (options: V1DropItemDispatchOptions) => {
+  if (isCampaignTrackedInventoryItem(options.gamePackage, options.itemId)) {
+    return buildCampaignTrackedItemBlock(options, options.itemId);
+  }
   const engine = new Engine();
   registerCoreCommands(engine);
   const world = createV1GridWorld(options);
@@ -5893,10 +6076,20 @@ export const dispatchV1SetQuest = (options: V1SetQuestDispatchOptions) =>
   dispatchV1StateCommand("set_quest", options, { questId: options.questId, state: options.state });
 
 export const dispatchV1GiveItem = (options: V1ItemGrantDispatchOptions) =>
-  dispatchV1StateCommand("give_item", options, { itemId: options.itemId, count: options.count ?? 1 });
+  isCampaignTrackedInventoryItem(options.gamePackage, options.itemId)
+    ? buildCampaignTrackedItemBlock(options, options.itemId)
+    : dispatchV1StateCommand("give_item", options, {
+        itemId: options.itemId,
+        count: options.count ?? 1,
+      });
 
 export const dispatchV1RemoveItem = (options: V1ItemGrantDispatchOptions) =>
-  dispatchV1StateCommand("remove_item", options, { itemId: options.itemId, count: options.count ?? 1 });
+  isCampaignTrackedInventoryItem(options.gamePackage, options.itemId)
+    ? buildCampaignTrackedItemBlock(options, options.itemId)
+    : dispatchV1StateCommand("remove_item", options, {
+        itemId: options.itemId,
+        count: options.count ?? 1,
+      });
 
 export const dispatchV1GiveCurrency = (options: V1CurrencyDispatchOptions) =>
   dispatchV1StateCommand("give_currency", options, { amount: options.amount });
@@ -6021,6 +6214,18 @@ export const dispatchV1SelectDialogueTopic = (options: V1SelectDialogueTopicDisp
 };
 
 export const dispatchV1BuyShopItem = (options: V1ShopBuyDispatchOptions) => {
+  const stockedItemId = options.gamePackage.shops
+    .find((shop) => shop.id === options.shopId)
+    ?.items[options.stockIndex]?.item_id;
+  if (
+    stockedItemId &&
+    isCampaignTrackedInventoryItem(options.gamePackage, stockedItemId)
+  ) {
+    return {
+      ...buildCampaignTrackedItemBlock(options, stockedItemId),
+      outcome: undefined as ShopTransactionOutcome | undefined,
+    };
+  }
   const result = dispatchV1StateCommand("buy_shop_item", options, {
     shopId: options.shopId,
     stockIndex: options.stockIndex,
@@ -6031,6 +6236,12 @@ export const dispatchV1BuyShopItem = (options: V1ShopBuyDispatchOptions) => {
 };
 
 export const dispatchV1SellInventoryItem = (options: V1ShopSellDispatchOptions) => {
+  if (isCampaignTrackedInventoryItem(options.gamePackage, options.itemId)) {
+    return {
+      ...buildCampaignTrackedItemBlock(options, options.itemId),
+      outcome: undefined as ShopTransactionOutcome | undefined,
+    };
+  }
   const result = dispatchV1StateCommand("sell_inventory_item", options, {
     shopId: options.shopId,
     itemId: options.itemId,

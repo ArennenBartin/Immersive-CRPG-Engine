@@ -40,7 +40,7 @@ export const TEST_SUITE_PLAYER_SPRITE_ID = peopleHorrorSpriteId(1, 1);
 // Bump on any suite-content change: persisted packages refresh their qa_*
 // content when this differs (engineStore hydration), and stale play saves
 // rebuild against the new version.
-export const TEST_SUITE_VERSION = "3.1.0";
+export const TEST_SUITE_VERSION = "3.2.0";
 
 const wings = mergeWings([
   hubWing,
@@ -113,6 +113,10 @@ export const withTestingMapSuite = (
         reserved_names: ["Mara Vale", "Sable North"],
         duplicate_name_policy: "avoid",
         history_keyword_id: "qa_topic_past_intercessor",
+        // Successors begin without an assigned signature. The QA lesson in
+        // the persistence lab gives the second life a distinct skill so two
+        // physical ghosts can prove deterministic, once-only inheritance.
+        base_known_skills: [],
       },
       campaign_debug: true,
     },

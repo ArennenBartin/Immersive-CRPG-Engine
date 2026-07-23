@@ -483,6 +483,22 @@ export const auditGamePackageReferences = (
     reference(indexes.endings, action.ending_id, `${path}.ending_id`, "REF_ENDING_MISSING", "ending");
     reference(indexes.keywords, action.topic_id, `${path}.topic_id`, "DIALOGUE_ACTION_TOPIC_INVALID", "dialogue topic");
     reference(indexes.dynamicTopics, action.dynamic_topic_id, `${path}.dynamic_topic_id`, "DIALOGUE_ACTION_DYNAMIC_TOPIC_INVALID", "dynamic dialogue topic");
+    const actionItem = action.item_id
+      ? pkg.items.find((item) => item.id === action.item_id)
+      : undefined;
+    if (
+      actionItem &&
+      (actionItem.artifact || actionItem.glass_resource) &&
+      (action.type === "give_item" || action.type === "remove_item")
+    ) {
+      add({
+        severity: "error",
+        code: "REF_CAMPAIGN_ITEM_ACTION_BYPASS",
+        path: `${path}.item_id`,
+        message: `Campaign-tracked item ${actionItem.id} must use its artifact or Glass lifecycle operation.`,
+        reference: actionItem.id,
+      });
+    }
     if (action.type === "unlock_topic" && !action.topic_id && !action.dynamic_topic_id) {
       add({
         severity: "error",
@@ -565,6 +581,22 @@ export const auditGamePackageReferences = (
       local(spawn.id, `${path}.spawns[${index}].id`);
       cellReference(spawn.cell, `${path}.spawns[${index}].cell`);
     });
+    map.generation_sockets?.forEach((socket, index) => {
+      const owner = `${path}.generation_sockets[${index}]`;
+      local(socket.id, `${owner}.id`);
+      cellReference(socket.cell, `${owner}.cell`);
+      if (socket.required && !socket.source_opportunity_id) {
+        add({
+          severity: "error",
+          code: "REF_GENERATION_SOCKET_SOURCE_MISSING",
+          path: `${owner}.source_opportunity_id`,
+          message: `Required generation socket ${socket.id} has no source opportunity identity`,
+          reference: socket.id,
+          mapId: map.id,
+          cell: normalizeCell(socket.cell),
+        });
+      }
+    });
     map.cells.forEach((cell, index) => {
       reference(indexes.objects, cell.object_id, `${path}.cells[${index}].object_id`, "REF_OBJECT_MISSING", "object", "error", { mapId: map.id, cell: [cell.x, cell.z] });
       reference(
@@ -624,7 +656,22 @@ export const auditGamePackageReferences = (
       if (placement.locked && !placement.key_item_id) {
         add({ severity: "error", code: "REF_LOCK_KEY_UNSPECIFIED", path: `${owner}.key_item_id`, message: "Locked container has no key item", mapId: map.id });
       }
-      placement.items.forEach((entry, itemIndex) => reference(indexes.items, entry.item_id, `${owner}.items[${itemIndex}].item_id`, "REF_ITEM_MISSING", "item"));
+      placement.items.forEach((entry, itemIndex) => {
+        const itemPath = `${owner}.items[${itemIndex}].item_id`;
+        reference(indexes.items, entry.item_id, itemPath, "REF_ITEM_MISSING", "item");
+        const item = pkg.items.find((candidate) => candidate.id === entry.item_id);
+        if (item?.artifact || item?.glass_resource) {
+          add({
+            severity: "error",
+            code: "REF_CAMPAIGN_ITEM_CONTAINER_BYPASS",
+            path: itemPath,
+            message: `Campaign-tracked item ${entry.item_id} cannot begin in an ordinary container.`,
+            reference: entry.item_id,
+            mapId: map.id,
+            cell: normalizeCell(placement.cell),
+          });
+        }
+      });
     });
     map.triggers.forEach((trigger, index) => {
       const owner = `${path}.triggers[${index}]`;
@@ -689,7 +736,11 @@ export const auditGamePackageReferences = (
     }
   });
 
-  const builtInRoomBuilders = new Set(["rectangular_room_v1"]);
+  const builtInRoomBuilders = new Set([
+    "rectangular_room_v1",
+    "l_room_v1",
+    "junction_room_v1",
+  ]);
   pkg.dungeon_recipes.forEach((recipe, recipeIndex) => {
     const path = `$.dungeon_recipes[${recipeIndex}]`;
     reference(indexes.dungeonThemes, recipe.themeId, `${path}.themeId`, "REF_DUNGEON_THEME_MISSING", "dungeon theme");
@@ -824,12 +875,98 @@ export const auditGamePackageReferences = (
     entity.discover_topic_ids?.forEach((id, topicIndex) => reference(indexes.keywords, id, `${path}.discover_topic_ids[${topicIndex}]`, "DIALOGUE_DISCOVERY_TOPIC_INVALID", "dialogue topic"));
     entity.discover_dynamic_topic_ids?.forEach((id, topicIndex) => reference(indexes.dynamicTopics, id, `${path}.discover_dynamic_topic_ids[${topicIndex}]`, "DIALOGUE_DISCOVERY_DYNAMIC_TOPIC_INVALID", "dynamic dialogue topic"));
   });
+  const artifactIdOwners = new Map<string, number>();
   pkg.items.forEach((item, index) => {
     const path = `$.items[${index}]`;
     reference(indexes.sprites, item.sprite_id, `${path}.sprite_id`, "REF_SPRITE_MISSING", "sprite");
     reference(indexes.blueprints, item.blueprint_id, `${path}.blueprint_id`, "REF_BLUEPRINT_MISSING", "blueprint");
     item.discover_topic_ids?.forEach((id, topicIndex) => reference(indexes.keywords, id, `${path}.discover_topic_ids[${topicIndex}]`, "DIALOGUE_DISCOVERY_TOPIC_INVALID", "dialogue topic"));
     item.discover_dynamic_topic_ids?.forEach((id, topicIndex) => reference(indexes.dynamicTopics, id, `${path}.discover_dynamic_topic_ids[${topicIndex}]`, "DIALOGUE_DISCOVERY_DYNAMIC_TOPIC_INVALID", "dynamic dialogue topic"));
+    if (item.artifact) {
+      const previousOwner = artifactIdOwners.get(item.artifact.artifact_id);
+      if (previousOwner !== undefined) {
+        add({
+          severity: "error",
+          code: "REF_ARTIFACT_ID_DUPLICATE",
+          path: `${path}.artifact.artifact_id`,
+          message: `Artifact identity ${item.artifact.artifact_id} is already used by items[${previousOwner}].`,
+          reference: item.artifact.artifact_id,
+        });
+      } else {
+        artifactIdOwners.set(item.artifact.artifact_id, index);
+      }
+      const origins = pkg.maps.flatMap((map, mapIndex) =>
+        map.item_placements.flatMap((placement, placementIndex) =>
+          placement.item_id === item.id
+            ? [{ map, mapIndex, placement, placementIndex }]
+            : [],
+        ),
+      );
+      if (origins.length !== 1) {
+        add({
+          severity: "error",
+          code: origins.length === 0 ? "REF_ARTIFACT_ORIGIN_MISSING" : "REF_ARTIFACT_ORIGIN_MULTIPLE",
+          path: `${path}.artifact`,
+          message:
+            origins.length === 0
+              ? `Registered artifact ${item.artifact.artifact_id} needs exactly one authored world-item origin.`
+              : `Registered artifact ${item.artifact.artifact_id} has ${origins.length} authored origins; exactly one is allowed.`,
+          reference: item.artifact.artifact_id,
+        });
+      } else if (origins[0].placement.count !== 1) {
+        add({
+          severity: "error",
+          code: "REF_ARTIFACT_ORIGIN_COUNT_INVALID",
+          path: `$.maps[${origins[0].mapIndex}].item_placements[${origins[0].placementIndex}].count`,
+          message: `Unique artifact ${item.artifact.artifact_id} must have an authored count of 1.`,
+          reference: item.artifact.artifact_id,
+          mapId: origins[0].map.id,
+          cell: [origins[0].placement.cell[0] ?? 0, origins[0].placement.cell[1] ?? 0],
+        });
+      }
+    }
+    if (item.glass_fuel) {
+      if (!item.light_source) {
+        add({
+          severity: "error",
+          code: "REF_GLASS_FUEL_LIGHT_MISSING",
+          path: `${path}.glass_fuel`,
+          message: `Glass-fuel profile on ${item.id} requires a mechanical light_source profile.`,
+          reference: item.id,
+        });
+      }
+      const resourceIndex = pkg.items.findIndex(
+        (candidate) => candidate.id === item.glass_fuel?.resource_item_id,
+      );
+      const resource = resourceIndex >= 0 ? pkg.items[resourceIndex] : undefined;
+      reference(
+        indexes.items,
+        item.glass_fuel.resource_item_id,
+        `${path}.glass_fuel.resource_item_id`,
+        "REF_GLASS_FUEL_ITEM_MISSING",
+        "Glass resource item",
+      );
+      if (resource && !resource.glass_resource) {
+        add({
+          severity: "error",
+          code: "REF_GLASS_FUEL_RESOURCE_INVALID",
+          path: `${path}.glass_fuel.resource_item_id`,
+          message: `Fuel item ${resource.id} is not authored as a glass_resource.`,
+          reference: resource.id,
+        });
+      } else if (
+        resource?.glass_resource &&
+        item.glass_fuel.units_per_ignition % resource.glass_resource.units_per_item !== 0
+      ) {
+        add({
+          severity: "error",
+          code: "REF_GLASS_FUEL_UNIT_FRACTION",
+          path: `${path}.glass_fuel.units_per_ignition`,
+          message: `Fuel cost must be a whole number of ${resource.id} inventory items (${resource.glass_resource.units_per_item} units each).`,
+          reference: resource.id,
+        });
+      }
+    }
   });
   pkg.documents.forEach((document, index) => {
     const path = `$.documents[${index}]`;
@@ -919,7 +1056,16 @@ export const auditGamePackageReferences = (
   }));
   pkg.cutscenes.forEach((cutscene, cutsceneIndex) => cutscene.actions.forEach((action, actionIndex) => auditAction(action, `$.cutscenes[${cutsceneIndex}].actions[${actionIndex}]`)));
   pkg.shops.forEach((shop, shopIndex) => shop.items.forEach((entry, itemIndex) => {
-    reference(indexes.items, entry.item_id, `$.shops[${shopIndex}].items[${itemIndex}].item_id`, "REF_ITEM_MISSING", "item");
+    const itemPath = `$.shops[${shopIndex}].items[${itemIndex}].item_id`;
+    reference(indexes.items, entry.item_id, itemPath, "REF_ITEM_MISSING", "item");
+    const item = pkg.items.find((candidate) => candidate.id === entry.item_id);
+    if (item?.artifact || item?.glass_resource) add({
+      severity: "error",
+      code: "REF_CAMPAIGN_ITEM_SHOP_BYPASS",
+      path: itemPath,
+      message: `Campaign-tracked item ${entry.item_id} cannot use ordinary shop stock.`,
+      reference: entry.item_id,
+    });
     auditCondition(entry.condition, `$.shops[${shopIndex}].items[${itemIndex}].condition`);
     entry.price_modifiers.forEach((modifier, modifierIndex) => auditCondition(modifier.condition, `$.shops[${shopIndex}].items[${itemIndex}].price_modifiers[${modifierIndex}].condition`));
   }));

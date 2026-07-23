@@ -12,6 +12,7 @@ import type {
   SimulationSurfaceLayerRecord,
 } from "../schema/save";
 import {
+  compactNpcTaskHistory,
   createSimulationSnapshotFromV1,
   resolveObjectManipulationAffordance,
   type SimulationCellState,
@@ -35,6 +36,7 @@ import {
 import { isFineExpandedPackage } from "./fineWorld";
 import { resolveMovementHearingSettings } from "./hearingStealth";
 import {
+  createImmersiveVisualAcquisitionResolver,
   createImmersiveIlluminationSnapshotFromV1,
   queryImmersiveIlluminationAtCell,
   queryImmersiveVisualAcquisition,
@@ -2566,6 +2568,10 @@ const scoreStimulusAtActor = (
   placementBarrierCells: Set<string>,
   soundBarrierReduction: number,
   sourceTraceAllowed = false,
+  resolveVisualAcquisition: (
+    query: Parameters<typeof queryImmersiveVisualAcquisition>[2],
+  ) => ImmersiveVisualAcquisitionResult = (query) =>
+    queryImmersiveVisualAcquisition(gamePackage, save, query),
 ): {
   score: number;
   raw_score: number;
@@ -2605,7 +2611,7 @@ const scoreStimulusAtActor = (
   let acquisition: ImmersiveVisualAcquisitionResult | undefined;
   let sourceTraced = false;
   if (channel.requires_los || channel.requires_illumination) {
-    acquisition = queryImmersiveVisualAcquisition(gamePackage, save, {
+    acquisition = resolveVisualAcquisition({
       map_id: mapId,
       observer_cell: actorCell,
       target_cell: stimulus.cell,
@@ -2883,8 +2889,27 @@ export const createImmersivePerceptionSnapshotFromV1 = (
   save: PlaySave,
   mapId = save.current_map_id || gamePackage.metadata.start_map_id,
 ): ImmersiveStage4PerceptionSnapshot => {
-  const stage2 = createImmersiveStage2SnapshotFromV1(gamePackage, save, mapId);
-  const illumination = createImmersiveIlluminationSnapshotFromV1(gamePackage, save, mapId);
+  // Build the physical map once for this perception tick. Previously Stage 2,
+  // illumination, and every visual channel query each reconstructed the full
+  // simulation independently. A populated fine-grid map could therefore do
+  // dozens of identical world builds for one player macro step.
+  const simulation = createSimulationSnapshotFromV1(gamePackage, save, mapId);
+  const stage2: ImmersiveStage2Snapshot = {
+    map_id: simulation.map_id,
+    generated_at_tick: simulation.generated_at_tick,
+    tile_layers: createImmersiveTileLayerSnapshot(
+      simulation,
+      save.immersive_tile_layers?.[simulation.map_id] || {},
+    ),
+    scheduler: createImmersiveSchedulerStateFromV1(gamePackage, save),
+  };
+  const visualAcquisition = createImmersiveVisualAcquisitionResolver(
+    gamePackage,
+    save,
+    mapId,
+    simulation,
+  );
+  const illumination = visualAcquisition.illumination;
   const stimuli = perceptionStimuliFromStage2Snapshot(gamePackage, stage2, save, illumination);
   const map = gamePackage.maps.find((candidate) => candidate.id === mapId);
   const entityById = new Map(gamePackage.entities.map((entity) => [entity.id, entity]));
@@ -2964,6 +2989,7 @@ export const createImmersivePerceptionSnapshotFromV1 = (
             placementBarrierCells,
             soundBarrierReduction,
             sourceTraceAllowed,
+            visualAcquisition.query,
           );
           const score = scoreWithFreshRepeatedSound(
             stimulus,
@@ -3447,7 +3473,10 @@ export const advanceImmersivePerceptionForSave = (
       ...(workingSave.map_deltas || {}),
       [mapId]: {
         ...delta,
-        npc_tasks: [...reconciledExistingTasks, ...npcTasks],
+        npc_tasks: compactNpcTaskHistory([
+          ...reconciledExistingTasks,
+          ...npcTasks,
+        ]),
       },
     },
     world_facts: [...(workingSave.world_facts || []), ...worldFacts, ...decayFacts].slice(-250),

@@ -22,6 +22,10 @@ import {
 } from "../src/dungeonGen/embedding/gridSearch";
 import {
   createInstitutionalRuinRecipe,
+  createInstitutionalRuinSingleMapRecipe,
+  FRACTURE_STARTER_LANTERN_ITEM_ID,
+  INSTITUTIONAL_RUIN_RECIPE_ID,
+  INSTITUTIONAL_RUIN_SINGLE_MAP_RECIPE_ID,
   INSTITUTIONAL_RUIN_ROOM_TEMPLATES,
   installInstitutionalRuinGeneratorContent,
 } from "../src/dungeonGen/presets/institutionalRuin";
@@ -48,6 +52,9 @@ import {
 } from "../src/dungeonGen/topology";
 import type { DungeonRecipeDef } from "../src/dungeonGen/types";
 import { DUNGEON_REGRESSION_SEEDS } from "./fixtures/dungeon-regression-corpus";
+import {
+  auditDungeonRecipeReferences,
+} from "../src/dungeonGen/validation";
 import {
   createInstitutionalDungeonFixture,
   createSingleFloorDungeonFixture,
@@ -109,6 +116,103 @@ console.log("dungeon: recipe validation returns structured failures");
   assert.ok(generated.diagnostics.length >= 2);
   assert.ok(generated.diagnostics.every((entry) => entry.code === "DNG_RECIPE_SCHEMA_INVALID"));
   assert.ok(generated.diagnostics.every((entry) => entry.stage === "recipe" && entry.severity === "fatal"));
+}
+
+console.log("dungeon: single-map preset is open-only while legacy defaults remain compatible");
+{
+  const legacy = createInstitutionalRuinRecipe("legacy-connection-defaults");
+  assert.equal(legacy.id, INSTITUTIONAL_RUIN_RECIPE_ID);
+  assert.equal(legacy.architecture.connectionMode, "mixed_doors");
+  assert.equal(legacy.architecture.layoutStyle, "organic");
+
+  const recipe = createInstitutionalRuinSingleMapRecipe("single-map-contract");
+  assert.equal(recipe.id, INSTITUTIONAL_RUIN_SINGLE_MAP_RECIPE_ID);
+  assert.equal(recipe.outputMode, "single_map");
+  assert.deepEqual(recipe.scale.floorCount, { min: 1, max: 1 });
+  assert.equal(recipe.scale.floorMapWidth, 72);
+  assert.equal(recipe.scale.floorMapDepth, 72);
+  assert.equal(recipe.architecture.connectionMode, "open_only");
+  assert.equal(recipe.architecture.layoutStyle, "directional_crawl");
+  assert.deepEqual(recipe.architecture.corridorWidth, { min: 3, max: 3 });
+  assert.deepEqual(recipe.topology.lockCount, { min: 0, max: 0 });
+  assert.deepEqual(recipe.topology.secretCount, { min: 0, max: 0 });
+  assert.equal(recipe.population.startingLightItemId, FRACTURE_STARTER_LANTERN_ITEM_ID);
+
+  const incompatible = structuredClone(recipe);
+  incompatible.topology.lockCount = { min: 1, max: 1 };
+  incompatible.topology.secretCount = { min: 1, max: 1 };
+  const parsed = DungeonRecipeSchema.safeParse(incompatible);
+  assert.equal(parsed.success, false);
+  if (!parsed.success) {
+    assert.ok(parsed.error.issues.some((issue) => issue.path.join(".") === "topology.lockCount"));
+    assert.ok(parsed.error.issues.some((issue) => issue.path.join(".") === "topology.secretCount"));
+  }
+
+  const graph = generateDungeonGraph({
+    recipe,
+    archetypes,
+    seedContext: contextFor(recipe),
+  });
+  assert.ok(graph.value, JSON.stringify(graph.diagnostics));
+  assert.ok(graph.value!.edges.every((edge) => edge.kind === "open"));
+  assert.equal(graph.value!.gates.length, 0);
+  assert.equal(graph.value!.metrics.secretCount, 0);
+  assert.equal(graph.value!.metrics.loopCount, 1);
+  const earlyCritical = graph.value!.nodes
+    .filter((node) => node.mandatory)
+    .sort((left, right) => left.depth - right.depth)
+    .slice(0, 3);
+  assert.equal(earlyCritical.length, 3);
+  assert.ok(earlyCritical.every((node) => node.tags.includes("quiet")));
+
+  const installedIds = new Set(fixturePackage.dungeon_recipes.map((entry) => entry.id));
+  assert.ok(installedIds.has(INSTITUTIONAL_RUIN_RECIPE_ID));
+  assert.ok(installedIds.has(INSTITUTIONAL_RUIN_SINGLE_MAP_RECIPE_ID));
+  const editedPackage = structuredClone(fixturePackage);
+  const editedV2 = editedPackage.dungeon_recipes.find(
+    (entry) => entry.id === INSTITUTIONAL_RUIN_SINGLE_MAP_RECIPE_ID,
+  )!;
+  editedV2.name = "Authored Single-Map Variant";
+  const reinstalled = installInstitutionalRuinGeneratorContent(editedPackage);
+  assert.equal(
+    reinstalled.dungeon_recipes.find((entry) => entry.id === INSTITUTIONAL_RUIN_SINGLE_MAP_RECIPE_ID)?.name,
+    "Authored Single-Map Variant",
+    "starter installation must not overwrite an edited v2 recipe",
+  );
+  assert.equal(
+    reinstalled.dungeon_recipes.filter((entry) => entry.id === INSTITUTIONAL_RUIN_SINGLE_MAP_RECIPE_ID).length,
+    1,
+  );
+  const lantern = fixturePackage.items.find((item) => item.id === FRACTURE_STARTER_LANTERN_ITEM_ID);
+  assert.equal(lantern?.light_source?.radius, 14);
+  assert.equal(lantern?.light_source?.mobility, "portable");
+  assert.equal(lantern?.light_source?.active_by_default, true);
+  assert.equal(lantern?.light_source?.extinguishable, true);
+
+  const withoutLantern = {
+    ...fixturePackage,
+    items: fixturePackage.items.filter((item) => item.id !== FRACTURE_STARTER_LANTERN_ITEM_ID),
+  };
+  assert.ok(
+    auditDungeonRecipeReferences(recipe, withoutLantern).diagnostics.some(
+      (entry) =>
+        entry.code === "DNG_CONTENT_REFERENCE_MISSING" &&
+        entry.relatedIds?.includes(FRACTURE_STARTER_LANTERN_ITEM_ID),
+    ),
+  );
+  const invalidLanternPackage = structuredClone(fixturePackage);
+  const invalidLantern = invalidLanternPackage.items.find(
+    (item) => item.id === FRACTURE_STARTER_LANTERN_ITEM_ID,
+  )!;
+  invalidLantern.light_source = {
+    ...invalidLantern.light_source!,
+    active_by_default: false,
+  };
+  assert.ok(
+    auditDungeonRecipeReferences(recipe, invalidLanternPackage).diagnostics.some(
+      (entry) => entry.code === "DNG_STARTING_LIGHT_ITEM_INVALID",
+    ),
+  );
 }
 
 console.log("dungeon: named RNG streams are deterministic and stage-isolated");
@@ -403,7 +507,7 @@ console.log("dungeon: package bake collision policies preserve maps and protect 
   );
 }
 
-console.log("dungeon: full default generation is deterministic and passes v1 acceptance");
+console.log("dungeon: legacy multi-floor generation remains deterministic and passes v1 acceptance");
 {
   const fixture = createInstitutionalDungeonFixture("institutional-ruin-full-acceptance-001");
   const first = runDungeonGeneration(fixture);
@@ -411,9 +515,9 @@ console.log("dungeon: full default generation is deterministic and passes v1 acc
   assert.equal(
     acceptance.accepted,
     true,
-    `default Institutional Ruin failed acceptance:\n${acceptance.issues.join("\n")}`,
+    `legacy Institutional Ruin failed acceptance:\n${acceptance.issues.join("\n")}`,
   );
-  assert.equal(first.maps.length, 2, "the default Institutional Ruin must bake two floor maps");
+  assert.equal(first.maps.length, 2, "the legacy Institutional Ruin must bake two floor maps");
   assert.ok(first.graph && first.graph.metrics.nodeCount >= 16 && first.graph.metrics.nodeCount <= 20);
   assert.ok(first.graph && first.graph.metrics.loopCount >= 1);
   assert.ok(first.graph && first.graph.metrics.secretCount >= 1);
@@ -429,7 +533,7 @@ console.log("dungeon: full default generation is deterministic and passes v1 acc
     const definition = fixture.gamePackage.dungeon_room_archetypes.find((entry) => entry.id === node.archetypeId);
     const tags = new Set([...node.tags, ...(definition?.tags ?? [])]);
     return tags.has("rest") || tags.has("staging") || tags.has("quiet");
-  }), "the default recipe must stage a safe/quiet room immediately before the objective");
+  }), "the legacy recipe must stage a safe/quiet room immediately before the objective");
   assert.ok(first.maps.some((map) => map.custom_object_placements.some((placement) =>
     placement.locked && Boolean(placement.key_item_id))), "the baked dungeon must contain an ordinary keyed door");
   assert.ok(first.maps.some((map) => map.item_placements.some((placement) =>
