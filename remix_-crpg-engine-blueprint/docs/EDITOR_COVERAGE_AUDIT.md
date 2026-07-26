@@ -40,3 +40,8 @@ Audited against `GamePackageSchema` + runtime consumers (PlayMode, engine-core).
 
 Inert setting left alone: `attend_ui_mode` (no consumer; revisit when the
 attend HUD lands).
+
+Added later (kept authorable from day one): `settings.view_mode`
+(isometric | first_person) — Game panel · Basics tab · Presentation section.
+First person is exploration-only (combat/targeting/story auto-switch to the
+tactical camera); consumed by PlayMode/PlayScene3D/GameRenderer3D.

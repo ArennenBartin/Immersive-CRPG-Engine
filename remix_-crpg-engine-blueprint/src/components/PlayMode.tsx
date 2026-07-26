@@ -174,10 +174,12 @@ import { GameRenderer3D } from "./GameRenderer3D";
 import {
   AdaptiveQualityProbe,
   BlackStarLightRig,
+  FirstPersonCameraRig,
   getInitialPlayCameraPosition,
   ISO_CAMERA_BASE_AZIMUTH,
   IsometricCameraRig,
   PLAY_CAMERA_PROFILES,
+  PlayAtmosphereRig,
   type PlayCameraMode,
 } from "./PlayScene3D";
 import { ScreenFX } from "./ScreenFX";
@@ -192,6 +194,17 @@ import {
   resolveHeldMovementIntent,
   shouldDriveDemandFrames,
 } from "../utils/playInput";
+import {
+  FIRST_PERSON_ATMOSPHERE,
+  FIRST_PERSON_FOV,
+  ISOMETRIC_ATMOSPHERE,
+  firstPersonStepVector,
+  isFirstPersonExploreActive,
+  normalizeFirstPersonFacing,
+  resolveAuthoredViewMode,
+  resolveHeldFirstPersonIntent,
+  rotateFacing45,
+} from "../utils/firstPersonControls";
 import { hasAuthoritativePresentLight } from "../utils/lightRendering";
 import {
   ABILITY_BAR_PAGE_SIZE,
@@ -426,6 +439,9 @@ const MOVEMENT_CHORD_BUFFER_MS = 24;
 // advanced the simulation faster than the rendered actor could catch up and
 // could dispatch thirty full exploration updates per second.
 const MOVEMENT_REPEAT_INTERVAL_MS = 240 / FINE_PER_MACRO;
+// Held 45° turns repeat slower than fine steps: a full about-face should be a
+// deliberate beat, not a spin. Tapping still turns instantly.
+const FIRST_PERSON_TURN_REPEAT_MS = 190;
 const PLAYER_FOOTSTEP_FINE_STEP_INTERVAL = FINE_PER_MACRO;
 // Keep the audio cooldown below the normalized held cadence so footsteps do
 // not silently collapse multiple macro distances into one sound.
@@ -655,6 +671,11 @@ const MOVEMENT_COMMAND_KEYS = new Set([
   "d",
   "z",
   ".",
+  // Q/E strafe in first-person exploration. In the isometric view they never
+  // enter keysDownRef (they rotate the camera on keydown instead), so listing
+  // them here only affects gating bookkeeping there.
+  "q",
+  "e",
 ]);
 
 const isMovementCommandKey = (key: string) => MOVEMENT_COMMAND_KEYS.has(key);
@@ -2191,6 +2212,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   useEffect(() => {
     cameraAzimuthRef.current = cameraAzimuth;
   }, [cameraAzimuth]);
+  // True only while the authored first_person view is in its exploration
+  // stance (combat/targeting/story glide back to tactical isometric). Synced
+  // where cameraMode is derived so the RAF input loop and key handlers read
+  // the same answer the camera is using.
+  const firstPersonActiveRef = useRef(false);
   const [activeDocumentId, setActiveDocumentId] = useState<string | null>(null);
   const [dialogueArchiveOpen, setDialogueArchiveOpen] = useState(false);
   const [dialogueArchiveFilter, setDialogueArchiveFilter] = useState<
@@ -2663,7 +2689,20 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   // bark id -> in-game minute it last played; throttles repeat gossip.
   const barkCooldownRef = useRef<Map<string, number>>(new Map());
   const lastBarkRealRef = useRef(0);
-  const handleMoveRef = useRef<((dx: number, dz: number) => void) | null>(null);
+  const handleMoveRef = useRef<
+    | ((
+        dx: number,
+        dz: number,
+        moveOptions?: { facingOverride?: [number, number] },
+      ) => void)
+    | null
+  >(null);
+  // One first-person input tick: apply any held 45° turn, then step relative
+  // to the (possibly just-updated) facing without rotating into the step.
+  const handleFirstPersonTickRef = useRef<
+    | ((intent: { forward: number; turn: number; strafe: number }) => void)
+    | null
+  >(null);
   const handleActRef = useRef<(() => void) | null>(null);
   const waitRef = useRef<(() => void) | null>(null);
   const toggleStealthRef = useRef<(() => void) | null>(null);
@@ -3720,6 +3759,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     bufferStart: 0,
     active: false,
     wait: false,
+    // First-person holds are compared as one signature (forward:turn:strafe:
+    // wait) because the resolved step vector changes as the facing turns.
+    fpSignature: "",
   });
   const resetRepeatInputState = useCallback(() => {
     repeatStateRef.current.active = false;
@@ -5172,6 +5214,103 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       }
 
       const keys = keysDownRef.current;
+
+      // First-person exploration replaces the camera-relative grid mapping
+      // with crawler semantics: forward/back along the facing, A/D as held
+      // 45° turns, Q/E strafes. Same chord buffer, cadence normalization,
+      // stealth throttle, and enemy-nearby repeat gate as the isometric path.
+      if (firstPersonActiveRef.current) {
+        const intent = resolveHeldFirstPersonIntent(
+          keys,
+          consumedMovementTapKeysRef.current,
+        );
+        const isHolding =
+          intent.forward !== 0 ||
+          intent.turn !== 0 ||
+          intent.strafe !== 0 ||
+          intent.wait;
+        if (!isHolding) {
+          resetRepeatInputState();
+          return;
+        }
+
+        const facing = normalizeFirstPersonFacing(currentSave?.player.facing);
+        const [sx, sz] = firstPersonStepVector(
+          facing,
+          intent.forward,
+          intent.strafe,
+        );
+        const stepping = !intent.wait && (sx !== 0 || sz !== 0);
+        const stealthSpeedMultiplier = isPlayerStealthActive(currentSave)
+          ? resolveMovementHearingSettings(getRuntimeGamePackage())
+              .stealth_speed_multiplier
+          : 1;
+        const stepIntervalMs = getNormalizedMovementRepeatIntervalMs(
+          MOVEMENT_REPEAT_INTERVAL_MS / stealthSpeedMultiplier,
+          sx,
+          sz,
+        );
+        const repeatIntervalMs =
+          intent.turn !== 0
+            ? Math.max(stepping ? stepIntervalMs : 0, FIRST_PERSON_TURN_REPEAT_MS)
+            : stepIntervalMs;
+        const signature = `${intent.forward}:${intent.turn}:${intent.strafe}:${
+          intent.wait ? 1 : 0
+        }`;
+        const state = repeatStateRef.current;
+
+        if (!state.active) {
+          if (!state.bufferStart) {
+            state.bufferStart = time;
+            return;
+          } else if (time - state.bufferStart < MOVEMENT_CHORD_BUFFER_MS) {
+            return;
+          }
+        }
+
+        const fireTick = () => {
+          if (intent.wait) {
+            if (waitRef.current) waitRef.current();
+          } else {
+            handleFirstPersonTickRef.current?.(intent);
+          }
+        };
+
+        if (!state.active) {
+          state.active = true;
+          state.fpSignature = signature;
+          state.wait = intent.wait;
+          state.nextTick =
+            time + MOVEMENT_REPEAT_START_MS / stealthSpeedMultiplier;
+          fireTick();
+        } else if (state.fpSignature !== signature) {
+          // A newly added turn responds instantly (turn only — no step, so a
+          // chord change can never lunge an extra fine step), everything else
+          // resumes at the held cadence like the isometric chord rule.
+          const turnJustAdded =
+            intent.turn !== 0 && state.fpSignature.split(":")[1] === "0";
+          state.fpSignature = signature;
+          state.wait = intent.wait;
+          state.nextTick = time + repeatIntervalMs;
+          if (turnJustAdded && !intent.wait) {
+            handleFirstPersonTickRef.current?.({
+              forward: 0,
+              turn: intent.turn,
+              strafe: 0,
+            });
+          }
+        } else {
+          const enemyNearby = isEnemyNearbyRef.current
+            ? isEnemyNearbyRef.current()
+            : false;
+          if (!enemyNearby && time >= state.nextTick) {
+            state.nextTick = time + repeatIntervalMs;
+            fireTick();
+          }
+        }
+        return;
+      }
+
       const { ax, az, wait } = resolveHeldMovementIntent(
         keys,
         consumedMovementTapKeysRef.current,
@@ -5311,6 +5450,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
 
       if (key === "q" || key === "e") {
         if (e.target === document.body) e.preventDefault();
+        // First-person exploration holds Q/E as strafe keys; the isometric
+        // view keeps them out of keysDownRef and quarter-turns on press.
+        if (firstPersonActiveRef.current) keysDownRef.current.add(key);
       } else {
         keysDownRef.current.add(key);
       }
@@ -5341,10 +5483,12 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             toggleStealthRef.current?.();
             break;
           case "q":
+            if (firstPersonActiveRef.current) break;
             setCameraQuarterTurns((turns) => turns + 1);
             resetRepeatInputState();
             break;
           case "e":
+            if (firstPersonActiveRef.current) break;
             setCameraQuarterTurns((turns) => turns - 1);
             resetRepeatInputState();
             break;
@@ -5368,29 +5512,51 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       // commit it here even when the buffer never got a chance to start.
       if (pendingTap) {
         const heldKeys = keysDownRef.current;
-        const { ax, az, wait } = resolveHeldMovementIntent(
-          heldKeys,
-          consumedMovementTapKeysRef.current,
-        );
-
-        keysDownRef.current.forEach((heldKey) => {
-          if (isMovementCommandKey(heldKey)) {
-            consumedMovementTapKeysRef.current.add(heldKey);
-          }
-        });
-        if (wait) {
-          waitRef.current?.();
-        } else {
-          const [rx, rz] = getCameraRelativeGridMove(
-            ax,
-            az,
-            cameraAzimuthRef.current,
+        if (firstPersonActiveRef.current) {
+          const intent = resolveHeldFirstPersonIntent(
+            heldKeys,
+            consumedMovementTapKeysRef.current,
           );
-          if (handleMoveRef.current && (rx !== 0 || rz !== 0)) {
-            handleMoveRef.current(rx, rz);
+          keysDownRef.current.forEach((heldKey) => {
+            if (isMovementCommandKey(heldKey)) {
+              consumedMovementTapKeysRef.current.add(heldKey);
+            }
+          });
+          if (intent.wait) {
+            waitRef.current?.();
+          } else if (
+            intent.forward !== 0 ||
+            intent.turn !== 0 ||
+            intent.strafe !== 0
+          ) {
+            handleFirstPersonTickRef.current?.(intent);
           }
+          resetRepeatInputState();
+        } else {
+          const { ax, az, wait } = resolveHeldMovementIntent(
+            heldKeys,
+            consumedMovementTapKeysRef.current,
+          );
+
+          keysDownRef.current.forEach((heldKey) => {
+            if (isMovementCommandKey(heldKey)) {
+              consumedMovementTapKeysRef.current.add(heldKey);
+            }
+          });
+          if (wait) {
+            waitRef.current?.();
+          } else {
+            const [rx, rz] = getCameraRelativeGridMove(
+              ax,
+              az,
+              cameraAzimuthRef.current,
+            );
+            if (handleMoveRef.current && (rx !== 0 || rz !== 0)) {
+              handleMoveRef.current(rx, rz);
+            }
+          }
+          resetRepeatInputState();
         }
-        resetRepeatInputState();
       }
 
       keysDownRef.current.delete(key);
@@ -6752,7 +6918,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   }, [activeMap, addLog, advanceCombatTurnCore, commitRuntimeSave, playSfx, presentStealthActionBlock]);
 
   const handleMove = useCallback(
-    (dx: number, dz: number) => {
+    (
+      dx: number,
+      dz: number,
+      moveOptions?: { facingOverride?: [number, number] },
+    ) => {
       const currentSave = usePlayStore.getState().saveData;
       if (!activeMap || !currentSave) return;
       if (currentSave.playerStats.hp <= 0) return;
@@ -6789,7 +6959,12 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       let turnConsumed = false;
       let turnEnergyConsumed = false;
       let steppedThisTurn = false;
-      const newFacing = [dx, dz] as [number, number];
+      // First-person strafes/backsteps keep the facing they were issued with;
+      // an ordinary step (and any bump it becomes) faces its direction.
+      const newFacing = (moveOptions?.facingOverride ?? [dx, dz]) as [
+        number,
+        number,
+      ];
       let nx = actorCell[0] + dx;
       let nz = actorCell[1] + dz;
 
@@ -6800,6 +6975,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         actorId: actor.key,
         dx,
         dy: dz,
+        facingOverride: moveOptions?.facingOverride,
         // Exploration walking costs energy per macro tile of distance — a
         // fine step is a third of the legacy step price (§4.4).
         energyCost: actor.isPlayer && !inCombat ? ENERGY_PER_FINE_STEP : 0,
@@ -7289,9 +7465,44 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     ],
   );
 
+  // Crawler-mode tick: A/D turns are free facing updates (identical to the
+  // bump-turn the engine already allows), W/S/Q/E resolve one fine step
+  // against the current facing with that facing preserved through the move.
+  const handleFirstPersonTick = useCallback(
+    (intent: { forward: number; turn: number; strafe: number }) => {
+      const currentSave = usePlayStore.getState().saveData;
+      if (!currentSave || currentSave.playerStats.hp <= 0) return;
+      let facing = normalizeFirstPersonFacing(currentSave.player.facing);
+      if (intent.turn !== 0) {
+        facing = rotateFacing45(facing, intent.turn);
+        usePlayStore
+          .getState()
+          .updatePlayer(
+            [currentSave.player.cell[0], currentSave.player.cell[1]],
+            facing,
+          );
+      }
+      if (intent.forward !== 0 || intent.strafe !== 0) {
+        const [dx, dz] = firstPersonStepVector(
+          facing,
+          intent.forward,
+          intent.strafe,
+        );
+        if (dx !== 0 || dz !== 0) {
+          handleMove(dx, dz, { facingOverride: facing });
+        }
+      }
+    },
+    [handleMove],
+  );
+
   useEffect(() => {
     handleMoveRef.current = handleMove;
   }, [handleMove]);
+
+  useEffect(() => {
+    handleFirstPersonTickRef.current = handleFirstPersonTick;
+  }, [handleFirstPersonTick]);
 
   const handlePlayfieldCellClick = useCallback(
     (x: number, z: number) => {
@@ -10268,6 +10479,17 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       : storyCameraActive
         ? "story"
         : "explore";
+  // The view mode is authored per game in the editor (Game panel →
+  // Presentation). First person only holds during plain exploration; combat,
+  // targeting, party command, and story beats glide back to tactical
+  // isometric where their UI is readable.
+  const authoredViewMode = resolveAuthoredViewMode(gamePackage.settings);
+  const firstPersonAuthored = authoredViewMode === "first_person";
+  const firstPersonActive = isFirstPersonExploreActive(
+    authoredViewMode,
+    cameraMode,
+  );
+  firstPersonActiveRef.current = firstPersonActive;
   const visualPlayerPos = logicalCellToWorld(
     renderedPlayerPos,
     "fine",
@@ -10340,7 +10562,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           }
           camera={{
             position: initialCameraPosition,
-            fov: PLAY_CAMERA_PROFILES[cameraMode].fov,
+            fov: firstPersonActive
+              ? FIRST_PERSON_FOV
+              : PLAY_CAMERA_PROFILES[cameraMode].fov,
           }}
           dpr={effectivePlayDpr}
           gl={{
@@ -10358,16 +10582,51 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             })}
             intervalMs={playFrameIntervalMs}
           />
-          <IsometricCameraRig
-            playerPos={visualPlayerPos}
-            playerFacing={renderedPlayerFacing}
-            azimuth={cameraAzimuth}
-            mode={cameraMode}
-            focusOverride={visualCameraFocus}
-            glide={Boolean(activeCutscene || cameraFocusOverride || commandingParty)}
+          {firstPersonAuthored ? (
+            <FirstPersonCameraRig
+              playerPos={visualPlayerPos}
+              playerFacing={renderedPlayerFacing}
+              azimuth={cameraAzimuth}
+              mode={cameraMode}
+              focusOverride={visualCameraFocus}
+            />
+          ) : (
+            <IsometricCameraRig
+              playerPos={visualPlayerPos}
+              playerFacing={renderedPlayerFacing}
+              azimuth={cameraAzimuth}
+              mode={cameraMode}
+              focusOverride={visualCameraFocus}
+              glide={Boolean(activeCutscene || cameraFocusOverride || commandingParty)}
+            />
+          )}
+          <color
+            attach="background"
+            args={[
+              firstPersonAuthored
+                ? FIRST_PERSON_ATMOSPHERE.background
+                : ISOMETRIC_ATMOSPHERE.background,
+            ]}
           />
-          <color attach="background" args={["#111735"]} />
-          <fog attach="fog" args={["#161D36", 78, 190]} />
+          <fog
+            attach="fog"
+            args={
+              firstPersonAuthored
+                ? [
+                    FIRST_PERSON_ATMOSPHERE.fogColor,
+                    FIRST_PERSON_ATMOSPHERE.fogNear,
+                    FIRST_PERSON_ATMOSPHERE.fogFar,
+                  ]
+                : [
+                    ISOMETRIC_ATMOSPHERE.fogColor,
+                    ISOMETRIC_ATMOSPHERE.fogNear,
+                    ISOMETRIC_ATMOSPHERE.fogFar,
+                  ]
+            }
+          />
+          {firstPersonAuthored && (
+            <PlayAtmosphereRig firstPerson={firstPersonActive} />
+          )}
           <BlackStarLightRig
             playerPos={visualPlayerPos}
             ambientLight={activeMap.ambient_light ?? 0.08}
@@ -10420,7 +10679,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             showBehaviorIntents={showBehaviorIntents}
             worldDeniedCells={worldDeniedCells}
             showGrid={false}
-            enableOcclusion={visualPreset !== "performance" && !bottomPanelOpen}
+            enableOcclusion={
+              visualPreset !== "performance" &&
+              !bottomPanelOpen &&
+              !firstPersonActive
+            }
             occlusionAzimuth={cameraAzimuth}
             renderCenter={cameraFocusOverride || renderedFocusPos}
             renderRadius={playRenderRadius}
@@ -10436,6 +10699,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             }
             initialExplored={rendererExploredCells}
             onExplore={queueExploredCells}
+            firstPersonView={firstPersonActive}
           />
           <ScreenFX inCombat={inCombat} mapId={activeMap.id} />
         </Canvas>

@@ -150,6 +150,11 @@ export interface V1MoveDispatchOptions extends V1GridWorldOptions, V1ActionCostO
   dx: number;
   dy: number;
   allowDoorwayAssist?: boolean;
+  // Keep this facing after the move instead of turning into the step
+  // direction. First-person strafes and backsteps are moves that must not
+  // rotate the actor; sound, energy, and collision behave exactly like an
+  // ordinary step.
+  facingOverride?: [number, number];
 }
 
 export interface V1WaitDispatchOptions extends V1GridWorldOptions, V1ActionCostOptions {
@@ -5527,6 +5532,25 @@ export const dispatchV1MoveEntity = (options: V1MoveDispatchOptions) => {
         facing: [options.dx, options.dy],
       },
     };
+  }
+  if (result.ok && options.facingOverride) {
+    const facing = cloneCell(options.facingOverride);
+    dispatchResult.save =
+      actorId === PLAYER_ENTITY_ID
+        ? {
+            ...dispatchResult.save,
+            player: { ...dispatchResult.save.player, facing },
+          }
+        : {
+            ...dispatchResult.save,
+            entity_states: {
+              ...(dispatchResult.save.entity_states || {}),
+              [actorId]: {
+                ...((dispatchResult.save.entity_states || {})[actorId] || {}),
+                facing,
+              },
+            },
+          };
   }
   return { ...dispatchResult, doorwayAssisted, resolvedDelta };
 };
