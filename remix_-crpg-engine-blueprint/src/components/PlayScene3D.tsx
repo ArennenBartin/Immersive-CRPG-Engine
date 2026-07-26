@@ -2,6 +2,13 @@ import React, { useEffect, useRef } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
 import { playerStateRef } from "./GameRenderer3D";
+import {
+  FIRST_PERSON_ATMOSPHERE,
+  FIRST_PERSON_EYE_HEIGHT,
+  FIRST_PERSON_FOV,
+  ISOMETRIC_ATMOSPHERE,
+  type PlayAtmosphereProfile,
+} from "../utils/firstPersonControls";
 
 export const ISO_CAMERA_BASE_AZIMUTH = Math.PI / 4;
 
@@ -225,6 +232,217 @@ export function IsometricCameraRig({
         camera.fov = nextFov;
         camera.updateProjectionMatrix();
       }
+    }
+  });
+
+  return null;
+}
+
+// ── First person ────────────────────────────────────────────────────────────
+// One rig owns the camera for a first_person-authored game across every play
+// camera mode. Exploration puts the eye at the interpolated player position
+// with a damped 45°-stepped yaw from the 8-direction facing; tactical/story
+// modes blend the same camera back out to the isometric profiles so combat,
+// targeting, and story panels keep the top-down view their UI expects. The
+// blend is one damped scalar over both eye and look target, which turns the
+// mode switch into a single continuous glide instead of a rig swap.
+
+const FIRST_PERSON_YAW_DAMPING = 11;
+const FIRST_PERSON_BLEND_DAMPING = 3.4;
+const FIRST_PERSON_LOOK_DISTANCE = 6;
+
+const fpEyeVec = new THREE.Vector3();
+const fpLookVec = new THREE.Vector3();
+const isoEyeVec = new THREE.Vector3();
+const isoLookVec = new THREE.Vector3();
+
+const facingYaw = (facing: readonly [number, number]): number =>
+  Math.atan2(facing[0], facing[1]);
+
+export function FirstPersonCameraRig({
+  playerPos,
+  playerFacing,
+  azimuth,
+  mode,
+  focusOverride,
+}: {
+  playerPos: [number, number];
+  playerFacing: [number, number];
+  azimuth: number;
+  mode: PlayCameraMode;
+  focusOverride?: [number, number] | null;
+}) {
+  const { camera } = useThree();
+  const yawRef = useRef(facingYaw(playerFacing));
+  const blendRef = useRef(mode === "explore" ? 0 : 1);
+  const isoFocusRef = useRef(
+    new THREE.Vector3(
+      playerPos[0],
+      PLAY_CAMERA_PROFILES[mode].focusYOffset,
+      playerPos[1],
+    ),
+  );
+  const isoAzimuthRef = useRef(azimuth);
+  const isoProfileRef = useRef<PlayCameraProfile>({
+    ...PLAY_CAMERA_PROFILES[mode],
+  });
+  const appliedEyeRef = useRef(new THREE.Vector3(Number.NaN, Number.NaN, Number.NaN));
+  const appliedLookRef = useRef(new THREE.Vector3(Number.NaN, Number.NaN, Number.NaN));
+
+  const composePose = (delta: number) => {
+    // First-person pose: the eye rides the same interpolated position the
+    // player marker slides on, so steps read as walking, not teleporting.
+    const eyeX = playerStateRef.ready ? playerStateRef.px : playerPos[0];
+    const eyeY = (playerStateRef.ready ? playerStateRef.py : 0) + FIRST_PERSON_EYE_HEIGHT;
+    const eyeZ = playerStateRef.ready ? playerStateRef.pz : playerPos[1];
+    const targetYaw = facingYaw(playerFacing);
+    const yawAmount = 1 - Math.exp(-FIRST_PERSON_YAW_DAMPING * delta);
+    const nextYaw = yawRef.current + wrapRadians(targetYaw - yawRef.current) * yawAmount;
+    yawRef.current =
+      Math.abs(wrapRadians(targetYaw - nextYaw)) < 0.0004 ? targetYaw : nextYaw;
+    fpEyeVec.set(eyeX, eyeY, eyeZ);
+    fpLookVec.set(
+      eyeX + Math.sin(yawRef.current) * FIRST_PERSON_LOOK_DISTANCE,
+      eyeY,
+      eyeZ + Math.cos(yawRef.current) * FIRST_PERSON_LOOK_DISTANCE,
+    );
+
+    // Isometric pose: the same follow/focus math the isometric rig uses,
+    // kept live even while fully first-person so a combat entry starts its
+    // glide from a sane tactical target.
+    const profile = isoProfileRef.current;
+    dampProfile(profile, PLAY_CAMERA_PROFILES[mode], delta);
+    const focus = isoFocusRef.current;
+    const baseFocus = focusOverride
+      ? targetVec.set(focusOverride[0], 0, focusOverride[1])
+      : playerStateRef.ready
+        ? targetVec.set(playerStateRef.px, playerStateRef.py, playerStateRef.pz)
+        : targetVec.set(playerPos[0], 0, playerPos[1]);
+    const isoTargetFocus = lookAtVec.set(
+      baseFocus.x,
+      baseFocus.y + profile.focusYOffset,
+      baseFocus.z,
+    );
+    if (focus.distanceTo(isoTargetFocus) > CAMERA_FOLLOW_SNAP_DISTANCE) {
+      focus.copy(isoTargetFocus);
+    } else {
+      focus.x = THREE.MathUtils.damp(focus.x, isoTargetFocus.x, profile.followDamping, delta);
+      focus.y = THREE.MathUtils.damp(focus.y, isoTargetFocus.y, profile.followDamping, delta);
+      focus.z = THREE.MathUtils.damp(focus.z, isoTargetFocus.z, profile.followDamping, delta);
+    }
+    const angleAmount = 1 - Math.exp(-CAMERA_ROTATION_DAMPING * delta);
+    isoAzimuthRef.current += wrapRadians(azimuth - isoAzimuthRef.current) * angleAmount;
+    isoEyeVec.set(
+      focus.x + Math.cos(isoAzimuthRef.current) * profile.horizontalDistance,
+      focus.y + profile.height,
+      focus.z + Math.sin(isoAzimuthRef.current) * profile.horizontalDistance,
+    );
+    isoLookVec.copy(focus);
+
+    const blendTarget = mode === "explore" ? 0 : 1;
+    blendRef.current = THREE.MathUtils.damp(
+      blendRef.current,
+      blendTarget,
+      FIRST_PERSON_BLEND_DAMPING,
+      delta,
+    );
+    if (Math.abs(blendRef.current - blendTarget) < 0.001) {
+      blendRef.current = blendTarget;
+    }
+    const blend = blendRef.current;
+    return {
+      eye: fpEyeVec.clone().lerp(isoEyeVec, blend),
+      look: fpLookVec.clone().lerp(isoLookVec, blend),
+      fov: THREE.MathUtils.lerp(FIRST_PERSON_FOV, profile.fov, blend),
+    };
+  };
+
+  useEffect(() => {
+    // Snap once on mount; afterwards every change glides through the frame
+    // loop below.
+    const pose = composePose(1000);
+    camera.position.copy(pose.eye);
+    camera.lookAt(pose.look);
+    appliedEyeRef.current.copy(pose.eye);
+    appliedLookRef.current.copy(pose.look);
+    if (camera instanceof THREE.PerspectiveCamera) {
+      camera.fov = pose.fov;
+      camera.updateProjectionMatrix();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [camera]);
+
+  useFrame((_, frameDelta) => {
+    const delta = Math.min(frameDelta, 0.05);
+    const pose = composePose(delta);
+    const eyeMoved =
+      appliedEyeRef.current.distanceToSquared(pose.eye) >
+      CAMERA_TRANSFORM_UPDATE_EPSILON_SQ;
+    const lookMoved =
+      appliedLookRef.current.distanceToSquared(pose.look) >
+      CAMERA_TRANSFORM_UPDATE_EPSILON_SQ;
+    if (eyeMoved) camera.position.copy(pose.eye);
+    if (eyeMoved || lookMoved) {
+      camera.lookAt(pose.look);
+      appliedEyeRef.current.copy(pose.eye);
+      appliedLookRef.current.copy(pose.look);
+    }
+    if (camera instanceof THREE.PerspectiveCamera) {
+      if (Math.abs(pose.fov - camera.fov) >= CAMERA_FOV_UPDATE_EPSILON) {
+        camera.fov = pose.fov;
+        camera.updateProjectionMatrix();
+      }
+    }
+  });
+
+  return null;
+}
+
+const ATMOSPHERE_DAMPING = 3.2;
+const atmosphereColorScratch = new THREE.Color();
+
+// Damps the shared scene fog and background between the isometric and
+// first-person presets. The isometric fog band sits far outside the playfield
+// (the top-down camera is ~36 units away); at eye height the first-person band
+// hugs the 8-unit authoritative sight radius so unseen space dissolves into
+// atmosphere instead of ending at a black wall. Runs on the scene's existing
+// <fog>/<color> instances, so the declarative Canvas setup stays untouched.
+export function PlayAtmosphereRig({ firstPerson }: { firstPerson: boolean }) {
+  const { scene } = useThree();
+  const settledRef = useRef(false);
+
+  useFrame((_, frameDelta) => {
+    const delta = Math.min(frameDelta, 0.05);
+    const target: PlayAtmosphereProfile = firstPerson
+      ? FIRST_PERSON_ATMOSPHERE
+      : ISOMETRIC_ATMOSPHERE;
+    const fog = scene.fog;
+    if (!(fog instanceof THREE.Fog)) return;
+
+    const nearGap = Math.abs(fog.near - target.fogNear);
+    const farGap = Math.abs(fog.far - target.fogFar);
+    if (settledRef.current && nearGap < 0.01 && farGap < 0.01) return;
+
+    fog.near = THREE.MathUtils.damp(fog.near, target.fogNear, ATMOSPHERE_DAMPING, delta);
+    fog.far = THREE.MathUtils.damp(fog.far, target.fogFar, ATMOSPHERE_DAMPING, delta);
+    const colorAmount = 1 - Math.exp(-ATMOSPHERE_DAMPING * delta);
+    fog.color.lerp(atmosphereColorScratch.set(target.fogColor), colorAmount);
+    if (scene.background instanceof THREE.Color) {
+      scene.background.lerp(
+        atmosphereColorScratch.set(target.background),
+        colorAmount,
+      );
+    }
+    if (nearGap < 0.02 && farGap < 0.02) {
+      fog.near = target.fogNear;
+      fog.far = target.fogFar;
+      fog.color.set(target.fogColor);
+      if (scene.background instanceof THREE.Color) {
+        scene.background.set(target.background);
+      }
+      settledRef.current = true;
+    } else {
+      settledRef.current = false;
     }
   });
 

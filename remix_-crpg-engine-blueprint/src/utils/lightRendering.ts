@@ -175,6 +175,10 @@ export const resolveMemoryFogColor = (distance: number): string => {
       );
 };
 
+export type FogPresentationVariant = "isometric" | "first_person";
+
+export const FIRST_PERSON_UNSEEN_STRUCTURE_COLOR = "#0d1226";
+
 export interface StaticFogMaterialPolicy {
   brightness: number;
   preserveEmission: boolean;
@@ -183,6 +187,8 @@ export interface StaticFogMaterialPolicy {
   preserveTextureMaps: boolean;
   tint?: string;
   tintStrength: number;
+  /** Whether the flat memory/unseen material participates in scene fog. */
+  sceneFog: boolean;
 }
 
 // Fog never deletes static geometry. Instead, one shared visual state controls
@@ -190,8 +196,15 @@ export interface StaticFogMaterialPolicy {
 // becomes a near-black memory silhouette, and unseen geometry becomes black.
 // Emission is suppressed outside current visibility so hidden lamps and
 // emissive assets cannot glow through the shroud.
+//
+// First person is the exception to "unseen is black": at eye height a pure
+// black silhouette right in front of the camera reads as a hole in the world,
+// so the first_person variant lifts unseen to a deep haze and lets the flat
+// materials pick up scene fog, dissolving unknown space into atmosphere while
+// the authoritative visibility data stays untouched.
 export const resolveStaticFogMaterialPolicy = (
   state: FogRenderState,
+  variant: FogPresentationVariant = "isometric",
 ): StaticFogMaterialPolicy => {
   if (state === "visible") {
     return {
@@ -201,16 +214,24 @@ export const resolveStaticFogMaterialPolicy = (
       forceOpaque: false,
       preserveTextureMaps: true,
       tintStrength: 0,
+      sceneFog: true,
     };
   }
+  const firstPerson = variant === "first_person";
   return {
     brightness: STATIC_FOG_BRIGHTNESS[state],
     preserveEmission: false,
     flatUnlit: true,
     forceOpaque: true,
     preserveTextureMaps: false,
-    tint: state === "explored" ? MEMORY_FOG_COLOR : UNKNOWN_FOG_COLOR,
+    tint:
+      state === "explored"
+        ? MEMORY_FOG_COLOR
+        : firstPerson
+          ? FIRST_PERSON_UNSEEN_STRUCTURE_COLOR
+          : UNKNOWN_FOG_COLOR,
     tintStrength: state === "explored" ? 0.92 : 1,
+    sceneFog: firstPerson,
   };
 };
 

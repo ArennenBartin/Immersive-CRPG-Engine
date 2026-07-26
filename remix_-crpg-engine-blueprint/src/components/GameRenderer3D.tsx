@@ -611,6 +611,15 @@ interface ReferenceGameRendererProps {
   suppressPlacementLights?: boolean;
 }
 
+// True while the play camera is at the player's eye. Presentation-only: fog
+// silhouettes lift from black to haze and join scene fog, boundary curtains
+// disappear, and the player's own marker is not drawn. The authoritative
+// visibility data feeding all of it is identical in both views.
+const FirstPersonViewContext = React.createContext(false);
+
+const fogVariantFor = (firstPerson: boolean): "isometric" | "first_person" =>
+  firstPerson ? "first_person" : "isometric";
+
 export interface GameRenderer3DProps {
   map: MapData;
   gridSpace?: RendererGridSpace;
@@ -659,6 +668,7 @@ export interface GameRenderer3DProps {
   showMemoryDebug?: boolean;
   performanceMode?: boolean;
   authoritativePointLightBudget?: number;
+  firstPersonView?: boolean;
 }
 
 const TILE_SLIDE_SPEED = 8.5;
@@ -2362,7 +2372,11 @@ function InstancedCellGroup({
   memoryOrigin?: [number, number];
 }) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
-  const fogMaterial = resolveStaticFogMaterialPolicy(group.fogState);
+  const firstPersonView = useContext(FirstPersonViewContext);
+  const fogMaterial = resolveStaticFogMaterialPolicy(
+    group.fogState,
+    fogVariantFor(firstPersonView),
+  );
   const texture = fogMaterial.preserveTextureMaps
     ? getObjectMaterialTexture(group.material)
     : null;
@@ -2448,7 +2462,7 @@ function InstancedCellGroup({
           depthTest
           depthWrite
           side={THREE.DoubleSide}
-          fog={false}
+          fog={fogMaterial.sceneFog}
           toneMapped={false}
         />
       ) : (
@@ -2577,8 +2591,9 @@ const resolveFogStructureColor = (
 };
 
 const memoryStructureMaterials = new Map<string, THREE.MeshBasicMaterial>();
-const getMemoryStructureMaterial = (color: string) => {
-  const cached = memoryStructureMaterials.get(color);
+const getMemoryStructureMaterial = (color: string, sceneFog = false) => {
+  const cacheKey = `${color}:${sceneFog ? "fog" : "flat"}`;
+  const cached = memoryStructureMaterials.get(cacheKey);
   if (cached) return cached;
   const material = new THREE.MeshBasicMaterial({
     color,
@@ -2587,22 +2602,19 @@ const getMemoryStructureMaterial = (color: string) => {
     depthTest: true,
     depthWrite: true,
     side: THREE.DoubleSide,
-    fog: false,
+    fog: sceneFog,
     toneMapped: false,
   });
-  memoryStructureMaterials.set(color, material);
+  memoryStructureMaterials.set(cacheKey, material);
   return material;
 };
-const unknownStructureMaterial = new THREE.MeshBasicMaterial({
-  color: "#000000",
-  transparent: false,
-  opacity: 1,
-  depthTest: true,
-  depthWrite: true,
-  side: THREE.DoubleSide,
-  fog: false,
-  toneMapped: false,
-});
+const getUnknownStructureMaterial = (firstPerson: boolean) => {
+  const policy = resolveStaticFogMaterialPolicy(
+    "unseen",
+    fogVariantFor(firstPerson),
+  );
+  return getMemoryStructureMaterial(policy.tint || "#000000", policy.sceneFog);
+};
 
 function applyGroupStructurePolicy(
   group: THREE.Group,
@@ -2610,8 +2622,12 @@ function applyGroupStructurePolicy(
   illumination: number,
   fogState: FogRenderState,
   memoryColor = MEMORY_FOG_COLOR,
+  firstPerson = false,
 ) {
-  const fogMaterial = resolveStaticFogMaterialPolicy(fogState);
+  const fogMaterial = resolveStaticFogMaterialPolicy(
+    fogState,
+    fogVariantFor(firstPerson),
+  );
   group.traverse((child: any) => {
     if (!child.isMesh || !child.material) return;
 
@@ -2635,8 +2651,8 @@ function applyGroupStructurePolicy(
     if (fogMaterial.flatUnlit) {
       const flatMaterial =
         fogState === "explored"
-          ? getMemoryStructureMaterial(memoryColor)
-          : unknownStructureMaterial;
+          ? getMemoryStructureMaterial(memoryColor, fogMaterial.sceneFog)
+          : getUnknownStructureMaterial(firstPerson);
       child.material = Array.isArray(originalMaterial)
         ? originalMaterial.map(() => flatMaterial)
         : flatMaterial;
@@ -2736,13 +2752,17 @@ function OccludingCellRenderer({
   memoryOrigin?: [number, number];
 }) {
   const groupRef = useRef<THREE.Group>(null);
+  const firstPersonView = useContext(FirstPersonViewContext);
   const height = Math.max(0, (cell.visual_height || 0) * 0.5);
   const kind = height > 0 ? "box" : "plane";
   const material = getCellMaterialProps(object, cell.walkable);
   const fastTile = isFastTileObject(object);
   const materialOpacity = material.opacity * opacity;
   const materialTransparent = material.transparent || opacity < 0.999;
-  const fogMaterial = resolveStaticFogMaterialPolicy(fogState);
+  const fogMaterial = resolveStaticFogMaterialPolicy(
+    fogState,
+    fogVariantFor(firstPersonView),
+  );
   const texture = fogMaterial.preserveTextureMaps
     ? getObjectMaterialTexture(material)
     : null;
@@ -2781,8 +2801,9 @@ function OccludingCellRenderer({
       illumination,
       fogState,
       memoryColor,
+      firstPersonView,
     );
-  }, [fastTile, opacity, illumination, fogState, memoryColor]);
+  }, [fastTile, opacity, illumination, fogState, memoryColor, firstPersonView]);
 
   // Asset-backed models may attach their real mesh after the parent layout
   // effect has run. Re-apply the same policy when that child count changes so
@@ -2830,6 +2851,7 @@ function OccludingCellRenderer({
       illumination,
       fogState,
       memoryColor,
+      firstPersonView,
     );
   });
 
@@ -2858,7 +2880,7 @@ function OccludingCellRenderer({
               depthTest
               depthWrite
               side={THREE.DoubleSide}
-              fog={false}
+              fog={fogMaterial.sceneFog}
               toneMapped={false}
             />
           ) : (
@@ -2895,7 +2917,7 @@ function OccludingCellRenderer({
               depthTest
               depthWrite
               side={THREE.DoubleSide}
-              fog={false}
+              fog={fogMaterial.sceneFog}
               toneMapped={false}
             />
           ) : (
@@ -3626,9 +3648,10 @@ function InstancedRuntimeGeometryGroup({
   memoryOrigin?: [number, number];
 }) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
+  const firstPersonView = useContext(FirstPersonViewContext);
   const material = resolveObjectMaterial(object, geometryGroup.materialRef);
   const fogMaterial = fogState
-    ? resolveStaticFogMaterialPolicy(fogState)
+    ? resolveStaticFogMaterialPolicy(fogState, fogVariantFor(firstPersonView))
     : null;
   const preserveTextureMaps = fogMaterial?.preserveTextureMaps !== false;
   const texture = preserveTextureMaps ? getObjectMaterialTexture(material) : null;
@@ -3729,7 +3752,7 @@ function InstancedRuntimeGeometryGroup({
           depthTest
           depthWrite
           side={THREE.DoubleSide}
-          fog={false}
+          fog={fogMaterial.sceneFog}
           toneMapped={false}
         />
       ) : (
@@ -4364,6 +4387,7 @@ function FoggedMemoryObject({
   memoryColor: string;
 }) {
   const groupRef = useRef<THREE.Group>(null);
+  const firstPersonView = useContext(FirstPersonViewContext);
   const settledRef = useRef(false);
   const probesRef = useRef(0);
   const meshCountRef = useRef(-1);
@@ -4373,9 +4397,16 @@ function FoggedMemoryObject({
     probesRef.current = 0;
     meshCountRef.current = -1;
     if (groupRef.current) {
-      applyGroupStructurePolicy(groupRef.current, 1, 0, fogState, memoryColor);
+      applyGroupStructurePolicy(
+        groupRef.current,
+        1,
+        0,
+        fogState,
+        memoryColor,
+        firstPersonView,
+      );
     }
-  }, [object, fogState, memoryColor]);
+  }, [object, fogState, memoryColor, firstPersonView]);
 
   // Asset meshes can arrive after their parent mounts. Apply the flat memory
   // material through a bounded startup window, then leave the subtree alone.
@@ -4396,7 +4427,14 @@ function FoggedMemoryObject({
       return;
     }
     meshCountRef.current = meshCount;
-    applyGroupStructurePolicy(groupRef.current, 1, 0, fogState, memoryColor);
+    applyGroupStructurePolicy(
+      groupRef.current,
+      1,
+      0,
+      fogState,
+      memoryColor,
+      firstPersonView,
+    );
   });
 
   return (
@@ -4495,6 +4533,7 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
   suppressPlacementLights = false,
 }: ReferenceGameRendererProps) {
   const gamePackage = useEngineStore((state) => state.gamePackage);
+  const firstPersonView = useContext(FirstPersonViewContext);
   useWebGLContextRecovery();
 
   const snappedRenderCenter = useMemo<[number, number] | null>(() => {
@@ -5037,7 +5076,11 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
                 playerStateRef.ready = true;
               }}
             >
-              {playerSpriteTex && playerSpriteReady ? (
+              {/* In first person the camera IS the player: keep this group
+                  mounted (its slide drives playerStateRef, which the eye
+                  rides), but draw no marker or ring. */}
+              {!firstPersonView &&
+                (playerSpriteTex && playerSpriteReady ? (
                 <Billboard
                   follow={true}
                   lockX={false}
@@ -5082,8 +5125,9 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
                     toneMapped={false}
                   />
                 </mesh>
-              )}
-              {activeTurnKey === "player" ? (
+              ))}
+              {!firstPersonView &&
+                (activeTurnKey === "player" ? (
                 <mesh
                   position={[0, 0.02, 0]}
                   rotation={[-Math.PI / 2, 0, 0]}
@@ -5117,7 +5161,7 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
                     fog={false}
                   />
                 </mesh>
-              )}
+              ))}
             </SmoothPositionGroup>
           );
         })()}
@@ -5633,6 +5677,7 @@ export const GameRenderer3D = memo(function GameRenderer3D({
   showMemoryDebug,
   performanceMode = false,
   authoritativePointLightBudget = MAX_AUTHORITATIVE_POINT_LIGHTS,
+  firstPersonView = false,
 }: GameRenderer3DProps) {
   const objectLibrary = useEngineStore((state) => state.gamePackage.object_library);
   // Footsteps and trace layers replace the save's MapDelta on every fine step,
@@ -5949,7 +5994,8 @@ export const GameRenderer3D = memo(function GameRenderer3D({
   }, [authoritativeVisibility, gridSpace, fineRatio]);
 
   return (
-    <group>
+    <FirstPersonViewContext.Provider value={firstPersonView}>
+      <group>
       <ReferenceGameRenderer
         map={visualWorld.map}
         playerPos={transformPoint(playerPos)}
@@ -6026,6 +6072,7 @@ export const GameRenderer3D = memo(function GameRenderer3D({
         showPerceptionDebug={showPerceptionDebug}
         showMemoryDebug={showMemoryDebug}
         performanceMode={performanceMode}
+        firstPersonView={firstPersonView}
       />
       <ActorReadoutLayer
         map={visualWorld.map}
@@ -6044,7 +6091,8 @@ export const GameRenderer3D = memo(function GameRenderer3D({
           cellWorldSize={logicalCellWorldSize(gridSpace, fineRatio)}
         />
       )}
-    </group>
+      </group>
+    </FirstPersonViewContext.Provider>
   );
 });
 

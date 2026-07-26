@@ -272,6 +272,31 @@ export function GameEditor() {
                 </Field>
               </div>
             </Section>
+
+            <Section
+              title="Presentation"
+              hint="How the player sees the world in Play mode. Gameplay, visibility, and combat rules are identical in both views."
+            >
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <Field
+                  label="View mode"
+                  hint="First person explores at eye height on the fine grid (W/S step, A/D turn 45°, Q/E strafe) and auto-switches to the tactical top-down camera in combat, targeting, and story scenes."
+                >
+                  <select
+                    className={inputCls}
+                    value={settings.view_mode === "first_person" ? "first_person" : "isometric"}
+                    onChange={(e) =>
+                      updateSettings({
+                        view_mode: e.target.value === "first_person" ? "first_person" : undefined,
+                      })
+                    }
+                  >
+                    <option value="isometric">Isometric (top-down)</option>
+                    <option value="first_person">First person</option>
+                  </select>
+                </Field>
+              </div>
+            </Section>
           </div>
         )}
 

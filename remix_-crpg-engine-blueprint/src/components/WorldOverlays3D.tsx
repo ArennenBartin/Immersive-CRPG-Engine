@@ -19,6 +19,7 @@ import {
   type FogRenderState,
 } from "../utils/fogOfWar";
 import {
+  FIRST_PERSON_UNSEEN_STRUCTURE_COLOR,
   hasAuthoritativePresentLight,
   MEMORY_FOG_COLOR,
   resolveMemoryFogColor,
@@ -301,6 +302,7 @@ export interface WorldOverlays3DProps {
   showPerceptionDebug?: boolean;
   showMemoryDebug?: boolean;
   performanceMode?: boolean;
+  firstPersonView?: boolean;
 }
 
 export const WorldOverlays3D = memo(function WorldOverlays3D({
@@ -327,6 +329,7 @@ export const WorldOverlays3D = memo(function WorldOverlays3D({
   showPerceptionDebug,
   showMemoryDebug,
   performanceMode = false,
+  firstPersonView = false,
 }: WorldOverlays3DProps) {
   const gamePackage = useEngineStore((state) => state.gamePackage);
   const cellTopY = useMemo(() => topY(map), [map]);
@@ -871,6 +874,18 @@ export const WorldOverlays3D = memo(function WorldOverlays3D({
   ]);
 
   const fogCurtains = useMemo(() => {
+    // Boundary curtains are an isometric readability device. At eye height
+    // they read as literal walls of mist blocking corridors, so first person
+    // drops them entirely and lets scene fog + haze silhouettes carry the
+    // transition into unknown space.
+    if (firstPersonView) {
+      return {
+        explored: [] as FogCurtain[],
+        exploredOpen: [] as FogCurtain[],
+        unseen: [] as FogCurtain[],
+        unseenOpen: [] as FogCurtain[],
+      };
+    }
     const spatialKey = (x: number, z: number) =>
       `${x.toFixed(4)}:${z.toFixed(4)}`;
     const blockerWorldKeys = new Set<string>();
@@ -954,7 +969,14 @@ export const WorldOverlays3D = memo(function WorldOverlays3D({
       unseen: unseen.fullHeight,
       unseenOpen: unseen.openFloor,
     };
-  }, [fogResult.explored, fogResult.unseen, map.cells, gridSpace, fineRatio]);
+  }, [
+    fogResult.explored,
+    fogResult.unseen,
+    map.cells,
+    gridSpace,
+    fineRatio,
+    firstPersonView,
+  ]);
 
   const newlyExploredSignature = useMemo(
     () => [...fogResult.newlyExplored].sort().join("|"),
@@ -1145,7 +1167,10 @@ export const WorldOverlays3D = memo(function WorldOverlays3D({
       />
       <InstancedPlaneField
         cells={fogResult.unseen}
-        style={{ color: "#000000", opacity: 1 }}
+        style={{
+          color: firstPersonView ? FIRST_PERSON_UNSEEN_STRUCTURE_COLOR : "#000000",
+          opacity: 1,
+        }}
         renderOrder={81}
         coverage={1.02}
         depthTest
@@ -1170,7 +1195,10 @@ export const WorldOverlays3D = memo(function WorldOverlays3D({
       />
       <InstancedPlaneField
         cells={fineFogCorrection.unseen}
-        style={{ color: "#000000", opacity: 1 }}
+        style={{
+          color: firstPersonView ? FIRST_PERSON_UNSEEN_STRUCTURE_COLOR : "#000000",
+          opacity: 1,
+        }}
         renderOrder={84}
         coverage={1.01}
         depthTest
