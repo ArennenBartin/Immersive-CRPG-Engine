@@ -68,7 +68,6 @@ import {
   logicalCellToMacro,
   logicalCellWorldSize,
   dedupeFineTerrainCellsFor3D,
-  isWorldPointInCameraOcclusionCorridor,
   worldPointToLogicalCell,
   worldPointToWorldMacroCell,
   type RendererGridSpace,
@@ -78,7 +77,7 @@ import {
   computeFogVisibleCells,
   fogCellKey,
   isStableMemoryStructureObject,
-  resolveStructureFogCompositePolicy,
+  resolvePlayerStructureOcclusionPolicy,
   shouldRenderDarkAdjacentEntity,
   type AuthoritativeFogPresentationCell,
   type FogRenderState,
@@ -277,6 +276,9 @@ const showAnimatedSpriteAtlasFrame = (
     left / source.atlasWidth,
     1 - (top + source.frameHeight) / source.atlasHeight,
   );
+  // Custom sprite materials share this matrix with Three's standard map
+  // shader. Updating it here keeps every pass on the exact active GIF frame.
+  entry.texture.updateMatrix();
   source.frameIndex = frameIndex;
 };
 
@@ -595,8 +597,6 @@ interface ReferenceGameRendererProps {
   inCombat?: boolean;
   activeTurnKey?: string | null;
   showGrid?: boolean;
-  enableOcclusion?: boolean;
-  occlusionAzimuth?: number;
   renderCenter?: [number, number];
   renderRadius?: number;
   fxCellTransform?: (cell: readonly [number, number]) => [number, number];
@@ -641,8 +641,6 @@ export interface GameRenderer3DProps {
   showBehaviorIntents?: boolean;
   worldDeniedCells?: { x: number; z: number; kind?: string }[];
   showGrid?: boolean;
-  enableOcclusion?: boolean;
-  occlusionAzimuth?: number;
   renderCenter?: [number, number];
   renderRadius?: number;
   lintProblems?: { cell?: [number, number] | null; severity: string }[];
@@ -875,16 +873,66 @@ const updateActorRenderPosition = (actorId: string, position: THREE.Vector3) => 
 };
 
 const ACTOR_SPRITE_RENDER_ORDER = 200;
+const PLAYER_XRAY_RENDER_ORDER = ACTOR_SPRITE_RENDER_ORDER + 1;
 const ACTOR_EFFECT_RENDER_ORDER = 210;
 const ACTOR_UI_RENDER_ORDER = 220;
 const ACTOR_RING_RENDER_ORDER = 180;
 const PLAYER_RING_RENDER_ORDER = 190;
 const DARK_ADJACENT_ENTITY_TINT = "#625B7D";
 const DARK_ADJACENT_ENTITY_OPACITY = 0.42;
-// Fog and its debug boundary top out at order 90. A camera-faded wall remains
-// a readable silhouette above those screen-space overlays, while actor bands
-// begin at 180 so the wall can never tint an actor standing in front of it.
-const VISIBLE_STRUCTURE_RENDER_ORDER = 100;
+const PLAYER_XRAY_TINT = "#89E7FF";
+const PLAYER_XRAY_COLOR = new THREE.Color(PLAYER_XRAY_TINT);
+const PLAYER_STRUCTURE_OCCLUSION = resolvePlayerStructureOcclusionPolicy();
+const PLAYER_XRAY_VERTEX_SHADER = `
+  uniform mat3 spriteMapTransform;
+  varying vec2 vMapUv;
+
+  void main() {
+    vMapUv = (spriteMapTransform * vec3(uv, 1.0)).xy;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+const PLAYER_XRAY_FRAGMENT_SHADER = `
+  uniform sampler2D spriteMap;
+  uniform vec2 spriteTexel;
+  uniform vec3 tint;
+  uniform float xrayOpacity;
+  varying vec2 vMapUv;
+
+  void main() {
+    vec2 edgeStep = spriteTexel * 1.75;
+    float centerAlpha = texture2D(spriteMap, vMapUv).a;
+    float leftAlpha = texture2D(spriteMap, vMapUv + vec2(-edgeStep.x, 0.0)).a;
+    float rightAlpha = texture2D(spriteMap, vMapUv + vec2(edgeStep.x, 0.0)).a;
+    float downAlpha = texture2D(spriteMap, vMapUv + vec2(0.0, -edgeStep.y)).a;
+    float upAlpha = texture2D(spriteMap, vMapUv + vec2(0.0, edgeStep.y)).a;
+    float downLeftAlpha = texture2D(spriteMap, vMapUv - edgeStep).a;
+    float upRightAlpha = texture2D(spriteMap, vMapUv + edgeStep).a;
+    float upLeftAlpha = texture2D(
+      spriteMap,
+      vMapUv + vec2(-edgeStep.x, edgeStep.y)
+    ).a;
+    float downRightAlpha = texture2D(
+      spriteMap,
+      vMapUv + vec2(edgeStep.x, -edgeStep.y)
+    ).a;
+
+    float neighborMax = max(
+      max(max(leftAlpha, rightAlpha), max(downAlpha, upAlpha)),
+      max(max(downLeftAlpha, upRightAlpha), max(upLeftAlpha, downRightAlpha))
+    );
+    float neighborMin = min(
+      min(min(leftAlpha, rightAlpha), min(downAlpha, upAlpha)),
+      min(min(downLeftAlpha, upRightAlpha), min(upLeftAlpha, downRightAlpha))
+    );
+    float innerEdge = max(0.0, centerAlpha - neighborMin);
+    float outerEdge = max(0.0, neighborMax - centerAlpha);
+    float outlineAlpha = smoothstep(0.04, 0.4, max(innerEdge, outerEdge));
+
+    if (outlineAlpha < 0.02) discard;
+    gl_FragColor = vec4(tint, outlineAlpha * xrayOpacity);
+  }
+`;
 
 const actorSpriteTint = (illumination: number | undefined) => {
   const brightness = resolveActorSpriteBrightness(illumination ?? 1);
@@ -2167,25 +2215,14 @@ const getStandingSurfaceY = (
   return baseHeight + surfaceOffset;
 };
 
-const getOcclusionTopY = (cell: CellData) => {
-  const height = (cell.visual_height || 0) * 0.5;
-  return (cell.y || 0) + (height > 0 ? height : 0.5);
-};
-
-const OCCLUSION_MIN_TOP_Y = 0.6;
-const OCCLUSION_RAY_LENGTH = 7;
-const OCCLUSION_RAY_HALF_WIDTH = 1.45;
-const OCCLUSION_FADE_OPACITY = 0.38;
+const STRUCTURE_MIN_TOP_Y = 0.6;
 // Cells whose base elevation is at least this are overhead geometry (roofs,
-// high bridges). They occlude regardless of visual_height or object tags —
+// high bridges). They remain structural regardless of visual_height or tags —
 // roof cells are flat "floor" tiles raised to y=2, which the height/object
 // tests alone would never catch.
-const OCCLUSION_OVERHEAD_MIN_Y = 1.5;
-// Roofs hide in a wider bubble than walls so a building's interior reads as
-// a room, not a small fading patch around the player.
-const OCCLUSION_OVERHEAD_PLAYER_RADIUS_SQ = 42;
+const STRUCTURE_OVERHEAD_MIN_Y = 1.5;
 
-const isOccludingCellObject = (object: ObjectData | null | undefined) =>
+const isStructuralCellObject = (object: ObjectData | null | undefined) =>
   Boolean(
     object &&
       !object.tags?.includes("floor") &&
@@ -2194,16 +2231,16 @@ const isOccludingCellObject = (object: ObjectData | null | undefined) =>
   );
 
 const isOverheadCell = (cell: CellData) =>
-  (cell.y || 0) >= OCCLUSION_OVERHEAD_MIN_Y;
+  (cell.y || 0) >= STRUCTURE_OVERHEAD_MIN_Y;
 
-const shouldRenderCellWithOcclusion = (
+const shouldRenderCellAsStructure = (
   cell: CellData,
   object: ObjectData | null | undefined,
 ) =>
   cell.active !== false &&
-  ((cell.visual_height || 0) * 0.5 > OCCLUSION_MIN_TOP_Y ||
+  ((cell.visual_height || 0) * 0.5 > STRUCTURE_MIN_TOP_Y ||
     isOverheadCell(cell) ||
-    isOccludingCellObject(object));
+    isStructuralCellObject(object));
 
 const isWallObject = (object: ObjectData | null | undefined) =>
   Boolean(object?.tags?.includes("wall"));
@@ -2354,11 +2391,9 @@ type CellVisualGroup = {
 
 function InstancedCellGroup({
   group,
-  hiddenCellKeys,
   memoryOrigin,
 }: {
   group: CellVisualGroup;
-  hiddenCellKeys?: Set<string>;
   memoryOrigin?: [number, number];
 }) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
@@ -2394,15 +2429,14 @@ function InstancedCellGroup({
     const dummy = new THREE.Object3D();
     group.cells.forEach((cell, index) => {
       const y = cell.y || 0;
-      const hidden = hiddenCellKeys?.has(getCellCoordKey(cell.x, cell.z));
       if (group.kind === "plane") {
         dummy.position.set(cell.x, y + 0.001, cell.z);
         dummy.rotation.set(-Math.PI / 2, 0, 0);
-        dummy.scale.set(hidden ? 0.0001 : 1, hidden ? 0.0001 : 1, hidden ? 0.0001 : 1);
+        dummy.scale.set(1, 1, 1);
       } else {
         dummy.position.set(cell.x, y + group.height / 2, cell.z);
         dummy.rotation.set(0, 0, 0);
-        dummy.scale.set(hidden ? 0.0001 : 1, hidden ? 0.0001 : 1, hidden ? 0.0001 : 1);
+        dummy.scale.set(1, 1, 1);
       }
       dummy.updateMatrix();
       meshRef.current!.setMatrixAt(index, dummy.matrix);
@@ -2423,7 +2457,7 @@ function InstancedCellGroup({
       meshRef.current.instanceColor.needsUpdate = true;
     }
     meshRef.current.computeBoundingSphere();
-  }, [group, hiddenCellKeys, memoryOrigin?.[0], memoryOrigin?.[1]]);
+  }, [group, memoryOrigin?.[0], memoryOrigin?.[1]]);
 
   return (
     <instancedMesh
@@ -2470,72 +2504,6 @@ function InstancedCellGroup({
       )}
     </instancedMesh>
   );
-}
-
-function getOccludedCellKeys(
-  cells: CellData[],
-  objectById: Map<string, ObjectData>,
-  playerPos: [number, number] | undefined,
-  cameraAzimuth: number,
-) {
-  const occludedKeys = new Set<string>();
-  if (!playerPos) return occludedKeys;
-
-  const [px, pz] = playerPos;
-
-  const playerY = playerStateRef.ready ? playerStateRef.py : 0;
-  // The wide roof-reveal bubble only applies while the player is actually
-  // beneath overhead geometry (indoors). Outside, roofs fade via the camera
-  // ray like walls do, so buildings don't peel open as the player walks past.
-  const playerUnderOverhead = cells.some(
-    (cell) =>
-      isOverheadCell(cell) &&
-      cell.x === px &&
-      cell.z === pz &&
-      (cell.y || 0) > playerY + 1.0,
-  );
-
-  cells.forEach((cell) => {
-    const object = cell.object_id ? objectById.get(cell.object_id) : null;
-    if (!shouldRenderCellWithOcclusion(cell, object)) return;
-
-    const overhead = isOverheadCell(cell);
-    // Overhead geometry only occludes while it is actually above the player;
-    // if the player ever stands at roof height it must stay solid.
-    if (overhead && (cell.y || 0) <= playerY + 1.0) return;
-
-    // Geometry whose highest point is at or below the player never blocks the camera
-    if (getOcclusionTopY(cell) <= playerY + 0.1) return;
-
-    const dx = cell.x - px;
-    const dz = cell.z - pz;
-    const playerDistSq = dx * dx + dz * dz;
-    const heightBias = THREE.MathUtils.clamp(
-      (getOcclusionTopY(cell) - OCCLUSION_MIN_TOP_Y) * 0.08,
-      0,
-      0.65,
-    );
-
-    const insideIndoorRoofReveal =
-      overhead &&
-      playerUnderOverhead &&
-      playerDistSq <= OCCLUSION_OVERHEAD_PLAYER_RADIUS_SQ;
-    const betweenCameraAndPlayer = isWorldPointInCameraOcclusionCorridor(
-      [cell.x, cell.z],
-      playerPos,
-      cameraAzimuth,
-      OCCLUSION_RAY_LENGTH,
-      OCCLUSION_RAY_HALF_WIDTH + heightBias,
-    );
-
-    // Walls and props fade only when they sit between the camera and player.
-    // The radius reveal is reserved for roofs while the player is indoors.
-    if (insideIndoorRoofReveal || betweenCameraAndPlayer) {
-      occludedKeys.add(getCellCoordKey(cell.x, cell.z));
-    }
-  });
-
-  return occludedKeys;
 }
 
 const resolveStructureEmission = (
@@ -2627,10 +2595,7 @@ function applyGroupStructurePolicy(
     if (child.userData[baseRenderOrderKey] === undefined) {
       child.userData[baseRenderOrderKey] = child.renderOrder || 0;
     }
-    child.renderOrder =
-      opacity < 0.999
-        ? VISIBLE_STRUCTURE_RENDER_ORDER
-        : child.userData[baseRenderOrderKey];
+    child.renderOrder = child.userData[baseRenderOrderKey];
 
     if (fogMaterial.flatUnlit) {
       const flatMaterial =
@@ -2700,8 +2665,8 @@ function applyGroupStructurePolicy(
       const baseDepthWrite = material.userData[baseDepthWriteKey] as boolean;
       const targetOpacity = baseOpacity * opacity;
       // Fog stays in its own depth-tested overlay pass. Static geometry keeps
-      // ordinary opaque depth behavior; only a camera-faded wall becomes
-      // transparent, which prevents it from painting over actors behind it.
+      // ordinary opaque depth behavior; player readability is handled by the
+      // player's separate depth-greater x-ray pass.
       const targetTransparent = baseTransparent || opacity < 0.999;
       const targetDepthWrite = baseDepthWrite && opacity >= 0.999;
       const updateProgram =
@@ -2718,7 +2683,7 @@ function applyGroupStructurePolicy(
   });
 }
 
-function OccludingCellRenderer({
+function StaticStructureCellRenderer({
   cell,
   object,
   rotationY,
@@ -2838,7 +2803,7 @@ function OccludingCellRenderer({
       ref={groupRef}
       position={[cell.x, cell.y || 0, cell.z]}
       rotation={[0, rotationY, 0]}
-      renderOrder={opacity < 0.999 ? VISIBLE_STRUCTURE_RENDER_ORDER : 0}
+      renderOrder={0}
     >
       {!fastTile && object ? (
         <ObjectRuntimeModelRenderer object={object} />
@@ -3048,8 +3013,6 @@ function CellVisualLayers({
   objectById,
   wallRotationByCell,
   playerPos,
-  enableOcclusion,
-  occlusionAzimuth,
   getCellFogState,
   getStructureIllumination,
 }: {
@@ -3057,75 +3020,27 @@ function CellVisualLayers({
   objectById: Map<string, ObjectData>;
   wallRotationByCell: Map<string, number>;
   playerPos?: [number, number];
-  enableOcclusion: boolean;
-  occlusionAzimuth: number;
   getCellFogState?: (cell: readonly [number, number]) => FogRenderState;
   getStructureIllumination?: (cell: readonly [number, number]) => number;
 }) {
   const sampledMemoryOrigin = useMemo<[number, number] | undefined>(() => {
     if (!playerPos) return undefined;
     // Fine-grid movement advances by thirds of one rendered macro tile. The
-    // camera corridor and remembered-wall gradient do not meaningfully change
-    // inside that tile. Sample once per rendered macro tile so neither feature
-    // rewrites every structure instance on every fine-grid step.
+    // remembered-wall gradient does not meaningfully change inside that tile,
+    // so sample once per rendered macro tile.
     return [Math.round(playerPos[0]), Math.round(playerPos[1])];
   }, [
     playerPos ? Math.round(playerPos[0]) : undefined,
     playerPos ? Math.round(playerPos[1]) : undefined,
   ]);
-  const sampledPlayerPos = enableOcclusion ? sampledMemoryOrigin : undefined;
-
-  const occludedCellKeys = useMemo(
-    () =>
-      enableOcclusion
-        ? getOccludedCellKeys(
-            cells,
-            objectById,
-            sampledPlayerPos,
-            occlusionAzimuth,
-          )
-        : new Set<string>(),
-    [
-      enableOcclusion,
-      cells,
-      objectById,
-      occlusionAzimuth,
-      sampledPlayerPos?.[0],
-      sampledPlayerPos?.[1],
-    ],
-  );
-
-  const cameraFadedCellKeys = useMemo(() => {
-    if (occludedCellKeys.size === 0) return occludedCellKeys;
-    const faded = new Set<string>();
-    cells.forEach((cell) => {
-      const key = getCellCoordKey(cell.x, cell.z);
-      if (!occludedCellKeys.has(key)) return;
-      // Camera fading is a player-readability treatment, not present-tense
-      // vision. Retain each wall's fog material while fading any foreground
-      // wall that crosses the camera corridor, including dark memory walls.
-      if (
-        !getCellFogState ||
-        resolveStructureFogCompositePolicy(
-          getCellFogState([cell.x, cell.z]),
-          true,
-        ).cameraFaded
-      ) {
-        faded.add(key);
-      }
-    });
-    return faded;
-  }, [cells, occludedCellKeys, getCellFogState]);
-
   const {
     groups,
-    occludableGroups,
+    structuralGroups,
     modelCells,
-    occludableModelCells,
-    occludableFastCells,
+    structuralModelCells,
   } = useMemo(() => {
     const groupedCells = new Map<CellVisualGroup["key"], CellVisualGroup>();
-    const groupedOccludableCells = new Map<
+    const groupedStructuralCells = new Map<
       CellVisualGroup["key"],
       CellVisualGroup
     >();
@@ -3134,17 +3049,11 @@ function CellVisualLayers({
       object: ObjectData;
       rotationY: number;
     }> = [];
-    const renderedOccludableModelCells: Array<{
+    const renderedStructuralModelCells: Array<{
       cell: CellData;
       object: ObjectData;
       rotationY: number;
     }> = [];
-    const renderedOccludableFastCells: Array<{
-      cell: CellData;
-      object: ObjectData | null | undefined;
-      rotationY: number;
-    }> = [];
-
     const addGroupedCell = (
       target: Map<CellVisualGroup["key"], CellVisualGroup>,
       cell: CellData,
@@ -3189,40 +3098,38 @@ function CellVisualLayers({
         isWallObject(object)
           ? wallRotationByCell.get(getCellCoordKey(cell.x, cell.z)) || 0
           : 0;
-      // Structure routing is independent from camera fading. Performance mode
-      // may disable occlusion, but wall materials still need the authoritative
-      // fog and surface-lighting policy.
-      const canOcclude = shouldRenderCellWithOcclusion(cell, object);
+      // Structure routing is independent from player readability. Walls and
+      // roofs retain their authoritative fog and surface-lighting materials.
+      const isStructure = shouldRenderCellAsStructure(cell, object);
       const fogState = getCellFogState?.([cell.x, cell.z]) || "visible";
 
       // Unseen structures are solid black, so their authored part detail is
       // unobservable. Keep their full-height topology with one instanced proxy
       // instead of mounting every wall part and material in hidden space.
-      if (canOcclude && fogState === "unseen") {
+      if (isStructure && fogState === "unseen") {
         addGroupedCell(
-          groupedOccludableCells,
+          groupedStructuralCells,
           cell,
           object,
-          "occludable_unseen",
+          "structure_unseen",
         );
         return;
       }
 
       const fastTile = isFastTileObject(object);
 
-      if (canOcclude && fastTile) {
-        renderedOccludableFastCells.push({ cell, object, rotationY });
+      if (isStructure && fastTile) {
         addGroupedCell(
-          groupedOccludableCells,
+          groupedStructuralCells,
           cell,
           object,
-          "occludable",
+          "structure",
         );
         return;
       }
 
-      if (canOcclude && !fastTile && object) {
-        renderedOccludableModelCells.push({ cell, object, rotationY });
+      if (isStructure && !fastTile && object) {
+        renderedStructuralModelCells.push({ cell, object, rotationY });
         return;
       }
 
@@ -3236,10 +3143,9 @@ function CellVisualLayers({
 
     return {
       groups: Array.from(groupedCells.values()),
-      occludableGroups: Array.from(groupedOccludableCells.values()),
+      structuralGroups: Array.from(groupedStructuralCells.values()),
       modelCells: renderedModelCells,
-      occludableModelCells: renderedOccludableModelCells,
-      occludableFastCells: renderedOccludableFastCells,
+      structuralModelCells: renderedStructuralModelCells,
     };
   }, [
     cells,
@@ -3260,33 +3166,20 @@ function CellVisualLayers({
     [modelCells, getCellFogState, getStructureIllumination],
   );
 
-  const occludableModelInstances = useMemo(() => {
-    const visible: typeof occludableModelCells = [];
-    const faded: typeof occludableModelCells = [];
-
-    occludableModelCells.forEach((item) => {
-      if (cameraFadedCellKeys.has(getCellCoordKey(item.cell.x, item.cell.z))) {
-        faded.push(item);
-      } else {
-        visible.push(item);
-      }
-    });
-
-    return {
-      visible: groupFogAwareRuntimeInstances(
-        visible,
+  const structuralModelInstances = useMemo(
+    () =>
+      groupFogAwareRuntimeInstances(
+        structuralModelCells,
         ({ cell }) => [cell.x, cell.y || 0, cell.z],
         ({ cell }) => getCellFogState?.([cell.x, cell.z]) || "visible",
         ({ cell }) => getStructureIllumination?.([cell.x, cell.z]) || 0,
       ),
-      faded,
-    };
-  }, [
-    occludableModelCells,
-    cameraFadedCellKeys,
-    getCellFogState,
-    getStructureIllumination,
-  ]);
+    [
+      structuralModelCells,
+      getCellFogState,
+      getStructureIllumination,
+    ],
+  );
 
   return (
     <>
@@ -3297,11 +3190,10 @@ function CellVisualLayers({
           memoryOrigin={sampledMemoryOrigin}
         />
       ))}
-      {occludableGroups.map((group) => (
+      {structuralGroups.map((group) => (
         <InstancedCellGroup
           key={group.key}
           group={group}
-          hiddenCellKeys={cameraFadedCellKeys}
           memoryOrigin={sampledMemoryOrigin}
         />
       ))}
@@ -3316,7 +3208,7 @@ function CellVisualLayers({
         />
       ))}
       {staticModelInstances.singles.map(({ cell, object, rotationY }, index) => (
-        <OccludingCellRenderer
+        <StaticStructureCellRenderer
           key={`model_cell_${cell.x}_${cell.y || 0}_${cell.z}_${index}`}
           cell={cell}
           object={object}
@@ -3327,7 +3219,7 @@ function CellVisualLayers({
           memoryOrigin={sampledMemoryOrigin}
         />
       ))}
-      {occludableModelInstances.visible.groups.map((group) => (
+      {structuralModelInstances.groups.map((group) => (
         <RuntimeObjectInstances
           key={`occ_cell_instances_${group.key}`}
           object={group.object}
@@ -3337,10 +3229,10 @@ function CellVisualLayers({
           memoryOrigin={sampledMemoryOrigin}
         />
       ))}
-      {occludableModelInstances.visible.singles.map(
+      {structuralModelInstances.singles.map(
         ({ cell, object, rotationY }, index) => (
-          <OccludingCellRenderer
-            key={`occ_model_visible_cell_${cell.x}_${cell.y || 0}_${cell.z}_${index}`}
+          <StaticStructureCellRenderer
+            key={`occ_model_cell_${cell.x}_${cell.y || 0}_${cell.z}_${index}`}
             cell={cell}
             object={object}
             rotationY={rotationY}
@@ -3352,36 +3244,6 @@ function CellVisualLayers({
             memoryOrigin={sampledMemoryOrigin}
           />
         ),
-      )}
-      {occludableModelInstances.faded.map(({ cell, object, rotationY }, index) => (
-        <OccludingCellRenderer
-          key={`occ_model_faded_cell_${cell.x}_${cell.y || 0}_${cell.z}_${index}`}
-          cell={cell}
-          object={object}
-          rotationY={rotationY}
-          opacity={OCCLUSION_FADE_OPACITY}
-          illumination={
-            getStructureIllumination?.([cell.x, cell.z]) || 0
-          }
-          fogState={getCellFogState?.([cell.x, cell.z]) || "visible"}
-          memoryOrigin={sampledMemoryOrigin}
-        />
-      ))}
-      {occludableFastCells.map(({ cell, object, rotationY }, index) =>
-        cameraFadedCellKeys.has(getCellCoordKey(cell.x, cell.z)) ? (
-        <OccludingCellRenderer
-          key={`occ_fast_cell_${cell.x}_${cell.y || 0}_${cell.z}_${index}`}
-          cell={cell}
-          object={object}
-          rotationY={rotationY}
-          opacity={OCCLUSION_FADE_OPACITY}
-          illumination={
-            getStructureIllumination?.([cell.x, cell.z]) || 0
-          }
-          fogState={getCellFogState?.([cell.x, cell.z]) || "visible"}
-          memoryOrigin={sampledMemoryOrigin}
-        />
-        ) : null,
       )}
     </>
   );
@@ -4481,8 +4343,6 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
   inCombat = false,
   activeTurnKey = null,
   showGrid,
-  enableOcclusion = false,
-  occlusionAzimuth = Math.PI / 4,
   renderCenter,
   renderRadius = DEFAULT_RENDER_RADIUS,
   fxCellTransform,
@@ -4762,6 +4622,26 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
     playerSpriteId || gamePackage.settings?.player_sprite_id,
     gamePackage,
   );
+  const playerXrayUniforms = useMemo(() => {
+    if (!playerSpriteTex) return undefined;
+    playerSpriteTex.updateMatrix();
+    const image = playerSpriteTex.image as
+      | { width?: number; height?: number }
+      | undefined;
+    const textureWidth = Math.max(1, Number(image?.width || 1));
+    const textureHeight = Math.max(1, Number(image?.height || 1));
+    return {
+      spriteMap: { value: playerSpriteTex },
+      spriteMapTransform: { value: playerSpriteTex.matrix },
+      spriteTexel: {
+        value: new THREE.Vector2(1 / textureWidth, 1 / textureHeight),
+      },
+      tint: { value: PLAYER_XRAY_COLOR },
+      xrayOpacity: {
+        value: PLAYER_STRUCTURE_OCCLUSION.xrayOpacity,
+      },
+    };
+  }, [playerSpriteTex, playerSpriteReady]);
 
   // Memoize materials so we don't recreate them every frame
   const materials = useMemo(
@@ -4844,8 +4724,6 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
         objectById={objectById}
         wallRotationByCell={wallRotationByCell}
         playerPos={playerPos}
-        enableOcclusion={enableOcclusion}
-        occlusionAzimuth={occlusionAzimuth}
         getCellFogState={getCellFogState}
         getStructureIllumination={getStructureIllumination}
       />
@@ -5061,27 +4939,72 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
                       toneMapped={false}
                     />
                   </mesh>
+                  {PLAYER_STRUCTURE_OCCLUSION.renderXrayPass && (
+                    <mesh
+                      position={[0, renderHeight * 0.5, 0]}
+                      renderOrder={PLAYER_XRAY_RENDER_ORDER}
+                      raycast={() => null}
+                    >
+                      <planeGeometry args={[renderWidth, renderHeight]} />
+                      <shaderMaterial
+                        uniforms={playerXrayUniforms}
+                        vertexShader={PLAYER_XRAY_VERTEX_SHADER}
+                        fragmentShader={PLAYER_XRAY_FRAGMENT_SHADER}
+                        transparent
+                        depthTest
+                        depthFunc={THREE.GreaterDepth}
+                        depthWrite={false}
+                        side={THREE.DoubleSide}
+                        toneMapped={false}
+                      />
+                    </mesh>
+                  )}
                 </Billboard>
               ) : (
-                <mesh
-                  position={[0, 0.4, 0]}
-                  renderOrder={ACTOR_SPRITE_RENDER_ORDER}
-                  rotation={[
-                    0,
-                    Math.atan2(playerFacing[0], playerFacing[1]),
-                    0,
-                  ]}
-                >
-                  <cylinderGeometry args={[0, 0.3, 0.8, 4]} />
-                  <meshBasicMaterial
-                    color={actorFallbackTint("#5E81AC", playerIllumination)}
-                    transparent
-                    opacity={1}
-                    depthTest
-                    depthWrite={false}
-                    toneMapped={false}
-                  />
-                </mesh>
+                <>
+                  <mesh
+                    position={[0, 0.4, 0]}
+                    renderOrder={ACTOR_SPRITE_RENDER_ORDER}
+                    rotation={[
+                      0,
+                      Math.atan2(playerFacing[0], playerFacing[1]),
+                      0,
+                    ]}
+                  >
+                    <cylinderGeometry args={[0, 0.3, 0.8, 4]} />
+                    <meshBasicMaterial
+                      color={actorFallbackTint("#5E81AC", playerIllumination)}
+                      transparent
+                      opacity={1}
+                      depthTest
+                      depthWrite={false}
+                      toneMapped={false}
+                    />
+                  </mesh>
+                  {PLAYER_STRUCTURE_OCCLUSION.renderXrayPass && (
+                    <mesh
+                      position={[0, 0.4, 0]}
+                      renderOrder={PLAYER_XRAY_RENDER_ORDER}
+                      rotation={[
+                        0,
+                        Math.atan2(playerFacing[0], playerFacing[1]),
+                        0,
+                      ]}
+                      raycast={() => null}
+                    >
+                      <cylinderGeometry args={[0, 0.3, 0.8, 4]} />
+                      <meshBasicMaterial
+                        color={PLAYER_XRAY_TINT}
+                        transparent
+                        opacity={PLAYER_STRUCTURE_OCCLUSION.xrayOpacity}
+                        depthTest
+                        depthFunc={THREE.GreaterDepth}
+                        depthWrite={false}
+                        toneMapped={false}
+                      />
+                    </mesh>
+                  )}
+                </>
               )}
               {activeTurnKey === "player" ? (
                 <mesh
@@ -5094,7 +5017,7 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
                     color="#7DF9FF"
                     transparent
                     opacity={0.95}
-                    depthTest
+                    depthTest={false}
                     depthWrite={false}
                     toneMapped={false}
                     fog={false}
@@ -5111,7 +5034,7 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
                     color="#88C0D0"
                     transparent
                     opacity={inCombat ? 0.72 : 0.82}
-                    depthTest
+                    depthTest={false}
                     depthWrite={false}
                     toneMapped={false}
                     fog={false}
@@ -5618,8 +5541,6 @@ export const GameRenderer3D = memo(function GameRenderer3D({
   showBehaviorIntents,
   worldDeniedCells,
   showGrid,
-  enableOcclusion,
-  occlusionAzimuth,
   renderCenter,
   renderRadius,
   fogOfWar,
@@ -5972,8 +5893,6 @@ export const GameRenderer3D = memo(function GameRenderer3D({
         inCombat={inCombat}
         activeTurnKey={activeTurnKey}
         showGrid={showGrid}
-        enableOcclusion={enableOcclusion}
-        occlusionAzimuth={occlusionAzimuth}
         renderCenter={transformPoint(renderCenter)}
         renderRadius={visualRadius}
         fxCellTransform={transformCell}
@@ -6001,10 +5920,9 @@ export const GameRenderer3D = memo(function GameRenderer3D({
         mapDelta={mapDelta}
         gridSpace={gridSpace}
         fineRatio={fineRatio}
-        // Authoritative fog never derives visibility from this coordinate,
-        // but camera occlusion still needs a player anchor. Feed it the
-        // macro-cadenced render center so foreground walls fade correctly
-        // without invalidating the structure tree on every fine-grid step.
+        // Authoritative fog never derives visibility from this coordinate.
+        // The macro-cadenced center only anchors the remembered-structure
+        // gradient, avoiding structure-tree work on every fine-grid step.
         playerPos={
           authoritativeVisibility ? stableOverlayRenderCenter : playerPos
         }
