@@ -280,7 +280,7 @@ export function GameEditor() {
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                 <Field
                   label="View mode"
-                  hint="First person explores at eye height on the fine grid (W/S step, A/D turn 45°, Q/E strafe) and auto-switches to the tactical top-down camera in combat, targeting, and story scenes."
+                  hint="First person explores at eye height on the fine grid (W/S step, A/D turn 45°, Shift+A/D strafe, hold Q/E to look up/down) and auto-switches to the tactical top-down camera in combat, targeting, and story scenes."
                 >
                   <select
                     className={inputCls}

@@ -175,6 +175,7 @@ import {
   AdaptiveQualityProbe,
   BlackStarLightRig,
   FirstPersonCameraRig,
+  firstPersonLookRef,
   getInitialPlayCameraPosition,
   ISO_CAMERA_BASE_AZIMUTH,
   IsometricCameraRig,
@@ -197,6 +198,8 @@ import {
 import {
   FIRST_PERSON_ATMOSPHERE,
   FIRST_PERSON_FOV,
+  FIRST_PERSON_TURN_HOLD_START_MS,
+  FIRST_PERSON_TURN_REPEAT_MS,
   ISOMETRIC_ATMOSPHERE,
   firstPersonStepVector,
   isFirstPersonExploreActive,
@@ -439,9 +442,6 @@ const MOVEMENT_CHORD_BUFFER_MS = 24;
 // advanced the simulation faster than the rendered actor could catch up and
 // could dispatch thirty full exploration updates per second.
 const MOVEMENT_REPEAT_INTERVAL_MS = 240 / FINE_PER_MACRO;
-// Held 45° turns repeat slower than fine steps: a full about-face should be a
-// deliberate beat, not a spin. Tapping still turns instantly.
-const FIRST_PERSON_TURN_REPEAT_MS = 190;
 const PLAYER_FOOTSTEP_FINE_STEP_INTERVAL = FINE_PER_MACRO;
 // Keep the audio cooldown below the normalized held cadence so footsteps do
 // not silently collapse multiple macro distances into one sound.
@@ -671,11 +671,6 @@ const MOVEMENT_COMMAND_KEYS = new Set([
   "d",
   "z",
   ".",
-  // Q/E strafe in first-person exploration. In the isometric view they never
-  // enter keysDownRef (they rotate the camera on keydown instead), so listing
-  // them here only affects gating bookkeeping there.
-  "q",
-  "e",
 ]);
 
 const isMovementCommandKey = (key: string) => MOVEMENT_COMMAND_KEYS.has(key);
@@ -3762,11 +3757,15 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     // First-person holds are compared as one signature (forward:turn:strafe:
     // wait) because the resolved step vector changes as the facing turns.
     fpSignature: "",
+    // Turning runs on its own clock so a held turn stays deliberate without
+    // making a simultaneous forward hold walk at the slow turn cadence.
+    nextTurnTick: 0,
   });
   const resetRepeatInputState = useCallback(() => {
     repeatStateRef.current.active = false;
     repeatStateRef.current.bufferStart = 0;
     repeatStateRef.current.nextTick = 0;
+    repeatStateRef.current.nextTurnTick = 0;
   }, []);
   const releaseCombatInputGateIfReady = useCallback((time = inputNow()) => {
     if (time < combatInputLockUntilRef.current) return false;
@@ -5196,11 +5195,20 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     const loop = (time: number) => {
       animId = requestAnimationFrame(loop);
 
+      // Look pitch is held-only. Every path that stops accepting exploration
+      // input releases it so the view springs back to level rather than
+      // staying tilted behind a panel, a death screen, or a combat lock.
+      const releaseLookPitch = () => {
+        firstPersonLookRef.pitchInput = 0;
+      };
+
       if (inputBlockedRef.current) {
+        releaseLookPitch();
         resetRepeatInputState();
         return;
       }
       if (isCombatInputGateActive(time)) {
+        releaseLookPitch();
         resetRepeatInputState();
         return;
       }
@@ -5209,21 +5217,28 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         currentSave?.playerStats.hp !== undefined &&
         currentSave.playerStats.hp <= 0
       ) {
+        releaseLookPitch();
         resetRepeatInputState();
         return;
       }
+      if (!firstPersonActiveRef.current) releaseLookPitch();
 
       const keys = keysDownRef.current;
 
       // First-person exploration replaces the camera-relative grid mapping
-      // with crawler semantics: forward/back along the facing, A/D as held
-      // 45° turns, Q/E strafes. Same chord buffer, cadence normalization,
-      // stealth throttle, and enemy-nearby repeat gate as the isometric path.
+      // with crawler semantics: W/S forward/back along the facing, A/D as
+      // held 45° turns (Shift+A/D strafes), Q/E as camera look pitch. Same
+      // chord buffer, cadence normalization, stealth throttle, and
+      // enemy-nearby repeat gate as the isometric path.
       if (firstPersonActiveRef.current) {
         const intent = resolveHeldFirstPersonIntent(
           keys,
           consumedMovementTapKeysRef.current,
         );
+        // Pitch is a camera affordance, not a world command: it applies while
+        // held even with no movement pressed and never enters the repeat gate.
+        firstPersonLookRef.pitchInput = intent.pitch;
+
         const isHolding =
           intent.forward !== 0 ||
           intent.turn !== 0 ||
@@ -5241,6 +5256,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           intent.strafe,
         );
         const stepping = !intent.wait && (sx !== 0 || sz !== 0);
+        const turning = !intent.wait && intent.turn !== 0;
         const stealthSpeedMultiplier = isPlayerStealthActive(currentSave)
           ? resolveMovementHearingSettings(getRuntimeGamePackage())
               .stealth_speed_multiplier
@@ -5250,10 +5266,6 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           sx,
           sz,
         );
-        const repeatIntervalMs =
-          intent.turn !== 0
-            ? Math.max(stepping ? stepIntervalMs : 0, FIRST_PERSON_TURN_REPEAT_MS)
-            : stepIntervalMs;
         const signature = `${intent.forward}:${intent.turn}:${intent.strafe}:${
           intent.wait ? 1 : 0
         }`;
@@ -5268,11 +5280,25 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           }
         }
 
-        const fireTick = () => {
+        // Turning and stepping are dispatched separately so each can own its
+        // cadence. A turn only rotates; the step that follows resolves against
+        // whatever facing is current by then.
+        const fireTurn = () => {
+          handleFirstPersonTickRef.current?.({
+            forward: 0,
+            turn: intent.turn,
+            strafe: 0,
+          });
+        };
+        const fireStepOrWait = () => {
           if (intent.wait) {
             if (waitRef.current) waitRef.current();
-          } else {
-            handleFirstPersonTickRef.current?.(intent);
+          } else if (stepping) {
+            handleFirstPersonTickRef.current?.({
+              forward: intent.forward,
+              turn: 0,
+              strafe: intent.strafe,
+            });
           }
         };
 
@@ -5282,30 +5308,39 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           state.wait = intent.wait;
           state.nextTick =
             time + MOVEMENT_REPEAT_START_MS / stealthSpeedMultiplier;
-          fireTick();
+          // A 45° turn is discrete: one press must produce exactly one turn,
+          // so auto-repeat waits well past the length of an ordinary keypress
+          // before a held key starts rotating again.
+          state.nextTurnTick = time + FIRST_PERSON_TURN_HOLD_START_MS;
+          if (turning) fireTurn();
+          fireStepOrWait();
         } else if (state.fpSignature !== signature) {
-          // A newly added turn responds instantly (turn only — no step, so a
-          // chord change can never lunge an extra fine step), everything else
-          // resumes at the held cadence like the isometric chord rule.
-          const turnJustAdded =
-            intent.turn !== 0 && state.fpSignature.split(":")[1] === "0";
+          // Changing the held turn (adding one, or reversing direction)
+          // answers immediately and restarts the hold delay. Steps resume at
+          // the normal cadence without spending an extra immediate step,
+          // matching the isometric chord rule.
+          const previousTurn = state.fpSignature.split(":")[1];
+          const turnChanged = turning && previousTurn !== String(intent.turn);
           state.fpSignature = signature;
           state.wait = intent.wait;
-          state.nextTick = time + repeatIntervalMs;
-          if (turnJustAdded && !intent.wait) {
-            handleFirstPersonTickRef.current?.({
-              forward: 0,
-              turn: intent.turn,
-              strafe: 0,
-            });
+          state.nextTick = time + stepIntervalMs;
+          if (turnChanged) {
+            fireTurn();
+            state.nextTurnTick = time + FIRST_PERSON_TURN_HOLD_START_MS;
           }
         } else {
           const enemyNearby = isEnemyNearbyRef.current
             ? isEnemyNearbyRef.current()
             : false;
-          if (!enemyNearby && time >= state.nextTick) {
-            state.nextTick = time + repeatIntervalMs;
-            fireTick();
+          if (!enemyNearby) {
+            if (turning && time >= state.nextTurnTick) {
+              state.nextTurnTick = time + FIRST_PERSON_TURN_REPEAT_MS;
+              fireTurn();
+            }
+            if ((stepping || intent.wait) && time >= state.nextTick) {
+              state.nextTick = time + stepIntervalMs;
+              fireStepOrWait();
+            }
           }
         }
         return;
@@ -10514,6 +10549,8 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       data-active-dialogue={activeDialogueId || ""}
       data-active-map={activeMap.id}
       data-player-cell={`${saveData.player.cell?.[0] ?? 0},${saveData.player.cell?.[1] ?? 0}`}
+      data-player-facing={`${saveData.player.facing?.[0] ?? 0},${saveData.player.facing?.[1] ?? -1}`}
+      data-view-mode={firstPersonActive ? "first_person" : "isometric"}
       data-player-energy={String(saveData.playerStats.energy || 0)}
       data-current-intercessor-id={currentIntercessor?.id || ""}
       data-current-intercessor-name={currentIntercessor?.display_name || ""}

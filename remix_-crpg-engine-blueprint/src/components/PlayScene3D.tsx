@@ -6,9 +6,18 @@ import {
   FIRST_PERSON_ATMOSPHERE,
   FIRST_PERSON_EYE_HEIGHT,
   FIRST_PERSON_FOV,
+  FIRST_PERSON_PITCH_RETURN_DAMPING,
+  FIRST_PERSON_PITCH_RISE_DAMPING,
   ISOMETRIC_ATMOSPHERE,
+  resolveFirstPersonPitchTarget,
   type PlayAtmosphereProfile,
 } from "../utils/firstPersonControls";
+
+// Held-look pressure, written by PlayMode's input loop and consumed by the
+// camera rig below. A plain mutable ref (like playerStateRef) keeps a
+// per-frame camera affordance off the React state path entirely: pitching the
+// view must never re-render the play tree or invalidate the world.
+export const firstPersonLookRef = { pitchInput: 0 };
 
 export const ISO_CAMERA_BASE_AZIMUTH = Math.PI / 4;
 
@@ -288,6 +297,7 @@ export function FirstPersonCameraRig({
   });
   const appliedEyeRef = useRef(new THREE.Vector3(Number.NaN, Number.NaN, Number.NaN));
   const appliedLookRef = useRef(new THREE.Vector3(Number.NaN, Number.NaN, Number.NaN));
+  const pitchRef = useRef(0);
 
   const composePose = (delta: number) => {
     // First-person pose: the eye rides the same interpolated position the
@@ -300,11 +310,34 @@ export function FirstPersonCameraRig({
     const nextYaw = yawRef.current + wrapRadians(targetYaw - yawRef.current) * yawAmount;
     yawRef.current =
       Math.abs(wrapRadians(targetYaw - nextYaw)) < 0.0004 ? targetYaw : nextYaw;
+
+    // Held Q/E tilt the look target; releasing drives the input back to 0 and
+    // this same damping returns the view to level. Only the look point moves —
+    // the eye stays put, so pitch cannot be used to peek past geometry.
+    const targetPitch = resolveFirstPersonPitchTarget(
+      firstPersonLookRef.pitchInput,
+    );
+    const pitchDamping =
+      Math.abs(targetPitch) > Math.abs(pitchRef.current)
+        ? FIRST_PERSON_PITCH_RISE_DAMPING
+        : FIRST_PERSON_PITCH_RETURN_DAMPING;
+    pitchRef.current = THREE.MathUtils.damp(
+      pitchRef.current,
+      targetPitch,
+      pitchDamping,
+      delta,
+    );
+    if (Math.abs(pitchRef.current - targetPitch) < 0.0004) {
+      pitchRef.current = targetPitch;
+    }
+    const pitch = pitchRef.current;
+    const horizontalReach = Math.cos(pitch) * FIRST_PERSON_LOOK_DISTANCE;
+
     fpEyeVec.set(eyeX, eyeY, eyeZ);
     fpLookVec.set(
-      eyeX + Math.sin(yawRef.current) * FIRST_PERSON_LOOK_DISTANCE,
-      eyeY,
-      eyeZ + Math.cos(yawRef.current) * FIRST_PERSON_LOOK_DISTANCE,
+      eyeX + Math.sin(yawRef.current) * horizontalReach,
+      eyeY + Math.sin(pitch) * FIRST_PERSON_LOOK_DISTANCE,
+      eyeZ + Math.cos(yawRef.current) * horizontalReach,
     );
 
     // Isometric pose: the same follow/focus math the isometric rig uses,
