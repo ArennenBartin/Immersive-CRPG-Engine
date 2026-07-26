@@ -2,11 +2,15 @@ import assert from "node:assert/strict";
 import {
   FIRST_PERSON_ATMOSPHERE,
   FIRST_PERSON_FACING_RING,
+  FIRST_PERSON_MAX_PITCH_RADIANS,
+  FIRST_PERSON_TURN_HOLD_START_MS,
+  FIRST_PERSON_TURN_REPEAT_MS,
   ISOMETRIC_ATMOSPHERE,
   firstPersonStepVector,
   isFirstPersonExploreActive,
   normalizeFirstPersonFacing,
   resolveAuthoredViewMode,
+  resolveFirstPersonPitchTarget,
   resolveHeldFirstPersonIntent,
   rotateFacing45,
 } from "../src/utils/firstPersonControls";
@@ -78,24 +82,30 @@ assert.deepEqual(normalizeFirstPersonFacing(null), [0, -1], "missing facing defa
 {
   const intent = resolveHeldFirstPersonIntent(new Set(["w", "d"]), new Set());
   assert.deepEqual(
-    { forward: intent.forward, turn: intent.turn, strafe: intent.strafe, wait: intent.wait },
-    { forward: 1, turn: 1, strafe: 0, wait: false },
+    {
+      forward: intent.forward,
+      turn: intent.turn,
+      strafe: intent.strafe,
+      pitch: intent.pitch,
+      wait: intent.wait,
+    },
+    { forward: 1, turn: 1, strafe: 0, pitch: 0, wait: false },
     "W+D holds forward pressure and a clockwise turn",
   );
 }
 {
   const intent = resolveHeldFirstPersonIntent(
-    new Set(["arrowup", "arrowleft", "q"]),
+    new Set(["arrowup", "arrowleft"]),
     new Set(),
   );
   assert.deepEqual(
     { forward: intent.forward, turn: intent.turn, strafe: intent.strafe },
-    { forward: 1, turn: -1, strafe: -1 },
-    "synthesized joystick arrows plus Q resolve to forward, left turn, left strafe",
+    { forward: 1, turn: -1, strafe: 0 },
+    "synthesized joystick arrows resolve to forward plus a left turn",
   );
 }
 {
-  const intent = resolveHeldFirstPersonIntent(new Set(["w", "s", "q", "e"]), new Set());
+  const intent = resolveHeldFirstPersonIntent(new Set(["w", "s"]), new Set());
   assert.deepEqual(
     { forward: intent.forward, turn: intent.turn, strafe: intent.strafe },
     { forward: 0, turn: 0, strafe: 0 },
@@ -106,6 +116,111 @@ assert.deepEqual(normalizeFirstPersonFacing(null), [0, -1], "missing facing defa
   const intent = resolveHeldFirstPersonIntent(new Set(["w", "z"]), new Set(["w"]));
   assert.equal(intent.forward, 0, "consumed tap keys stay inert until release");
   assert.equal(intent.wait, true, "wait aliases still resolve in first person");
+}
+
+// Shift converts the A/D turn into a strafe, keeping lateral movement
+// reachable now that Q/E own the look pitch.
+{
+  const turning = resolveHeldFirstPersonIntent(new Set(["a"]), new Set());
+  assert.deepEqual(
+    { turn: turning.turn, strafe: turning.strafe },
+    { turn: -1, strafe: 0 },
+    "A alone turns left",
+  );
+  const strafing = resolveHeldFirstPersonIntent(new Set(["a", "shift"]), new Set());
+  assert.deepEqual(
+    { turn: strafing.turn, strafe: strafing.strafe },
+    { turn: 0, strafe: -1 },
+    "Shift+A strafes left instead of turning",
+  );
+  const strafingRight = resolveHeldFirstPersonIntent(
+    new Set(["d", "shift", "w"]),
+    new Set(),
+  );
+  assert.deepEqual(
+    {
+      forward: strafingRight.forward,
+      turn: strafingRight.turn,
+      strafe: strafingRight.strafe,
+    },
+    { forward: 1, turn: 0, strafe: 1 },
+    "Shift+W+D walks forward-right without rotating",
+  );
+}
+
+// ── Look pitch (Q/E) ───────────────────────────────────────────────────────
+{
+  assert.equal(
+    resolveHeldFirstPersonIntent(new Set(["q"]), new Set()).pitch,
+    1,
+    "Q looks up while held",
+  );
+  assert.equal(
+    resolveHeldFirstPersonIntent(new Set(["e"]), new Set()).pitch,
+    -1,
+    "E looks down while held",
+  );
+  assert.equal(
+    resolveHeldFirstPersonIntent(new Set(["q", "e"]), new Set()).pitch,
+    0,
+    "holding both cancels to level",
+  );
+  // Releasing the key must leave no residual pitch pressure — the camera rig
+  // damps back to level from a zero target.
+  assert.equal(
+    resolveHeldFirstPersonIntent(new Set(), new Set()).pitch,
+    0,
+    "releasing Q/E returns the pitch input to level",
+  );
+  // Pitch is presentation-only: it must never become movement or turning.
+  const looking = resolveHeldFirstPersonIntent(new Set(["q"]), new Set());
+  assert.deepEqual(
+    { forward: looking.forward, turn: looking.turn, strafe: looking.strafe },
+    { forward: 0, turn: 0, strafe: 0 },
+    "looking up commands no movement, turn, or strafe",
+  );
+
+  assert.equal(
+    resolveFirstPersonPitchTarget(1),
+    FIRST_PERSON_MAX_PITCH_RADIANS,
+    "full up pressure reaches the authored maximum tilt",
+  );
+  assert.equal(
+    resolveFirstPersonPitchTarget(-1),
+    -FIRST_PERSON_MAX_PITCH_RADIANS,
+    "full down pressure reaches the authored maximum tilt",
+  );
+  assert.equal(resolveFirstPersonPitchTarget(0), 0, "no pressure is level");
+  assert.equal(
+    resolveFirstPersonPitchTarget(4),
+    FIRST_PERSON_MAX_PITCH_RADIANS,
+    "pitch pressure clamps and cannot exceed the maximum tilt",
+  );
+  assert.ok(
+    FIRST_PERSON_MAX_PITCH_RADIANS > 0 &&
+      FIRST_PERSON_MAX_PITCH_RADIANS < Math.PI / 2,
+    "max pitch stays short of straight up/down so the horizon never inverts",
+  );
+}
+
+// ── Turn cadence ───────────────────────────────────────────────────────────
+// The bug this guards: reusing the fast movement hold delay for turning let a
+// single ~150 ms keypress fire twice and overshoot by 90°. Auto-repeat must
+// not engage until well past the length of an ordinary tap.
+{
+  const TYPICAL_KEYPRESS_MS = 150;
+  assert.ok(
+    FIRST_PERSON_TURN_HOLD_START_MS > TYPICAL_KEYPRESS_MS * 2,
+    "a held turn must not auto-repeat within the span of an ordinary keypress",
+  );
+  assert.ok(
+    FIRST_PERSON_TURN_HOLD_START_MS > FIRST_PERSON_TURN_REPEAT_MS,
+    "the first repeat waits longer than the steady held cadence",
+  );
+  assert.ok(
+    FIRST_PERSON_TURN_REPEAT_MS >= 120,
+    "sustained turning stays a deliberate beat rather than a spin",
+  );
 }
 
 // ── Step vectors on the fine grid ──────────────────────────────────────────
@@ -184,5 +299,5 @@ assert.ok(
 );
 
 console.log(
-  "First Person contract passed: authored view mode, exploration-only activation, 45° facing ring, crawler intent, fine-grid step vectors, haze fog variant, and atmosphere presets.",
+  "First Person contract passed: authored view mode, exploration-only activation, 45° facing ring, crawler intent, Shift strafe, Q/E look pitch, one-tap-one-turn cadence, fine-grid step vectors, haze fog variant, and atmosphere presets.",
 );
