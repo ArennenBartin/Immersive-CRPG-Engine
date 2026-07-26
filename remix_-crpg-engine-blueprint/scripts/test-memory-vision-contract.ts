@@ -8,6 +8,7 @@ import {
   expandStructuralMemoryAcrossPresentationFootprints,
   fogCellKey,
   resolveStructureFogCompositePolicy,
+  resolvePlayerStructureOcclusionPolicy,
   shouldRenderDarkAdjacentEntity,
 } from "../src/utils/fogOfWar";
 import {
@@ -199,18 +200,18 @@ const rememberedStructure = resolveStructureFogCompositePolicy("explored", true)
 const unknownStructure = resolveStructureFogCompositePolicy("unseen", true);
 assert.deepEqual(
   visibleStructure,
-  { render: true, postFog: false, cameraFaded: true },
-  "a currently visible camera occluder may use the readability fade",
+  { render: true, postFog: false, cameraFaded: false },
+  "currently visible structure remains opaque when it crosses the camera",
 );
 assert.deepEqual(
   rememberedStructure,
-  { render: true, postFog: false, cameraFaded: true },
-  "a remembered camera occluder must fade without changing its memory material",
+  { render: true, postFog: false, cameraFaded: false },
+  "remembered structure remains opaque and keeps its memory material",
 );
 assert.deepEqual(
   unknownStructure,
-  { render: true, postFog: false, cameraFaded: true },
-  "an unknown foreground occluder must fade so it cannot hide the player",
+  { render: true, postFog: false, cameraFaded: false },
+  "unknown foreground structure remains solid black rather than disappearing",
 );
 assert.equal(
   resolveStructureFogCompositePolicy("visible", false).cameraFaded,
@@ -220,7 +221,16 @@ assert.equal(
 assert.equal(
   resolveStructureFogCompositePolicy("explored", false).cameraFaded,
   false,
-  "remembered structure outside the camera corridor must remain fully opaque",
+  "remembered structure must remain fully opaque",
+);
+assert.deepEqual(
+  resolvePlayerStructureOcclusionPolicy(),
+  {
+    renderXrayPass: true,
+    xrayOpacity: 0.78,
+    keepStructuresOpaque: true,
+  },
+  "player readability uses an occluded sprite pass while structures stay opaque",
 );
 
 const visibleMaterial = resolveStaticFogMaterialPolicy("visible");
@@ -440,5 +450,5 @@ assert.deepEqual(
 usePlayStore.getState().resetRun();
 
 console.log(
-  "Memory Vision contract passed: state priority, retained static structure, fog-independent camera fade, flat fog materials, and per-run exploration union/reset.",
+  "Memory Vision contract passed: state priority, opaque static structure, player-only x-ray readability, flat fog materials, and per-run exploration union/reset.",
 );
