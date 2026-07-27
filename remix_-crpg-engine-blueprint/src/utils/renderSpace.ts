@@ -74,29 +74,6 @@ export const logicalCellWorldSize = (
   fineRatio = FINE_PER_MACRO,
 ): number => (gridSpace === "fine" ? 1 / fineRatio : 1);
 
-export const isWorldPointInCameraOcclusionCorridor = (
-  point: readonly [number, number],
-  focus: readonly [number, number],
-  cameraAzimuth: number,
-  maxDistance: number,
-  halfWidth: number,
-): boolean => {
-  const dx = point[0] - focus[0];
-  const dz = point[1] - focus[1];
-  const cameraDirX = Math.cos(cameraAzimuth);
-  const cameraDirZ = Math.sin(cameraAzimuth);
-  const alongCameraRay = dx * cameraDirX + dz * cameraDirZ;
-  const perpendicularDistance = Math.abs(
-    dx * cameraDirZ - dz * cameraDirX,
-  );
-
-  return (
-    alongCameraRay > 0 &&
-    alongCameraRay < maxDistance &&
-    perpendicularDistance < halfWidth
-  );
-};
-
 export const logicalCellToMacro = (
   cell: readonly unknown[],
   gridSpace: RendererGridSpace,

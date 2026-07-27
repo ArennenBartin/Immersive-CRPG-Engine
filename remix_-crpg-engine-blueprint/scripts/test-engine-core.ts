@@ -178,6 +178,7 @@ import {
   createFogLineOfSightBlockers,
   fogCellKey,
   hasFogLineOfSight,
+  resolvePlayerStructureOcclusionPolicy,
   resolveStructureFogCompositePolicy,
 } from "../src/utils/fogOfWar";
 import {
@@ -196,7 +197,6 @@ import {
 import {
   dedupeFineTerrainCellsFor3D,
   fineCellsCoveredByWorldMacroCell,
-  isWorldPointInCameraOcclusionCorridor,
   logicalCellToWorld,
   logicalCoordToWorld,
   worldCoordToLogical,
@@ -349,28 +349,6 @@ console.log("engine-core: 3D render-space adapter");
       logicalCellToWorld([9, -6], "macro", 3)[1] === -6,
     "authored editor coordinates remain one world unit per macro cell",
   );
-  ok(
-    isWorldPointInCameraOcclusionCorridor([2, 0], [0, 0], 0, 7, 1.45) &&
-      !isWorldPointInCameraOcclusionCorridor([-2, 0], [0, 0], 0, 7, 1.45),
-    "wall occlusion includes camera-side cells and excludes cells behind the player",
-  );
-  ok(
-    isWorldPointInCameraOcclusionCorridor(
-      [0, 2],
-      [0, 0],
-      Math.PI / 2,
-      7,
-      1.45,
-    ) &&
-      !isWorldPointInCameraOcclusionCorridor(
-        [0, -2],
-        [0, 0],
-        Math.PI / 2,
-        7,
-        1.45,
-      ),
-    "wall occlusion direction follows quarter-turn camera rotation",
-  );
   const positiveWallFineCells = fineCellsCoveredByWorldMacroCell(1, -2, 3);
   const positiveWallFineKeys = new Set(
     positiveWallFineCells.map((cell) => fogCellKey(cell[0], cell[1])),
@@ -426,14 +404,25 @@ console.log("engine-core: 3D render-space adapter");
       !visibleSolidWall.cameraFaded &&
       visibleFadedWall.render &&
       !visibleFadedWall.postFog &&
-      visibleFadedWall.cameraFaded &&
+      !visibleFadedWall.cameraFaded &&
       exploredWall.render &&
       !exploredWall.postFog &&
-      exploredWall.cameraFaded &&
+      !exploredWall.cameraFaded &&
       unseenWall.render &&
       !unseenWall.postFog &&
-      unseenWall.cameraFaded,
-    "all walls retain one mesh and camera-side walls fade regardless of fog state",
+      !unseenWall.cameraFaded,
+    "all walls retain one opaque mesh regardless of camera or fog state",
+  );
+  const isometricPlayerOcclusion =
+    resolvePlayerStructureOcclusionPolicy(false);
+  const firstPersonPlayerOcclusion =
+    resolvePlayerStructureOcclusionPolicy(true);
+  ok(
+    isometricPlayerOcclusion.renderXrayPass &&
+      !firstPersonPlayerOcclusion.renderXrayPass &&
+      isometricPlayerOcclusion.keepStructuresOpaque &&
+      firstPersonPlayerOcclusion.keepStructuresOpaque,
+    "player x-ray is isometric-only and never changes wall opacity",
   );
   const fineCopies = Array.from({ length: 9 }, (_, index) => ({
     x: index % 3,

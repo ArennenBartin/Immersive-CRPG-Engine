@@ -10716,12 +10716,6 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             showBehaviorIntents={showBehaviorIntents}
             worldDeniedCells={worldDeniedCells}
             showGrid={false}
-            enableOcclusion={
-              visualPreset !== "performance" &&
-              !bottomPanelOpen &&
-              !firstPersonActive
-            }
-            occlusionAzimuth={cameraAzimuth}
             renderCenter={cameraFocusOverride || renderedFocusPos}
             renderRadius={playRenderRadius}
             fogOfWar={fogOfWar}

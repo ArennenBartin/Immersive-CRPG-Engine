@@ -96,6 +96,12 @@ export interface StructureFogCompositePolicy {
   cameraFaded: boolean;
 }
 
+export interface PlayerStructureOcclusionPolicy {
+  renderXrayPass: boolean;
+  xrayOpacity: number;
+  keepStructuresOpaque: boolean;
+}
+
 export interface FogCurtainProfile {
   height: number;
   opacity: number;
@@ -119,19 +125,27 @@ export const resolveFogCurtainProfile = (
     : { height: 0.28, opacity: 0.18, full_height: false };
 };
 
-// Static structure geometry is never removed or promoted into a special
-// post-fog pass. Its material owns visible/explored/unseen darkness, preserving
-// wall topology and ordinary depth behavior. Camera fading is independent of
-// fog state: a remembered or unknown foreground wall must not hide the player
-// simply because the wall itself is dark.
+// Static structure geometry is never removed, faded, or promoted into a
+// special post-fog pass. Its material owns visible/explored/unseen darkness,
+// preserving wall topology and ordinary opaque depth behavior in every camera.
 export const resolveStructureFogCompositePolicy = (
-  state: FogRenderState,
-  cameraOccluded: boolean,
+  _state: FogRenderState,
+  _cameraOccluded: boolean,
 ): StructureFogCompositePolicy => ({
   render: true,
   postFog: false,
-  cameraFaded: cameraOccluded,
+  cameraFaded: false,
 });
+
+// Isometric player readability is handled on the player rather than by
+// changing surrounding architecture. First-person mode never draws the player
+// marker and therefore never uses this presentation pass.
+export const resolvePlayerStructureOcclusionPolicy =
+  (firstPersonView = false): PlayerStructureOcclusionPolicy => ({
+    renderXrayPass: !firstPersonView,
+    xrayOpacity: 0.78,
+    keepStructuresOpaque: true,
+  });
 
 // Rendering consumes the authoritative visibility layers as a strict
 // three-state mask. Turning Fog off reveals static world geometry, while live
