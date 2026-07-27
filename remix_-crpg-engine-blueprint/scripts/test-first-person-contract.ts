@@ -20,6 +20,7 @@ import {
   UNKNOWN_FOG_COLOR,
   resolveStaticFogMaterialPolicy,
 } from "../src/utils/lightRendering";
+import { resolvePlayerStructureOcclusionPolicy } from "../src/utils/fogOfWar";
 
 // ── Authored view mode ─────────────────────────────────────────────────────
 assert.equal(
@@ -251,6 +252,17 @@ assert.deepEqual(
 
 // ── Fog presentation variants ──────────────────────────────────────────────
 {
+  assert.equal(
+    resolvePlayerStructureOcclusionPolicy(true).renderXrayPass,
+    false,
+    "first-person hides the player marker without fading architecture",
+  );
+  assert.equal(
+    resolvePlayerStructureOcclusionPolicy(false).renderXrayPass,
+    true,
+    "isometric view retains the depth-aware player contour",
+  );
+
   const isoUnseen = resolveStaticFogMaterialPolicy("unseen");
   assert.equal(isoUnseen.tint, UNKNOWN_FOG_COLOR, "isometric unseen stays pure black");
   assert.equal(isoUnseen.sceneFog, false, "isometric flat fog ignores scene fog");
