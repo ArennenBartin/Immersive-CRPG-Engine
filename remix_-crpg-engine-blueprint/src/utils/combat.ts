@@ -16,7 +16,7 @@ export const seedCombatRng = (...parts: Array<string | number>): void => {
 export const combatRandom = (): number => combatRng.next();
 
 // Hostiles within this Manhattan distance count as "engaged": they show HP
-// bars and threat rings, the HUD shows the danger panel, movement drops to
+// bars and the danger HUD show the threat, movement drops to
 // step-by-step, and combat music takes over. Authored in MACRO tiles,
 // resolved in fine cells.
 export const THREAT_RADIUS = scaleMacroDistanceToFine(6);

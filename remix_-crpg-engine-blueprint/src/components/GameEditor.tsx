@@ -27,6 +27,10 @@ import {
   DEFAULT_MOVEMENT_HEARING_SETTINGS,
   resolveMovementHearingSettings,
 } from "../engine-core/hearingStealth";
+import {
+  getPlayerModelOptions,
+  resolvePlayerModelObject,
+} from "../data/playerModelAssets";
 
 type Bark = GamePackage["barks"][number];
 
@@ -139,6 +143,22 @@ export function GameEditor() {
   const [tab, setTab] = useState<TabId>("basics");
 
   const settings = (gamePackage.settings || {}) as Record<string, any>;
+  const playerModelOptions = useMemo(
+    () => getPlayerModelOptions(gamePackage),
+    [gamePackage.object_library],
+  );
+  const resolvedPlayerModel = useMemo(
+    () => resolvePlayerModelObject(gamePackage),
+    [gamePackage],
+  );
+  const playerModelSelection = Object.prototype.hasOwnProperty.call(
+    settings,
+    "player_model_id",
+  )
+    ? typeof settings.player_model_id === "string"
+      ? settings.player_model_id
+      : ""
+    : resolvedPlayerModel?.id || "";
   const patchPackage = (updates: Partial<GamePackage>) =>
     setGamePackage({ ...gamePackage, ...updates });
   const patchMetadata = (updates: Partial<GamePackage["metadata"]>) =>
@@ -275,24 +295,34 @@ export function GameEditor() {
 
             <Section
               title="Presentation"
-              hint="How the player sees the world in Play mode. Gameplay, visibility, and combat rules are identical in both views."
+              hint="How the player sees the world in Play mode. Gameplay, visibility, and combat rules are identical in every view."
             >
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                 <Field
                   label="View mode"
-                  hint="First person explores at eye height on the fine grid (W/S step, A/D turn 45°, Shift+A/D strafe, hold Q/E to look up/down) and auto-switches to the tactical top-down camera in combat, targeting, and story scenes."
+                  hint="First person explores at eye height and returns to the tactical camera for combat, targeting, and story. Third person uses locked-behind tank controls (W/S move, A/D turn 45°, Q/E pitch) and keeps that chase view through combat, skills, dialogue, and story."
                 >
                   <select
                     className={inputCls}
-                    value={settings.view_mode === "first_person" ? "first_person" : "isometric"}
+                    value={
+                      settings.view_mode === "first_person" ||
+                      settings.view_mode === "third_person"
+                        ? settings.view_mode
+                        : "isometric"
+                    }
                     onChange={(e) =>
                       updateSettings({
-                        view_mode: e.target.value === "first_person" ? "first_person" : undefined,
+                        view_mode:
+                          e.target.value === "first_person" ||
+                          e.target.value === "third_person"
+                            ? e.target.value
+                            : undefined,
                       })
                     }
                   >
                     <option value="isometric">Isometric (top-down)</option>
                     <option value="first_person">First person</option>
+                    <option value="third_person">Third person (locked chase)</option>
                   </select>
                 </Field>
               </div>
@@ -333,6 +363,27 @@ export function GameEditor() {
 
             <Section title="Appearance">
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <Field
+                  label="Player 3D model"
+                  hint="Animated GLB, GLTF, and FBX assets imported through Models are supported. The sprite remains the loading and 2D fallback."
+                >
+                  <select
+                    className={inputCls}
+                    value={playerModelSelection}
+                    onChange={(e) =>
+                      updateSettings({
+                        player_model_id: e.target.value || null,
+                      })
+                    }
+                  >
+                    <option value="">-- Sprite only --</option>
+                    {playerModelOptions.map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {model.display_name || model.id}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
                 <Field label="Player sprite">
                   <select
                     className={inputCls}

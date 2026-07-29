@@ -179,7 +179,7 @@ Draw order per frame: floor/wall tiles (`cell.object_id` → `tile_sprite_id`, e
 - **Per turn:** move one cell, basic Act attack, use a skill, or Wait. Party followers take turns; enemies use core-owned chase + attack AI via `enemy_turn`.
 - **Damage model:** melee attacks and skill damage now resolve in `engine-core` (`attack - defense`, min 1 for melee; payload + half attack - defense for skills; 10% crit at 1.5x), using the deterministic combat RNG stream rather than ambient `Math.random`.
 - **Resources/reactions:** AP-style one-action turns + MP for skills; energy gates exploration actions. Successful movement, ground-item pickup, door opening, container unlock/open, out-of-combat melee attacks, and out-of-combat player skill casts spend energy through the v1 core adapter. Combat movement away from an adjacent hostile can trigger a core opportunity attack.
-- **Feedback:** floating damage/heal numbers, hit flashes, threat rings, active-turn rings, HP bars, danger HUD, combat music/screen tint (all via `fxStore` + `GameRenderer2D`).
+- **Feedback:** floating damage/heal numbers, hit flashes, HP bars, danger HUD, combat music/screen tint (all via `fxStore` + `GameRenderer2D`). Character foot rings have been removed.
 - **Outcome:** XP awarded on enemy defeat, level-up prompts, persistent death/hidden state.
 
 ---

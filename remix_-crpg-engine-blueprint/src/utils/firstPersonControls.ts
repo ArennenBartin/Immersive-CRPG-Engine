@@ -11,12 +11,16 @@
 // to the tactical isometric camera; first person is an exploration-only
 // stance.
 
-export type AuthoredViewMode = "isometric" | "first_person";
+export type AuthoredViewMode = "isometric" | "first_person" | "third_person";
 
 export const resolveAuthoredViewMode = (
   settings: Record<string, unknown> | undefined | null,
-): AuthoredViewMode =>
-  settings?.view_mode === "first_person" ? "first_person" : "isometric";
+): AuthoredViewMode => {
+  const authored = settings?.view_mode;
+  return authored === "first_person" || authored === "third_person"
+    ? authored
+    : "isometric";
+};
 
 // Exploration is the only camera mode that stays in first person. Every other
 // play camera (tactical combat/targeting, story panels) needs the top-down

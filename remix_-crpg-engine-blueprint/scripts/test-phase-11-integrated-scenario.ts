@@ -88,6 +88,11 @@ assert.deepEqual(
 assert.deepEqual(repeatedFixture.cells, cells);
 assert.equal(gamePackage.metadata.start_map_id, ids.hubMapId);
 assert.equal(gamePackage.metadata.start_spawn_id, ids.hubSpawnId);
+assert.equal(
+  gamePackage.settings.view_mode,
+  "third_person",
+  "fresh and explicitly installed Phase 11 fixtures select the locked third-person view",
+);
 assert.ok(gamePackage.maps.some((map) => map.id === ids.hubMapId));
 
 for (const generated of generation.maps) {

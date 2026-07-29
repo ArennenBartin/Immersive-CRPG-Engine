@@ -12,6 +12,26 @@ import {
   resolveFirstPersonPitchTarget,
   type PlayAtmosphereProfile,
 } from "../utils/firstPersonControls";
+import {
+  THIRD_PERSON_CHASE_DISTANCE,
+  THIRD_PERSON_CHASE_HEIGHT,
+  THIRD_PERSON_FOCUS_HEIGHT,
+  THIRD_PERSON_FOLLOW_DAMPING,
+  THIRD_PERSON_FOV,
+  THIRD_PERSON_KEY_PITCH_RATE_RADIANS_PER_SECOND,
+  THIRD_PERSON_LOOK_AHEAD,
+  THIRD_PERSON_YAW_DAMPING,
+  clampThirdPersonPitch,
+  facingToThirdPersonYaw,
+} from "../utils/thirdPersonControls";
+
+export {
+  THIRD_PERSON_CHASE_DISTANCE,
+  THIRD_PERSON_CHASE_HEIGHT,
+  THIRD_PERSON_FOCUS_HEIGHT,
+  THIRD_PERSON_LOOK_AHEAD,
+  THIRD_PERSON_FOV,
+} from "../utils/thirdPersonControls";
 
 // Held-look pressure, written by PlayMode's input loop and consumed by the
 // camera rig below. A plain mutable ref (like playerStateRef) keeps a
@@ -425,6 +445,504 @@ export function FirstPersonCameraRig({
         camera.fov = pose.fov;
         camera.updateProjectionMatrix();
       }
+    }
+  });
+
+  return null;
+}
+
+// ── Locked third person ────────────────────────────────────────────────────
+// Unlike the authored first-person camera, this rig deliberately has no
+// PlayCameraMode or focusOverride input. Once selected it owns a centered
+// chase pose for exploration, targeting, combat, and story presentation alike.
+// Input is exchanged through a mutable snapshot so mouse/touch look never
+// schedules a React render.
+
+export const THIRD_PERSON_DEFAULT_PITCH = 0;
+
+const THIRD_PERSON_PITCH_DAMPING = 12;
+const THIRD_PERSON_COLLISION_DAMPING = 24;
+const THIRD_PERSON_COLLISION_RELEASE_DAMPING = 4.6;
+const THIRD_PERSON_CAMERA_RADIUS = 0.16;
+const THIRD_PERSON_COLLISION_CLEARANCE = 0.12;
+const THIRD_PERSON_MIN_BOOM_DISTANCE = 0.62;
+const THIRD_PERSON_FOLLOW_SNAP_DISTANCE = 12;
+
+export type ThirdPersonLookInputSnapshot = {
+  /**
+   * Absolute requested chase heading. Null asks a newly mounted rig to adopt
+   * its subject facing; the rig writes the live target back after mounting.
+   */
+  yaw: number | null;
+  /** Absolute requested presentation pitch in radians. */
+  pitch: number;
+  /** Accumulated radians since the last camera frame. */
+  yawDelta: number;
+  /** Accumulated radians since the last camera frame. */
+  pitchDelta: number;
+  /** Held keyboard/touch pressure in the inclusive -1..1 range. */
+  pitchInput: number;
+  /** Latest damped camera heading, readable by actor/aim presentation. */
+  visualYaw: number;
+  /** Latest damped camera pitch, readable by reticle projection. */
+  visualPitch: number;
+  ready: boolean;
+  resetToken: number;
+};
+
+export const thirdPersonLookRef: ThirdPersonLookInputSnapshot = {
+  yaw: null,
+  pitch: THIRD_PERSON_DEFAULT_PITCH,
+  yawDelta: 0,
+  pitchDelta: 0,
+  pitchInput: 0,
+  visualYaw: 0,
+  visualPitch: THIRD_PERSON_DEFAULT_PITCH,
+  ready: false,
+  resetToken: 0,
+};
+
+/** Queue pointer/touch look without putting high-frequency input in React. */
+export const queueThirdPersonLookDelta = (
+  yawDelta: number,
+  pitchDelta: number,
+) => {
+  if (Number.isFinite(yawDelta)) thirdPersonLookRef.yawDelta += yawDelta;
+  if (Number.isFinite(pitchDelta)) thirdPersonLookRef.pitchDelta += pitchDelta;
+};
+
+export const setThirdPersonPitchInput = (pitchInput: number) => {
+  thirdPersonLookRef.pitchInput = THREE.MathUtils.clamp(
+    Number.isFinite(pitchInput) ? pitchInput : 0,
+    -1,
+    1,
+  );
+};
+
+/** Re-center a mounted rig behind its authoritative subject on the next frame. */
+export const requestThirdPersonLookReset = () => {
+  thirdPersonLookRef.yaw = null;
+  thirdPersonLookRef.pitch = THIRD_PERSON_DEFAULT_PITCH;
+  thirdPersonLookRef.yawDelta = 0;
+  thirdPersonLookRef.pitchDelta = 0;
+  thirdPersonLookRef.pitchInput = 0;
+  thirdPersonLookRef.resetToken += 1;
+};
+
+/**
+ * A static, full-height camera blocker expressed as a world-space AABB.
+ * Supplying minY/maxY is optional; omitted vertical bounds intentionally
+ * behave as an infinitely tall wall. Actors, items, and effects should never
+ * be included in this list.
+ */
+export type ThirdPersonCameraBlocker = Readonly<{
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+  minY?: number;
+  maxY?: number;
+}>;
+
+/**
+ * Returns the earliest normalized hit along a focus-to-camera segment.
+ * A return value of 1 means the desired camera pose is unobstructed.
+ */
+const thirdPersonCollisionFraction = (
+  startX: number,
+  startY: number,
+  startZ: number,
+  endX: number,
+  endY: number,
+  endZ: number,
+  blockers: readonly ThirdPersonCameraBlocker[],
+  padding: number,
+) => {
+  const dx = endX - startX;
+  const dy = endY - startY;
+  const dz = endZ - startZ;
+  let closest = 1;
+
+  for (let index = 0; index < blockers.length; index += 1) {
+    const blocker = blockers[index];
+    const minX = Math.min(blocker.minX, blocker.maxX) - padding;
+    const maxX = Math.max(blocker.minX, blocker.maxX) + padding;
+    const minY =
+      blocker.minY === undefined
+        ? Number.NEGATIVE_INFINITY
+        : Math.min(blocker.minY, blocker.maxY ?? blocker.minY) - padding;
+    const maxY =
+      blocker.maxY === undefined
+        ? Number.POSITIVE_INFINITY
+        : Math.max(blocker.minY ?? blocker.maxY, blocker.maxY) + padding;
+    const minZ = Math.min(blocker.minZ, blocker.maxZ) - padding;
+    const maxZ = Math.max(blocker.minZ, blocker.maxZ) + padding;
+    let enter = 0;
+    let exit = closest;
+
+    if (Math.abs(dx) < 0.000001) {
+      if (startX < minX || startX > maxX) continue;
+    } else {
+      let near = (minX - startX) / dx;
+      let far = (maxX - startX) / dx;
+      if (near > far) {
+        const swap = near;
+        near = far;
+        far = swap;
+      }
+      enter = Math.max(enter, near);
+      exit = Math.min(exit, far);
+      if (enter > exit) continue;
+    }
+
+    if (Math.abs(dy) < 0.000001) {
+      if (startY < minY || startY > maxY) continue;
+    } else {
+      let near = (minY - startY) / dy;
+      let far = (maxY - startY) / dy;
+      if (near > far) {
+        const swap = near;
+        near = far;
+        far = swap;
+      }
+      enter = Math.max(enter, near);
+      exit = Math.min(exit, far);
+      if (enter > exit) continue;
+    }
+
+    if (Math.abs(dz) < 0.000001) {
+      if (startZ < minZ || startZ > maxZ) continue;
+    } else {
+      let near = (minZ - startZ) / dz;
+      let far = (maxZ - startZ) / dz;
+      if (near > far) {
+        const swap = near;
+        near = far;
+        far = swap;
+      }
+      enter = Math.max(enter, near);
+      exit = Math.min(exit, far);
+      if (enter > exit) continue;
+    }
+
+    if (exit >= 0 && enter <= 1) {
+      closest = Math.min(closest, Math.max(0, enter));
+    }
+  }
+
+  return closest;
+};
+
+export const resolveThirdPersonCameraCollisionFraction = (
+  start: readonly [number, number, number],
+  end: readonly [number, number, number],
+  blockers: readonly ThirdPersonCameraBlocker[],
+  padding = THIRD_PERSON_CAMERA_RADIUS,
+) =>
+  thirdPersonCollisionFraction(
+    start[0],
+    start[1],
+    start[2],
+    end[0],
+    end[1],
+    end[2],
+    blockers,
+    padding,
+  );
+
+export const getInitialThirdPersonCameraPosition = (
+  subjectPos: readonly [number, number],
+  subjectFacing: readonly [number, number],
+  subjectWorldY = 0,
+  pitch = THIRD_PERSON_DEFAULT_PITCH,
+): [number, number, number] => {
+  const yaw = facingToThirdPersonYaw(subjectFacing);
+  const clampedPitch = clampThirdPersonPitch(pitch);
+  const horizontalDistance =
+    Math.cos(clampedPitch) * THIRD_PERSON_CHASE_DISTANCE;
+  return [
+    subjectPos[0] - Math.sin(yaw) * horizontalDistance,
+    subjectWorldY +
+      THIRD_PERSON_CHASE_HEIGHT +
+      Math.sin(clampedPitch) * THIRD_PERSON_CHASE_DISTANCE,
+    subjectPos[1] - Math.cos(yaw) * horizontalDistance,
+  ];
+};
+
+export function ThirdPersonCameraRig({
+  subjectPos,
+  subjectFacing,
+  subjectWorldY = 0,
+  blockers = [],
+  onVisualYawChange,
+}: {
+  subjectPos: readonly [number, number];
+  subjectFacing: readonly [number, number];
+  subjectWorldY?: number;
+  blockers?: readonly ThirdPersonCameraBlocker[];
+  /**
+   * Optional frame-path output for a rendered actor orientation. Consumers
+   * should write this to a mutable render ref, not call React setState.
+   */
+  onVisualYawChange?: (visualYaw: number) => void;
+}) {
+  const { camera } = useThree();
+  const initialYaw = facingToThirdPersonYaw(subjectFacing);
+  const subjectRef = useRef(
+    new THREE.Vector3(subjectPos[0], subjectWorldY, subjectPos[1]),
+  );
+  const lookRef = useRef(
+    new THREE.Vector3(
+      subjectPos[0] + subjectFacing[0] * THIRD_PERSON_LOOK_AHEAD,
+      subjectWorldY + THIRD_PERSON_FOCUS_HEIGHT,
+      subjectPos[1] + subjectFacing[1] * THIRD_PERSON_LOOK_AHEAD,
+    ),
+  );
+  const desiredEyeRef = useRef(new THREE.Vector3());
+  const resolvedEyeRef = useRef(new THREE.Vector3());
+  const appliedEyeRef = useRef(
+    new THREE.Vector3(Number.NaN, Number.NaN, Number.NaN),
+  );
+  const appliedLookRef = useRef(
+    new THREE.Vector3(Number.NaN, Number.NaN, Number.NaN),
+  );
+  const yawRef = useRef(initialYaw);
+  const targetYawRef = useRef(initialYaw);
+  const lastFacingYawRef = useRef(initialYaw);
+  const pitchRef = useRef(THIRD_PERSON_DEFAULT_PITCH);
+  const targetPitchRef = useRef(THIRD_PERSON_DEFAULT_PITCH);
+  const boomDistanceRef = useRef(THIRD_PERSON_CHASE_DISTANCE);
+  const resetTokenRef = useRef(thirdPersonLookRef.resetToken);
+  const publishedYawRef = useRef(Number.NaN);
+  const onVisualYawChangeRef = useRef(onVisualYawChange);
+  onVisualYawChangeRef.current = onVisualYawChange;
+
+  const composeThirdPersonPose = (delta: number, snap = false) => {
+    const facingYaw = facingToThirdPersonYaw(subjectFacing);
+    const facingChanged =
+      Math.abs(wrapRadians(facingYaw - lastFacingYawRef.current)) > 0.0001;
+    if (facingChanged) {
+      // A keyboard/tank turn is a full 45° mismatch and re-centers the chase
+      // heading. A facing change caused by mouse-yaw quantization is already
+      // within half a step, so its continuous visual yaw is preserved.
+      if (
+        Math.abs(wrapRadians(facingYaw - targetYawRef.current)) >
+        Math.PI / 8 + 0.0001
+      ) {
+        targetYawRef.current += wrapRadians(
+          facingYaw - targetYawRef.current,
+        );
+        thirdPersonLookRef.yaw = targetYawRef.current;
+      }
+      lastFacingYawRef.current = facingYaw;
+    }
+
+    if (resetTokenRef.current !== thirdPersonLookRef.resetToken) {
+      resetTokenRef.current = thirdPersonLookRef.resetToken;
+      targetYawRef.current = facingYaw;
+      targetPitchRef.current = THIRD_PERSON_DEFAULT_PITCH;
+      yawRef.current = facingYaw;
+      pitchRef.current = THIRD_PERSON_DEFAULT_PITCH;
+      thirdPersonLookRef.yaw = facingYaw;
+      thirdPersonLookRef.pitch = THIRD_PERSON_DEFAULT_PITCH;
+    }
+
+    if (
+      thirdPersonLookRef.yaw !== null &&
+      Number.isFinite(thirdPersonLookRef.yaw)
+    ) {
+      targetYawRef.current = thirdPersonLookRef.yaw;
+    }
+    if (Number.isFinite(thirdPersonLookRef.pitch)) {
+      targetPitchRef.current = clampThirdPersonPitch(
+        thirdPersonLookRef.pitch,
+      );
+    }
+    const yawDelta = thirdPersonLookRef.yawDelta;
+    const pitchDelta = thirdPersonLookRef.pitchDelta;
+    thirdPersonLookRef.yawDelta = 0;
+    thirdPersonLookRef.pitchDelta = 0;
+    if (yawDelta !== 0) targetYawRef.current += yawDelta;
+    targetPitchRef.current = clampThirdPersonPitch(
+      targetPitchRef.current +
+        pitchDelta +
+        thirdPersonLookRef.pitchInput *
+          THIRD_PERSON_KEY_PITCH_RATE_RADIANS_PER_SECOND *
+          delta,
+    );
+    thirdPersonLookRef.yaw = targetYawRef.current;
+    thirdPersonLookRef.pitch = targetPitchRef.current;
+
+    if (snap) {
+      yawRef.current = targetYawRef.current;
+      pitchRef.current = targetPitchRef.current;
+    } else {
+      const yawAmount = 1 - Math.exp(-THIRD_PERSON_YAW_DAMPING * delta);
+      yawRef.current +=
+        wrapRadians(targetYawRef.current - yawRef.current) * yawAmount;
+      pitchRef.current = THREE.MathUtils.damp(
+        pitchRef.current,
+        targetPitchRef.current,
+        THIRD_PERSON_PITCH_DAMPING,
+        delta,
+      );
+    }
+
+    const subject = subjectRef.current;
+    const targetSubjectX = subjectPos[0];
+    const targetSubjectY = subjectWorldY;
+    const targetSubjectZ = subjectPos[1];
+    const subjectDx = subject.x - targetSubjectX;
+    const subjectDy = subject.y - targetSubjectY;
+    const subjectDz = subject.z - targetSubjectZ;
+    const subjectDistanceSq =
+      subjectDx * subjectDx + subjectDy * subjectDy + subjectDz * subjectDz;
+    if (snap || subjectDistanceSq > THIRD_PERSON_FOLLOW_SNAP_DISTANCE ** 2) {
+      subject.set(targetSubjectX, targetSubjectY, targetSubjectZ);
+    } else {
+      subject.x = THREE.MathUtils.damp(
+        subject.x,
+        targetSubjectX,
+        THIRD_PERSON_FOLLOW_DAMPING,
+        delta,
+      );
+      subject.y = THREE.MathUtils.damp(
+        subject.y,
+        targetSubjectY,
+        THIRD_PERSON_FOLLOW_DAMPING,
+        delta,
+      );
+      subject.z = THREE.MathUtils.damp(
+        subject.z,
+        targetSubjectZ,
+        THIRD_PERSON_FOLLOW_DAMPING,
+        delta,
+      );
+    }
+
+    const yaw = yawRef.current;
+    const pitch = pitchRef.current;
+    const forwardX = Math.sin(yaw);
+    const forwardZ = Math.cos(yaw);
+    const look = lookRef.current.set(
+      subject.x + forwardX * THIRD_PERSON_LOOK_AHEAD,
+      subject.y + THIRD_PERSON_FOCUS_HEIGHT,
+      subject.z + forwardZ * THIRD_PERSON_LOOK_AHEAD,
+    );
+    const horizontalDistance =
+      Math.cos(pitch) * THIRD_PERSON_CHASE_DISTANCE;
+    const desiredEye = desiredEyeRef.current.set(
+      subject.x - forwardX * horizontalDistance,
+      subject.y +
+        THIRD_PERSON_CHASE_HEIGHT +
+        Math.sin(pitch) * THIRD_PERSON_CHASE_DISTANCE,
+      subject.z - forwardZ * horizontalDistance,
+    );
+    const fullDx = desiredEye.x - look.x;
+    const fullDy = desiredEye.y - look.y;
+    const fullDz = desiredEye.z - look.z;
+    const fullDistance = Math.sqrt(
+      fullDx * fullDx + fullDy * fullDy + fullDz * fullDz,
+    );
+    const collisionFraction = thirdPersonCollisionFraction(
+      look.x,
+      look.y,
+      look.z,
+      desiredEye.x,
+      desiredEye.y,
+      desiredEye.z,
+      blockers,
+      THIRD_PERSON_CAMERA_RADIUS,
+    );
+    const collisionDistance =
+      collisionFraction < 1
+        ? Math.max(
+            THIRD_PERSON_MIN_BOOM_DISTANCE,
+            fullDistance * collisionFraction -
+              THIRD_PERSON_COLLISION_CLEARANCE,
+          )
+        : fullDistance;
+    if (snap) {
+      boomDistanceRef.current = collisionDistance;
+    } else {
+      boomDistanceRef.current = THREE.MathUtils.damp(
+        boomDistanceRef.current,
+        collisionDistance,
+        collisionDistance < boomDistanceRef.current
+          ? THIRD_PERSON_COLLISION_DAMPING
+          : THIRD_PERSON_COLLISION_RELEASE_DAMPING,
+        delta,
+      );
+    }
+    const boomFraction =
+      fullDistance > 0.0001
+        ? Math.min(1, boomDistanceRef.current / fullDistance)
+        : 0;
+    resolvedEyeRef.current.set(
+      look.x + fullDx * boomFraction,
+      look.y + fullDy * boomFraction,
+      look.z + fullDz * boomFraction,
+    );
+    thirdPersonLookRef.visualYaw = yaw;
+    thirdPersonLookRef.visualPitch = pitch;
+    thirdPersonLookRef.ready = true;
+    if (
+      onVisualYawChangeRef.current &&
+      (!Number.isFinite(publishedYawRef.current) ||
+        Math.abs(wrapRadians(yaw - publishedYawRef.current)) > 0.0005)
+    ) {
+      publishedYawRef.current = yaw;
+      onVisualYawChangeRef.current(yaw);
+    }
+  };
+
+  useEffect(() => {
+    composeThirdPersonPose(1, true);
+    camera.position.copy(resolvedEyeRef.current);
+    camera.lookAt(lookRef.current);
+    appliedEyeRef.current.copy(resolvedEyeRef.current);
+    appliedLookRef.current.copy(lookRef.current);
+    if (camera instanceof THREE.PerspectiveCamera) {
+      camera.fov = THIRD_PERSON_FOV;
+      camera.updateProjectionMatrix();
+    }
+    return () => {
+      thirdPersonLookRef.ready = false;
+      thirdPersonLookRef.yaw = null;
+      thirdPersonLookRef.pitch = THIRD_PERSON_DEFAULT_PITCH;
+      thirdPersonLookRef.yawDelta = 0;
+      thirdPersonLookRef.pitchDelta = 0;
+      thirdPersonLookRef.pitchInput = 0;
+    };
+    // The frame loop consumes live props; this effect only establishes camera
+    // ownership once when the rig mounts.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [camera]);
+
+  useFrame((_, frameDelta) => {
+    const delta = Math.min(frameDelta, 0.05);
+    composeThirdPersonPose(delta);
+    const eye = resolvedEyeRef.current;
+    const look = lookRef.current;
+    const eyeMoved =
+      appliedEyeRef.current.distanceToSquared(eye) >
+      CAMERA_TRANSFORM_UPDATE_EPSILON_SQ;
+    const lookMoved =
+      appliedLookRef.current.distanceToSquared(look) >
+      CAMERA_TRANSFORM_UPDATE_EPSILON_SQ;
+    if (eyeMoved) camera.position.copy(eye);
+    if (eyeMoved || lookMoved) {
+      camera.lookAt(look);
+      appliedEyeRef.current.copy(eye);
+      appliedLookRef.current.copy(look);
+    }
+    if (
+      camera instanceof THREE.PerspectiveCamera &&
+      Math.abs(camera.fov - THIRD_PERSON_FOV) >=
+        CAMERA_FOV_UPDATE_EPSILON
+    ) {
+      camera.fov = THIRD_PERSON_FOV;
+      camera.updateProjectionMatrix();
     }
   });
 

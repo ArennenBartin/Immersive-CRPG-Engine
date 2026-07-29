@@ -3,6 +3,7 @@ import { objectLibraryPresets, spriteLibraryPresets } from "./presets";
 import { createOverworldMap } from "../utils/overworldMap";
 import { createThreefoldMarchMaps } from "../utils/threefoldMarchMap";
 import { ABILITY_KIND_IDS, ABILITY_PAGE_ORDER, DEFAULT_BUILTIN_ABILITIES, DEFAULT_UNLOCKED_ABILITY_IDS, RUNTIME_ACTION_IDS } from "../data/defaultAbilities";
+import { PLAYER_IDLE_FBX_MODEL_ID } from "../data/playerModelAssets";
 import {
   DungeonEncounterProfileSchema,
   DungeonHazardProfileSchema,
@@ -938,10 +939,25 @@ export const ObjectMeshSchema = z.object({
   groups: z.array(z.string()).default([]),
 });
 
+export const ObjectAnimationPlaybackSchema = z.object({
+  clip_name: z.string().optional(),
+  autoplay: z.boolean().default(true),
+  loop: z.enum(["repeat", "once", "ping_pong"]).default("repeat"),
+  time_scale: z.number().finite().positive().default(1),
+});
+
+export const ObjectAnimationSourceSchema = z.object({
+  data_url: z.string(),
+  filename: z.string(),
+  source_type: z.enum(["glb", "gltf", "fbx"]),
+  source_clip_name: z.string().optional(),
+  clip_name: z.string(),
+});
+
 export const ObjectAssetSchema = z.object({
   data_url: z.string(),
   filename: z.string(),
-  source_type: z.enum(["glb", "gltf"]),
+  source_type: z.enum(["glb", "gltf", "fbx"]),
   offset: z.tuple([z.number(), z.number(), z.number()]).default([0, 0, 0]),
   rotation: z.tuple([z.number(), z.number(), z.number()]).default([0, 0, 0]),
   scale: z.tuple([z.number(), z.number(), z.number()]).default([1, 1, 1]),
@@ -949,6 +965,17 @@ export const ObjectAssetSchema = z.object({
   source_center: z.tuple([z.number(), z.number(), z.number()]).default([0, 0, 0]),
   source_bounds: z.tuple([z.number(), z.number(), z.number()]).default([1, 1, 1]),
   material_names: z.array(z.string()).default([]),
+  animation: ObjectAnimationPlaybackSchema.optional(),
+  animation_sources: z.array(ObjectAnimationSourceSchema).optional(),
+  animation_clips: z
+    .array(
+      z.object({
+        name: z.string(),
+        duration: z.number().finite().nonnegative(),
+        tracks: z.number().int().nonnegative().default(0),
+      }),
+    )
+    .optional(),
   stats: z
     .object({
       meshes: z.number().default(0),
@@ -1539,6 +1566,12 @@ export type ObjectPart = z.infer<typeof ObjectPartSchema>;
 export type ObjectMeshFace = z.infer<typeof ObjectMeshFaceSchema>;
 export type ObjectMeshData = z.infer<typeof ObjectMeshSchema>;
 export type ObjectAssetData = z.infer<typeof ObjectAssetSchema>;
+export type ObjectAnimationPlaybackData = z.infer<
+  typeof ObjectAnimationPlaybackSchema
+>;
+export type ObjectAnimationSourceData = z.infer<
+  typeof ObjectAnimationSourceSchema
+>;
 export type ObjectMaterialData = z.infer<typeof ObjectMaterialSchema>;
 export type ObjectDecalData = z.infer<typeof ObjectDecalSchema>;
 export type ObjectReferenceImageData = z.infer<typeof ObjectReferenceImageSchema>;
@@ -1823,6 +1856,7 @@ const createBaseGamePackage = (): GamePackage => ({
     minutes_per_turn: 5,
     fog_los_resolution: "macro",
     player_sprite_id: "generated_player_intercessor_south_idle",
+    player_model_id: PLAYER_IDLE_FBX_MODEL_ID,
     initial_known_skills: [...DEFAULT_UNLOCKED_ABILITY_IDS, "skl_quick_strike", "skl_first_aid", "skl_arc_bolt"],
     starting_party_members: [],
     player_stats: {

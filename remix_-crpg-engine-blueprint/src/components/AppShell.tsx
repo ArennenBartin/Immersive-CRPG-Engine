@@ -27,6 +27,10 @@ import {
   createPhase11IntegratedArchitectureFixture,
   PHASE_11_HUB_MAP_ID,
 } from "../data/qaSuite/integratedArchitectureScenario";
+import {
+  getPlayerModelOptions,
+  resolvePlayerModelObject,
+} from "../data/playerModelAssets";
 
 export function AppShell() {
   const { storageHydrated, mode, setMode, undo, redo, undoStack, redoStack } = useEngineStore();
@@ -296,6 +300,17 @@ function HomePanel() {
   const [isValidatingProject, setIsValidatingProject] = useState(false);
   const [validationReport, setValidationReport] = useState<StudioValidationReport | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
+  const playerModelOptions = getPlayerModelOptions(gamePackage);
+  const resolvedPlayerModel = resolvePlayerModelObject(gamePackage);
+  const hasPlayerModelSelection = Object.prototype.hasOwnProperty.call(
+    gamePackage.settings || {},
+    "player_model_id",
+  );
+  const playerModelSelection = hasPlayerModelSelection
+    ? typeof gamePackage.settings?.player_model_id === "string"
+      ? gamePackage.settings.player_model_id
+      : ""
+    : resolvedPlayerModel?.id || "";
 
   useEffect(() => {
     setMusicTracksText(JSON.stringify(gamePackage.settings?.music_tracks || {}, null, 2));
@@ -780,6 +795,28 @@ function HomePanel() {
                   ))}
                 </select>
               </label>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-sm text-neutral-500 font-medium">
+                Player 3D Model
+              </label>
+              <select
+                className="w-full bg-neutral-900 border border-neutral-700 rounded-md py-2 px-3 text-sm text-neutral-200 outline-none focus:border-neutral-500 transition-colors"
+                value={playerModelSelection}
+                onChange={(e) =>
+                  updateSettings({
+                    player_model_id: e.target.value || null,
+                  })
+                }
+              >
+                <option value="">Sprite only</option>
+                {playerModelOptions.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.display_name || model.id}
+                  </option>
+                ))}
+              </select>
             </div>
 
             <div className="space-y-1.5">

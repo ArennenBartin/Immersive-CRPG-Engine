@@ -174,9 +174,10 @@ fog, memory haze, and transparent wall-fade overlays. Their full sprite is
 shaded from the authoritative illumination at the actor's foot cell, preventing
 screen-space fog above that cell from blacking out only the upper body. Actor
 sprites still depth-test against solid foreground geometry, so a real wall can
-occlude an actor standing behind it. The player's ground ring is an unlit
-tactical overlay above all fog states and therefore remains legible even at
-zero illumination.
+occlude an actor standing behind it. Actor and player ground rings were later
+removed from every presentation; visibility now comes from the character
+silhouette, lighting, and the isometric/third-person x-ray pass rather than a
+circle at the feet.
 
 Each macro terrain or wall mesh aggregates fog state across its exact covered
 fine-cell block: one visible edge makes the whole mesh visible, one discovered
@@ -334,7 +335,7 @@ already present, then open that map in Play.
 - [ ] Stand where a fog or faded-wall boundary crosses the player's billboard.
   The complete sprite should use the light value at the player's feet rather
   than becoming partly black, solid foreground walls should still occlude it,
-  and the cyan player ring must remain visible in complete darkness.
+  and no actor or player foot ring should be rendered.
 - [ ] Approach the shutter and divider while their near faces are inside the
   lamp footprint. With **Fog** on, rotate through all four camera quarters in
   both High and Performance: visible wall caps/faces must retain their material

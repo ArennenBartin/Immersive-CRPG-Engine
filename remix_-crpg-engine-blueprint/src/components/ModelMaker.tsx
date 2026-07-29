@@ -59,6 +59,8 @@ import {
 } from "./ObjectRenderers";
 import {
   exportObjectAsGltf,
+  importAnimationClipFromFbxFile,
+  importObjectFromFbxFile,
   importObjectFromGltfFile,
   type GltfImportMode,
 } from "../utils/gltfModelIO";
@@ -286,6 +288,7 @@ export function ModelMaker() {
   const [showAIModal, setShowAIModal] = useState(false);
   const modelImportInputRef = useRef<HTMLInputElement | null>(null);
   const gltfImportInputRef = useRef<HTMLInputElement | null>(null);
+  const animationImportInputRef = useRef<HTMLInputElement | null>(null);
   const referenceInputRefs = useRef<Record<ReferenceView, HTMLInputElement | null>>({
     front: null,
     side: null,
@@ -611,13 +614,17 @@ export function ModelMaker() {
     }
   };
 
-  const importGltfFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  const importModelAssetFile = async (
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = "";
     if (!file) return;
 
     try {
-      const importedModel = await importObjectFromGltfFile(file, gltfImportMode);
+      const importedModel = file.name.toLowerCase().endsWith(".fbx")
+        ? await importObjectFromFbxFile(file)
+        : await importObjectFromGltfFile(file, gltfImportMode);
       addObject(importedModel);
       setActiveObjId(importedModel.id);
       setSelectionMode("object");
@@ -631,8 +638,45 @@ export function ModelMaker() {
       setSelectedDecalId(null);
       setModelImportError(null);
     } catch (error) {
-      console.error("Failed to import GLB/GLTF", error);
-      setModelImportError("GLB/GLTF import failed");
+      console.error("Failed to import 3D model asset", error);
+      setModelImportError("GLB/GLTF/FBX import failed");
+    }
+  };
+
+  const importFbxAnimationFile = async (
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (!file || !activeObj?.asset) return;
+
+    try {
+      const imported = await importAnimationClipFromFbxFile(file);
+      const existingNames = new Set(
+        (activeObj.asset.animation_clips || []).map((clip) => clip.name),
+      );
+      const baseName = imported.clip.name;
+      let uniqueName = baseName;
+      let suffix = 2;
+      while (existingNames.has(uniqueName)) {
+        uniqueName = `${baseName}_${suffix}`;
+        suffix += 1;
+      }
+
+      updateActiveAsset({
+        animation_sources: [
+          ...(activeObj.asset.animation_sources || []),
+          { ...imported.source, clip_name: uniqueName },
+        ],
+        animation_clips: [
+          ...(activeObj.asset.animation_clips || []),
+          { ...imported.clip, name: uniqueName },
+        ],
+      });
+      setModelImportError(null);
+    } catch (error) {
+      console.error("Failed to import FBX animation", error);
+      setModelImportError("FBX animation import failed");
     }
   };
 
@@ -1755,9 +1799,16 @@ export function ModelMaker() {
           <input
             ref={gltfImportInputRef}
             type="file"
-            accept=".glb,.gltf,model/gltf-binary,model/gltf+json"
+            accept=".glb,.gltf,.fbx,model/gltf-binary,model/gltf+json,application/octet-stream"
             className="hidden"
-            onChange={importGltfFile}
+            onChange={importModelAssetFile}
+          />
+          <input
+            ref={animationImportInputRef}
+            type="file"
+            accept=".fbx,application/octet-stream"
+            className="hidden"
+            onChange={importFbxAnimationFile}
           />
           <button
             aria-label="Import Model JSON"
@@ -1778,10 +1829,10 @@ export function ModelMaker() {
             <option value="mesh">Editable</option>
           </select>
           <button
-            aria-label="Import GLB Or GLTF"
+            aria-label="Import GLB GLTF Or FBX"
             onClick={() => gltfImportInputRef.current?.click()}
             className="p-2 text-neutral-400 hover:bg-neutral-800 hover:text-white rounded-md transition-colors"
-            title="Import GLB/GLTF"
+            title="Import GLB/GLTF/FBX (FBX preserves rigs and animation)"
           >
             <Network className="w-4 h-4" />
           </button>
@@ -2128,7 +2179,13 @@ export function ModelMaker() {
                   disabled={activeIsAsset}
                   onClick={convertActiveObjectToMesh}
                   className="px-2 py-1 rounded-md bg-neutral-800 text-neutral-300 hover:bg-neutral-700 hover:text-white transition-colors flex items-center gap-1 text-xs disabled:opacity-35 disabled:hover:bg-neutral-800 disabled:hover:text-neutral-300"
-                  title={activeIsAsset ? "Use GLB import mode Editable to convert assets" : "Convert parts to editable mesh"}
+                  title={
+                    activeIsAsset
+                      ? activeObj.asset?.source_type === "fbx"
+                        ? "Animated FBX assets preserve their rig and cannot be converted to the static mesh editor"
+                        : "Use GLB import mode Editable to convert assets"
+                      : "Convert parts to editable mesh"
+                  }
                 >
                   <Network className="w-3.5 h-3.5" />
                   {activeIsAsset ? "Asset" : activeHasMesh ? "Rebuild" : "Make Mesh"}
@@ -2262,6 +2319,140 @@ export function ModelMaker() {
                       updateActiveAsset({ rotation });
                     }}
                   />
+                  {(activeObj.asset.animation_clips || []).length > 0 && (
+                    <div className="rounded-md border border-neutral-800 bg-neutral-900 p-2 space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-medium text-neutral-300">
+                          Animation
+                        </span>
+                        <span className="text-neutral-500">
+                          {activeObj.asset.animation_clips?.length || 0} clip
+                          {(activeObj.asset.animation_clips?.length || 0) === 1
+                            ? ""
+                            : "s"}
+                        </span>
+                      </div>
+                      <button
+                        aria-label="Add FBX Animation Clip"
+                        onClick={() => animationImportInputRef.current?.click()}
+                        className="w-full rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-neutral-300 hover:bg-neutral-800 hover:text-white transition-colors"
+                      >
+                        Add FBX animation
+                      </button>
+                      <label className="block space-y-1">
+                        <span className="text-neutral-500">Active clip</span>
+                        <select
+                          aria-label="Asset Animation Clip"
+                          value={
+                            activeObj.asset.animation?.clip_name ||
+                            activeObj.asset.animation_clips?.[0]?.name ||
+                            ""
+                          }
+                          onChange={(event) =>
+                            updateActiveAsset({
+                              animation: {
+                                clip_name: event.target.value || undefined,
+                                autoplay:
+                                  activeObj.asset?.animation?.autoplay ?? true,
+                                loop:
+                                  activeObj.asset?.animation?.loop || "repeat",
+                                time_scale:
+                                  activeObj.asset?.animation?.time_scale || 1,
+                              },
+                            })
+                          }
+                          className="w-full rounded-md border border-neutral-800 bg-neutral-950 px-2 py-1.5 text-neutral-200 outline-none focus:border-neutral-500"
+                        >
+                          {activeObj.asset.animation_clips?.map((clip) => (
+                            <option key={clip.name} value={clip.name}>
+                              {clip.name} ({clip.duration.toFixed(2)}s)
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <label className="space-y-1">
+                          <span className="text-neutral-500">Loop</span>
+                          <select
+                            aria-label="Asset Animation Loop"
+                            value={
+                              activeObj.asset.animation?.loop || "repeat"
+                            }
+                            onChange={(event) =>
+                              updateActiveAsset({
+                                animation: {
+                                  clip_name:
+                                    activeObj.asset?.animation?.clip_name ||
+                                    activeObj.asset?.animation_clips?.[0]?.name,
+                                  autoplay:
+                                    activeObj.asset?.animation?.autoplay ??
+                                    true,
+                                  loop: event.target.value as
+                                    | "repeat"
+                                    | "once"
+                                    | "ping_pong",
+                                  time_scale:
+                                    activeObj.asset?.animation?.time_scale || 1,
+                                },
+                              })
+                            }
+                            className="w-full rounded-md border border-neutral-800 bg-neutral-950 px-2 py-1.5 text-neutral-200 outline-none focus:border-neutral-500"
+                          >
+                            <option value="repeat">Repeat</option>
+                            <option value="once">Once</option>
+                            <option value="ping_pong">Ping-pong</option>
+                          </select>
+                        </label>
+                        <TransformNumberInput
+                          label="Speed"
+                          value={
+                            activeObj.asset.animation?.time_scale || 1
+                          }
+                          min={0.05}
+                          max={4}
+                          step={0.05}
+                          onChange={(value) =>
+                            updateActiveAsset({
+                              animation: {
+                                clip_name:
+                                  activeObj.asset?.animation?.clip_name ||
+                                  activeObj.asset?.animation_clips?.[0]?.name,
+                                autoplay:
+                                  activeObj.asset?.animation?.autoplay ?? true,
+                                loop:
+                                  activeObj.asset?.animation?.loop || "repeat",
+                                time_scale: value,
+                              },
+                            })
+                          }
+                        />
+                      </div>
+                      <label className="flex items-center gap-2 text-neutral-300">
+                        <input
+                          aria-label="Autoplay Asset Animation"
+                          type="checkbox"
+                          checked={
+                            activeObj.asset.animation?.autoplay ?? true
+                          }
+                          onChange={(event) =>
+                            updateActiveAsset({
+                              animation: {
+                                clip_name:
+                                  activeObj.asset?.animation?.clip_name ||
+                                  activeObj.asset?.animation_clips?.[0]?.name,
+                                autoplay: event.target.checked,
+                                loop:
+                                  activeObj.asset?.animation?.loop || "repeat",
+                                time_scale:
+                                  activeObj.asset?.animation?.time_scale || 1,
+                              },
+                            })
+                          }
+                        />
+                        Autoplay in previews and Play
+                      </label>
+                    </div>
+                  )}
                   <div className="grid grid-cols-3 gap-2">
                     <button
                       aria-label="Fit Asset To Tile"

@@ -141,6 +141,7 @@ import {
   sameMacroCoord,
   scaleMacroDistanceToFine,
 } from "../src/engine-core";
+import { createCachedSimulationSnapshotFromV1 } from "../src/engine-core/simulation";
 import {
   createEmptyGamePackage,
   createLegacyEngineTestFixturePackage,
@@ -772,6 +773,37 @@ console.log("engine-core: v1 package/save grid adapter");
     ok(
       simulationSnapshot.map_id === demoMap.id && simulationSnapshot.source.delta_applied,
       "simulation S0 builds a save-aware exact-cell snapshot",
+    );
+    const cachedSimulationSnapshot = createCachedSimulationSnapshotFromV1(
+      simulationPackage,
+      simulationSave,
+      demoMap.id,
+    );
+    ok(
+      cachedSimulationSnapshot ===
+        createCachedSimulationSnapshotFromV1(
+          simulationPackage,
+          { ...simulationSave },
+          demoMap.id,
+        ),
+      "runtime simulation cache reuses semantically identical physical saves",
+    );
+    ok(
+      JSON.stringify(cachedSimulationSnapshot) ===
+        JSON.stringify(simulationSnapshot),
+      "runtime simulation cache preserves the uncached snapshot contract",
+    );
+    ok(
+      cachedSimulationSnapshot !==
+        createCachedSimulationSnapshotFromV1(
+          simulationPackage,
+          {
+            ...simulationSave,
+            clock_minutes: simulationSave.clock_minutes + 1,
+          },
+          demoMap.id,
+        ),
+      "runtime simulation cache invalidates when physical simulation time changes",
     );
     ok(
       simulationCell?.surfaces.some((surface) => surface.kind === "oil") &&
