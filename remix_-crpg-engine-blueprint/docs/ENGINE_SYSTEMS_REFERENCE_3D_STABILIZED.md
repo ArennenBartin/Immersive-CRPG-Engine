@@ -796,8 +796,14 @@ not be imported by active paths.
 
 Play uses:
 
-- a perspective/isometric camera
-- explore, tactical, and story camera profiles
+- three authored presentation modes: isometric, first person, and third person
+- explore, tactical, and story isometric camera profiles
+- an eye-height first-person exploration rig that returns to the tactical
+  camera during combat, targeting, and story
+- a locked-behind third-person chase rig with eight-direction fine-grid tank
+  controls; it remains active during combat, skills, dialogue, and story
+- third-person skills and verbs retain the standard mouse grid hover/click
+  targeting path; there is no camera-center ray or center-reticle target mode
 - quarter-turn rotation
 - adaptive device-pixel ratio
 - performance-oriented Canvas settings

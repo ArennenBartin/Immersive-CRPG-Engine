@@ -175,11 +175,19 @@ import {
   AdaptiveQualityProbe,
   BlackStarLightRig,
   FirstPersonCameraRig,
+  firstPersonLookRef,
   getInitialPlayCameraPosition,
+  getInitialThirdPersonCameraPosition,
   ISO_CAMERA_BASE_AZIMUTH,
   IsometricCameraRig,
   PLAY_CAMERA_PROFILES,
   PlayAtmosphereRig,
+  requestThirdPersonLookReset,
+  setThirdPersonPitchInput,
+  ThirdPersonCameraRig,
+  thirdPersonLookRef,
+  THIRD_PERSON_FOV,
+  type ThirdPersonCameraBlocker,
   type PlayCameraMode,
 } from "./PlayScene3D";
 import { ScreenFX } from "./ScreenFX";
@@ -197,6 +205,8 @@ import {
 import {
   FIRST_PERSON_ATMOSPHERE,
   FIRST_PERSON_FOV,
+  FIRST_PERSON_TURN_HOLD_START_MS,
+  FIRST_PERSON_TURN_REPEAT_MS,
   ISOMETRIC_ATMOSPHERE,
   firstPersonStepVector,
   isFirstPersonExploreActive,
@@ -205,6 +215,22 @@ import {
   resolveHeldFirstPersonIntent,
   rotateFacing45,
 } from "../utils/firstPersonControls";
+import {
+  THIRD_PERSON_PITCH_DRAG_SENSITIVITY,
+  THIRD_PERSON_TOUCH_PITCH_SENSITIVITY,
+  THIRD_PERSON_TOUCH_YAW_SENSITIVITY,
+  THIRD_PERSON_TURN_HOLD_START_MS,
+  THIRD_PERSON_TURN_REPEAT_MS,
+  THIRD_PERSON_YAW_DRAG_SENSITIVITY,
+  applyThirdPersonLookDelta,
+  facingToThirdPersonYaw,
+  isThirdPersonCameraActive,
+  isThirdPersonStructuralCameraCell,
+  resolveHeldThirdPersonIntent,
+  resolveThirdPersonCameraSubject,
+  rotateThirdPersonFacing45,
+  thirdPersonStepVector,
+} from "../utils/thirdPersonControls";
 import { hasAuthoritativePresentLight } from "../utils/lightRendering";
 import {
   ABILITY_BAR_PAGE_SIZE,
@@ -288,7 +314,9 @@ import {
 } from "../utils/doorPlacement";
 import { entityPlacementStateKey } from "../utils/entityState";
 import { resolvePlayModeMap } from "../utils/playModeMap";
-import { logicalCellToWorld } from "../utils/renderSpace";
+import {
+  logicalCellToWorld,
+} from "../utils/renderSpace";
 import { isStableMemoryStructureObject } from "../utils/fogOfWar";
 import {
   Briefcase,
@@ -439,9 +467,6 @@ const MOVEMENT_CHORD_BUFFER_MS = 24;
 // advanced the simulation faster than the rendered actor could catch up and
 // could dispatch thirty full exploration updates per second.
 const MOVEMENT_REPEAT_INTERVAL_MS = 240 / FINE_PER_MACRO;
-// Held 45° turns repeat slower than fine steps: a full about-face should be a
-// deliberate beat, not a spin. Tapping still turns instantly.
-const FIRST_PERSON_TURN_REPEAT_MS = 190;
 const PLAYER_FOOTSTEP_FINE_STEP_INTERVAL = FINE_PER_MACRO;
 // Keep the audio cooldown below the normalized held cadence so footsteps do
 // not silently collapse multiple macro distances into one sound.
@@ -450,10 +475,10 @@ const COMBAT_ACTOR_SWITCH_INPUT_DELAY_MS = 180;
 const EMPTY_ENGINE_EVENTS: ReturnType<typeof usePlayStore.getState>["engineEvents"] = [];
 const EMPTY_EXPLORED_CELL_KEYS: string[] = [];
 const PLAY_RENDER_RADIUS_MACRO: Record<VisualScalePreset, number> = {
-  performance: 14,
-  balanced: 16,
-  high: 18,
-  ultra: 20,
+  performance: 10,
+  balanced: 12,
+  high: 16,
+  ultra: 18,
 };
 const PLAY_FRAME_INTERVAL_MS: Record<VisualScalePreset, number> = {
   performance: 1000 / 30,
@@ -508,6 +533,7 @@ function DemandFrameDriver({
   }, [enabled, intervalMs, invalidate]);
   return null;
 }
+
 const NPC_SIMULATION_RADIUS = scaleMacroDistanceToFine(16);
 const NPC_SCHEDULE_PATH_LIMIT = scaleMacroDistanceToFine(96);
 // Shove distance is authored in macro tiles and resolved cell-by-cell in fine
@@ -671,11 +697,6 @@ const MOVEMENT_COMMAND_KEYS = new Set([
   "d",
   "z",
   ".",
-  // Q/E strafe in first-person exploration. In the isometric view they never
-  // enter keysDownRef (they rotate the camera on keydown instead), so listing
-  // them here only affects gating bookkeeping there.
-  "q",
-  "e",
 ]);
 
 const isMovementCommandKey = (key: string) => MOVEMENT_COMMAND_KEYS.has(key);
@@ -1344,6 +1365,116 @@ const viewerVisibilityInputKeyForSave = (
     taken_items: delta?.taken_items || [],
     dropped_items: delta?.dropped_items || [],
     environment: sensoryEnvironmentSignature(delta, false),
+  });
+};
+
+const combatTacticalInputKeyForSave = (
+  gamePackage: GamePackage,
+  map: MapData,
+  save: PlaySave,
+): string => {
+  const delta = save.map_deltas?.[map.id];
+  const macroCell = (cell: [number, number] | undefined) =>
+    cell
+      ? [
+          Math.floor(cell[0] / FINE_PER_MACRO),
+          Math.floor(cell[1] / FINE_PER_MACRO),
+        ]
+      : null;
+  const entityStates = Object.entries(save.entity_states || {})
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, state]) => [
+      key,
+      macroCell(state.cell),
+      state.facing || null,
+      state.hp ?? null,
+      state.max_hp ?? null,
+      Boolean(state.dead),
+      Boolean(state.hidden),
+      Boolean(state.overwatch),
+      state.statuses || [],
+    ]);
+  const stableEnvironmentFields = Object.fromEntries(
+    Object.entries(delta?.environment_fields || {}).flatMap(([key, fields]) => {
+      const tacticalFields = fields.filter((field) => field.kind !== "sound");
+      return tacticalFields.length ? [[key, tacticalFields]] : [];
+    }),
+  );
+  const stableTileLayers = Object.entries(
+    save.immersive_tile_layers?.[map.id] || {},
+  )
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, layer]) => [
+      key,
+      layer.material_id || null,
+      layer.terrain || null,
+      layer.temperature,
+      layer.ambient_temperature,
+      layer.liquid || null,
+      layer.gas || null,
+      layer.light,
+      layer.occlusion,
+      layer.blocks_movement,
+      layer.blocks_vision,
+      layer.surface_kinds || [],
+      (layer.environment_kinds || []).filter((kind) => kind !== "sound"),
+    ]);
+  return JSON.stringify({
+    map_id: map.id,
+    package_version: gamePackage.metadata.version,
+    in_combat: Boolean(save.in_combat),
+    clock: Math.floor(save.clock_minutes || 0),
+    player: {
+      cell: macroCell(save.player.cell),
+      facing: save.player.facing,
+      hp: save.playerStats.hp,
+      max_hp: save.playerStats.max_hp,
+      statuses: save.actor_statuses?.player || [],
+      overwatch: Boolean(save.flags?.immersive_overwatch_player),
+    },
+    party_members: save.party_members || [],
+    entity_states: entityStates,
+    physical_delta: {
+      opened_doors: delta?.opened_doors || [],
+      moved_objects: delta?.moved_objects || {},
+      carried_objects: delta?.carried_objects || {},
+      removed_objects: delta?.removed_objects || [],
+      simulation_conditions: delta?.simulation_conditions || {},
+      environment_fields: stableEnvironmentFields,
+    },
+    immersive_tile_layers: stableTileLayers,
+  });
+};
+
+const combatSessionInputKeyForSave = (
+  map: MapData,
+  save: PlaySave,
+): string => {
+  const actorStates = map.entity_placements.map((placement, index) => {
+    const key = entityPlacementStateKey(map.id, placement, index);
+    const state =
+      save.entity_states?.[key] ||
+      save.entity_states?.[placement.entity_id] ||
+      {};
+    return [
+      key,
+      state.cell || placement.cell,
+      state.hp ?? null,
+      Boolean(state.dead),
+      Boolean(state.hidden),
+      state.alertness || "oblivious",
+      Number(state.alert_score || 0),
+    ];
+  });
+  return JSON.stringify({
+    map_id: map.id,
+    in_combat: Boolean(save.in_combat),
+    player_cell: save.player.cell,
+    player_hp: save.playerStats.hp,
+    party_members: save.party_members || [],
+    combat_queue: save.combat_queue || [],
+    active_turn_id: save.active_turn_id || "player",
+    actor_states: actorStates,
   });
 };
 
@@ -2027,6 +2158,29 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       maps: baseGamePackage.maps.map((map) => map.id === activeMap.id ? activeMap : map),
     };
   }, [activeMap, baseGamePackage]);
+  const authoredViewMode = resolveAuthoredViewMode(gamePackage.settings);
+  const thirdPersonAuthored = authoredViewMode === "third_person";
+  const controlledActorSnapshot = getControlledActor(saveData, gamePackage);
+  const thirdPersonCameraSubjectSnapshot =
+    resolveThirdPersonCameraSubject(
+      {
+        key: "player",
+        cell: saveData?.player.cell || [0, 0],
+        facing: saveData?.player.facing || [0, -1],
+      },
+      controlledActorSnapshot,
+    );
+  const thirdPersonCameraSubjectKey = thirdPersonAuthored
+    ? thirdPersonCameraSubjectSnapshot.key
+    : "";
+  useEffect(() => {
+    if (!thirdPersonAuthored) return;
+    requestThirdPersonLookReset();
+  }, [
+    activeMap?.id,
+    thirdPersonAuthored,
+    thirdPersonCameraSubjectKey,
+  ]);
   useEffect(() => {
     const current = usePlayStore.getState().saveData;
     if (!current) return;
@@ -2152,6 +2306,8 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   const [saveSlotRevision, setSaveSlotRevision] = useState(0);
   const [targetingSkillId, setTargetingSkillId] = useState<string | null>(null);
   const [hoveredCell, setHoveredCell] = useState<[number, number] | null>(null);
+  const hoveredCellRef = useRef<[number, number] | null>(null);
+  hoveredCellRef.current = hoveredCell;
   const [activeAbilityPageIndex, setActiveAbilityPageIndex] = useState(0);
   // Immersive global-verb target-cell cursor, now launched from the ability bar.
   const [verbTargeting, setVerbTargeting] = useState<{
@@ -2217,6 +2373,13 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   // where cameraMode is derived so the RAF input loop and key handlers read
   // the same answer the camera is using.
   const firstPersonActiveRef = useRef(false);
+  // Third person is authored as a permanent camera owner. It deliberately
+  // remains active through tactical, targeting, dialogue, and story states.
+  const thirdPersonActiveRef = useRef(thirdPersonAuthored);
+  thirdPersonActiveRef.current = thirdPersonAuthored;
+  const thirdPersonVisualYawRef = useRef(
+    facingToThirdPersonYaw(saveData?.player.facing || [0, -1]),
+  );
   const [activeDocumentId, setActiveDocumentId] = useState<string | null>(null);
   const [dialogueArchiveOpen, setDialogueArchiveOpen] = useState(false);
   const [dialogueArchiveFilter, setDialogueArchiveFilter] = useState<
@@ -2703,7 +2866,12 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     | ((intent: { forward: number; turn: number; strafe: number }) => void)
     | null
   >(null);
+  const handleThirdPersonTickRef = useRef<
+    | ((intent: { forward: number; turn: number }) => void)
+    | null
+  >(null);
   const handleActRef = useRef<(() => void) | null>(null);
+  const confirmThirdPersonGridTargetRef = useRef<(() => void) | null>(null);
   const waitRef = useRef<(() => void) | null>(null);
   const toggleStealthRef = useRef<(() => void) | null>(null);
   const stealthMoveReadyAtRef = useRef(0);
@@ -3609,7 +3777,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       );
       if (!skill) return;
 
-      // Require a tap to select first if using touch, or allow direct click if hovered
+      // Every presentation uses the same visible grid selection. Mouse hover
+      // supplies the first selection; touch can still tap once to select and
+      // again to confirm.
       if (hoveredCell?.[0] !== x || hoveredCell?.[1] !== z) {
         setHoveredCell([x, z]);
         return;
@@ -3623,7 +3793,6 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       if (pattern.length === 0) {
         playSfx("warning", { volume: 0.35, cooldownMs: 200 });
         addLog("Invalid target or out of range.");
-        setTargetingSkillId(null);
         return;
       }
 
@@ -3729,7 +3898,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       setTargetingSkillId(skillId);
       playSfx("ui_click", { volume: 0.22, cooldownMs: 120 });
       addLog(
-        `${actor.isPlayer ? "Aiming" : `${actor.name} readies`} ${skill.display_name} — tap a tile, tap again to cast.`,
+        `${actor.isPlayer ? "Aiming" : `${actor.name} readies`} ${skill.display_name} — ${
+          thirdPersonActiveRef.current
+            ? "point at a grid cell and click to cast."
+            : "tap a tile, tap again to cast."
+        }`,
       );
     },
     [gamePackage, addLog, playSfx, presentStealthActionBlock],
@@ -3762,11 +3935,15 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     // First-person holds are compared as one signature (forward:turn:strafe:
     // wait) because the resolved step vector changes as the facing turns.
     fpSignature: "",
+    // Turning runs on its own clock so a held turn stays deliberate without
+    // making a simultaneous forward hold walk at the slow turn cadence.
+    nextTurnTick: 0,
   });
   const resetRepeatInputState = useCallback(() => {
     repeatStateRef.current.active = false;
     repeatStateRef.current.bufferStart = 0;
     repeatStateRef.current.nextTick = 0;
+    repeatStateRef.current.nextTurnTick = 0;
   }, []);
   const releaseCombatInputGateIfReady = useCallback((time = inputNow()) => {
     if (time < combatInputLockUntilRef.current) return false;
@@ -3797,7 +3974,8 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         showSaveMenu ||
         showJournal ||
         successionNoticeOpen ||
-        targetingSkillId ||
+        ((targetingSkillId || verbTargeting) &&
+          !thirdPersonActiveRef.current) ||
         activeDialogueId ||
         activeShopId ||
         activeDocumentId ||
@@ -3815,6 +3993,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     showJournal,
     successionNoticeOpen,
     targetingSkillId,
+    verbTargeting,
     activeDialogueId,
     activeShopId,
     activeDocumentId,
@@ -4288,6 +4467,10 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   // (player, party, and enemies all in one queue). Reinforcements join the
   // back of the order; combat ends when nothing hostile remains within
   // CHASE_RADIUS.
+  const combatSessionInputKey =
+    saveData && activeMap
+      ? combatSessionInputKeyForSave(activeMap, saveData)
+      : "";
   useEffect(() => {
     if (!saveData || !activeMap || activeCutscene) return;
     if (saveData.playerStats.hp <= 0) return;
@@ -4375,9 +4558,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       logCoreExperience(outcome.experience);
     }
   }, [
-    saveData,
     activeMap,
     activeCutscene,
+    combatSessionInputKey,
     commitRuntimeSave,
     gamePackage.entities,
     logCoreExperience,
@@ -5196,11 +5379,21 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     const loop = (time: number) => {
       animId = requestAnimationFrame(loop);
 
+      // Look pitch is held-only. Every path that stops accepting exploration
+      // input releases it so the view springs back to level rather than
+      // staying tilted behind a panel, a death screen, or a combat lock.
+      const releaseLookPitch = () => {
+        firstPersonLookRef.pitchInput = 0;
+        setThirdPersonPitchInput(0);
+      };
+
       if (inputBlockedRef.current) {
+        releaseLookPitch();
         resetRepeatInputState();
         return;
       }
       if (isCombatInputGateActive(time)) {
+        releaseLookPitch();
         resetRepeatInputState();
         return;
       }
@@ -5209,21 +5402,139 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         currentSave?.playerStats.hp !== undefined &&
         currentSave.playerStats.hp <= 0
       ) {
+        releaseLookPitch();
         resetRepeatInputState();
         return;
       }
+      if (!firstPersonActiveRef.current) releaseLookPitch();
 
       const keys = keysDownRef.current;
 
+      if (thirdPersonActiveRef.current) {
+        const intent = resolveHeldThirdPersonIntent(
+          keys,
+          consumedMovementTapKeysRef.current,
+        );
+        setThirdPersonPitchInput(intent.pitch);
+
+        // Targeting pauses simulation movement but deliberately leaves Q/E
+        // and pointer look alive so the center ray can still be aimed.
+        if (targetingSkillIdRef.current || verbTargetingRef.current) {
+          resetRepeatInputState();
+          return;
+        }
+
+        const isHolding =
+          intent.forward !== 0 || intent.turn !== 0 || intent.wait;
+        if (!isHolding) {
+          resetRepeatInputState();
+          return;
+        }
+        const actor = getControlledActor(
+          currentSave,
+          getRuntimeGamePackage(),
+        );
+        if (!actor) {
+          resetRepeatInputState();
+          return;
+        }
+        const [sx, sz] = thirdPersonStepVector(
+          actor.facing,
+          intent.forward,
+        );
+        const stepping = !intent.wait && (sx !== 0 || sz !== 0);
+        const turning = !intent.wait && intent.turn !== 0;
+        const stealthSpeedMultiplier = isPlayerStealthActive(currentSave)
+          ? resolveMovementHearingSettings(getRuntimeGamePackage())
+              .stealth_speed_multiplier
+          : 1;
+        const stepIntervalMs = getNormalizedMovementRepeatIntervalMs(
+          MOVEMENT_REPEAT_INTERVAL_MS / stealthSpeedMultiplier,
+          sx,
+          sz,
+        );
+        const signature = `${intent.forward}:${intent.turn}:0:${
+          intent.wait ? 1 : 0
+        }`;
+        const state = repeatStateRef.current;
+
+        if (!state.active) {
+          if (!state.bufferStart) {
+            state.bufferStart = time;
+            return;
+          }
+          if (time - state.bufferStart < MOVEMENT_CHORD_BUFFER_MS) return;
+        }
+
+        const fireTurn = () => {
+          handleThirdPersonTickRef.current?.({
+            forward: 0,
+            turn: intent.turn,
+          });
+        };
+        const fireStepOrWait = () => {
+          if (intent.wait) {
+            waitRef.current?.();
+          } else if (stepping) {
+            handleThirdPersonTickRef.current?.({
+              forward: intent.forward,
+              turn: 0,
+            });
+          }
+        };
+
+        if (!state.active) {
+          state.active = true;
+          state.fpSignature = signature;
+          state.wait = intent.wait;
+          state.nextTick =
+            time + MOVEMENT_REPEAT_START_MS / stealthSpeedMultiplier;
+          state.nextTurnTick = time + THIRD_PERSON_TURN_HOLD_START_MS;
+          if (turning) fireTurn();
+          fireStepOrWait();
+        } else if (state.fpSignature !== signature) {
+          const previousTurn = state.fpSignature.split(":")[1];
+          const turnChanged = turning && previousTurn !== String(intent.turn);
+          state.fpSignature = signature;
+          state.wait = intent.wait;
+          state.nextTick = time + stepIntervalMs;
+          if (turnChanged) {
+            fireTurn();
+            state.nextTurnTick = time + THIRD_PERSON_TURN_HOLD_START_MS;
+          }
+        } else {
+          const enemyNearby = isEnemyNearbyRef.current
+            ? isEnemyNearbyRef.current()
+            : false;
+          const inCombat = Boolean(currentSave?.in_combat);
+          if (inCombat || !enemyNearby) {
+            if (turning && time >= state.nextTurnTick) {
+              state.nextTurnTick = time + THIRD_PERSON_TURN_REPEAT_MS;
+              fireTurn();
+            }
+            if ((stepping || intent.wait) && time >= state.nextTick) {
+              state.nextTick = time + stepIntervalMs;
+              fireStepOrWait();
+            }
+          }
+        }
+        return;
+      }
+
       // First-person exploration replaces the camera-relative grid mapping
-      // with crawler semantics: forward/back along the facing, A/D as held
-      // 45° turns, Q/E strafes. Same chord buffer, cadence normalization,
-      // stealth throttle, and enemy-nearby repeat gate as the isometric path.
+      // with crawler semantics: W/S forward/back along the facing, A/D as
+      // held 45° turns (Shift+A/D strafes), Q/E as camera look pitch. Same
+      // chord buffer, cadence normalization, stealth throttle, and
+      // enemy-nearby repeat gate as the isometric path.
       if (firstPersonActiveRef.current) {
         const intent = resolveHeldFirstPersonIntent(
           keys,
           consumedMovementTapKeysRef.current,
         );
+        // Pitch is a camera affordance, not a world command: it applies while
+        // held even with no movement pressed and never enters the repeat gate.
+        firstPersonLookRef.pitchInput = intent.pitch;
+
         const isHolding =
           intent.forward !== 0 ||
           intent.turn !== 0 ||
@@ -5241,6 +5552,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           intent.strafe,
         );
         const stepping = !intent.wait && (sx !== 0 || sz !== 0);
+        const turning = !intent.wait && intent.turn !== 0;
         const stealthSpeedMultiplier = isPlayerStealthActive(currentSave)
           ? resolveMovementHearingSettings(getRuntimeGamePackage())
               .stealth_speed_multiplier
@@ -5250,10 +5562,6 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           sx,
           sz,
         );
-        const repeatIntervalMs =
-          intent.turn !== 0
-            ? Math.max(stepping ? stepIntervalMs : 0, FIRST_PERSON_TURN_REPEAT_MS)
-            : stepIntervalMs;
         const signature = `${intent.forward}:${intent.turn}:${intent.strafe}:${
           intent.wait ? 1 : 0
         }`;
@@ -5268,11 +5576,25 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           }
         }
 
-        const fireTick = () => {
+        // Turning and stepping are dispatched separately so each can own its
+        // cadence. A turn only rotates; the step that follows resolves against
+        // whatever facing is current by then.
+        const fireTurn = () => {
+          handleFirstPersonTickRef.current?.({
+            forward: 0,
+            turn: intent.turn,
+            strafe: 0,
+          });
+        };
+        const fireStepOrWait = () => {
           if (intent.wait) {
             if (waitRef.current) waitRef.current();
-          } else {
-            handleFirstPersonTickRef.current?.(intent);
+          } else if (stepping) {
+            handleFirstPersonTickRef.current?.({
+              forward: intent.forward,
+              turn: 0,
+              strafe: intent.strafe,
+            });
           }
         };
 
@@ -5282,30 +5604,39 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           state.wait = intent.wait;
           state.nextTick =
             time + MOVEMENT_REPEAT_START_MS / stealthSpeedMultiplier;
-          fireTick();
+          // A 45° turn is discrete: one press must produce exactly one turn,
+          // so auto-repeat waits well past the length of an ordinary keypress
+          // before a held key starts rotating again.
+          state.nextTurnTick = time + FIRST_PERSON_TURN_HOLD_START_MS;
+          if (turning) fireTurn();
+          fireStepOrWait();
         } else if (state.fpSignature !== signature) {
-          // A newly added turn responds instantly (turn only — no step, so a
-          // chord change can never lunge an extra fine step), everything else
-          // resumes at the held cadence like the isometric chord rule.
-          const turnJustAdded =
-            intent.turn !== 0 && state.fpSignature.split(":")[1] === "0";
+          // Changing the held turn (adding one, or reversing direction)
+          // answers immediately and restarts the hold delay. Steps resume at
+          // the normal cadence without spending an extra immediate step,
+          // matching the isometric chord rule.
+          const previousTurn = state.fpSignature.split(":")[1];
+          const turnChanged = turning && previousTurn !== String(intent.turn);
           state.fpSignature = signature;
           state.wait = intent.wait;
-          state.nextTick = time + repeatIntervalMs;
-          if (turnJustAdded && !intent.wait) {
-            handleFirstPersonTickRef.current?.({
-              forward: 0,
-              turn: intent.turn,
-              strafe: 0,
-            });
+          state.nextTick = time + stepIntervalMs;
+          if (turnChanged) {
+            fireTurn();
+            state.nextTurnTick = time + FIRST_PERSON_TURN_HOLD_START_MS;
           }
         } else {
           const enemyNearby = isEnemyNearbyRef.current
             ? isEnemyNearbyRef.current()
             : false;
-          if (!enemyNearby && time >= state.nextTick) {
-            state.nextTick = time + repeatIntervalMs;
-            fireTick();
+          if (!enemyNearby) {
+            if (turning && time >= state.nextTurnTick) {
+              state.nextTurnTick = time + FIRST_PERSON_TURN_REPEAT_MS;
+              fireTurn();
+            }
+            if ((stepping || intent.wait) && time >= state.nextTick) {
+              state.nextTick = time + stepIntervalMs;
+              fireStepOrWait();
+            }
           }
         }
         return;
@@ -5450,9 +5781,14 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
 
       if (key === "q" || key === "e") {
         if (e.target === document.body) e.preventDefault();
-        // First-person exploration holds Q/E as strafe keys; the isometric
-        // view keeps them out of keysDownRef and quarter-turns on press.
-        if (firstPersonActiveRef.current) keysDownRef.current.add(key);
+        // Immersive views hold Q/E as camera/strafe inputs; isometric keeps
+        // them out of keysDownRef and quarter-turns on press.
+        if (
+          firstPersonActiveRef.current ||
+          thirdPersonActiveRef.current
+        ) {
+          keysDownRef.current.add(key);
+        }
       } else {
         keysDownRef.current.add(key);
       }
@@ -5460,8 +5796,12 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       // single press actions
       if (!e.repeat) {
         // Targeting mode: Esc backs out without spending the turn.
-        if (key === "escape" && targetingSkillIdRef.current) {
+        if (
+          key === "escape" &&
+          (targetingSkillIdRef.current || verbTargetingRef.current)
+        ) {
           setTargetingSkillId(null);
+          setVerbTargeting(null);
           setHoveredCell(null);
           return;
         }
@@ -5474,7 +5814,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         switch (key) {
           case " ":
           case "enter":
-            if (!inputBlockedRef.current) handleActRef.current?.();
+            if (thirdPersonActiveRef.current) {
+              confirmThirdPersonGridTargetRef.current?.();
+            } else if (!inputBlockedRef.current) {
+              handleActRef.current?.();
+            }
             break;
           case "i":
             setShowInventory((prev) => !prev);
@@ -5483,12 +5827,22 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             toggleStealthRef.current?.();
             break;
           case "q":
-            if (firstPersonActiveRef.current) break;
+            if (
+              firstPersonActiveRef.current ||
+              thirdPersonActiveRef.current
+            ) {
+              break;
+            }
             setCameraQuarterTurns((turns) => turns + 1);
             resetRepeatInputState();
             break;
           case "e":
-            if (firstPersonActiveRef.current) break;
+            if (
+              firstPersonActiveRef.current ||
+              thirdPersonActiveRef.current
+            ) {
+              break;
+            }
             setCameraQuarterTurns((turns) => turns - 1);
             resetRepeatInputState();
             break;
@@ -5504,6 +5858,8 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         !consumedMovementTapKeysRef.current.has(key) &&
         !repeatStateRef.current.active &&
         !inputBlockedRef.current &&
+        !targetingSkillIdRef.current &&
+        !verbTargetingRef.current &&
         !isCombatInputGateActive();
 
       // The diagonal-input buffer deliberately waits briefly before the first
@@ -5512,7 +5868,23 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       // commit it here even when the buffer never got a chance to start.
       if (pendingTap) {
         const heldKeys = keysDownRef.current;
-        if (firstPersonActiveRef.current) {
+        if (thirdPersonActiveRef.current) {
+          const intent = resolveHeldThirdPersonIntent(
+            heldKeys,
+            consumedMovementTapKeysRef.current,
+          );
+          keysDownRef.current.forEach((heldKey) => {
+            if (isMovementCommandKey(heldKey)) {
+              consumedMovementTapKeysRef.current.add(heldKey);
+            }
+          });
+          if (intent.wait) {
+            waitRef.current?.();
+          } else if (intent.forward !== 0 || intent.turn !== 0) {
+            handleThirdPersonTickRef.current?.(intent);
+          }
+          resetRepeatInputState();
+        } else if (firstPersonActiveRef.current) {
           const intent = resolveHeldFirstPersonIntent(
             heldKeys,
             consumedMovementTapKeysRef.current,
@@ -5577,6 +5949,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       keysDownRef.current.clear();
       combatInputHeldKeysRef.current.clear();
       consumedMovementTapKeysRef.current.clear();
+      setThirdPersonPitchInput(0);
       resetRepeatInputState();
       releaseCombatInputGateIfReady();
     };
@@ -7496,6 +7869,54 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     [handleMove],
   );
 
+  const updateControlledActorFacing = useCallback(
+    (facing: [number, number]) => {
+      const currentSave = usePlayStore.getState().saveData;
+      if (!currentSave) return;
+      const actor = getControlledActor(currentSave, getRuntimeGamePackage());
+      if (!actor) return;
+      if (actor.isPlayer) {
+        updatePlayer(
+          [currentSave.player.cell[0], currentSave.player.cell[1]],
+          facing,
+        );
+        return;
+      }
+      const currentState = currentSave.entity_states?.[actor.key] || {};
+      usePlayStore.getState().updateEntityState(actor.key, {
+        ...currentState,
+        facing,
+      });
+    },
+    [updatePlayer],
+  );
+
+  // Locked third-person movement is strict tank control. A/D are free
+  // authoritative facing updates; W/S spend the exact existing fine-grid
+  // movement command and preserve that facing through collision and combat.
+  const handleThirdPersonTick = useCallback(
+    (intent: { forward: number; turn: number }) => {
+      const currentSave = usePlayStore.getState().saveData;
+      if (!currentSave || currentSave.playerStats.hp <= 0) return;
+      const actor = getControlledActor(currentSave, getRuntimeGamePackage());
+      if (!actor) return;
+      let facing = actor.facing;
+      if (intent.turn !== 0) {
+        facing = rotateThirdPersonFacing45(facing, intent.turn);
+        updateControlledActorFacing(facing);
+        thirdPersonVisualYawRef.current =
+          facingToThirdPersonYaw(facing);
+      }
+      if (intent.forward !== 0) {
+        const [dx, dz] = thirdPersonStepVector(facing, intent.forward);
+        if (dx !== 0 || dz !== 0) {
+          handleMove(dx, dz, { facingOverride: facing });
+        }
+      }
+    },
+    [handleMove, updateControlledActorFacing],
+  );
+
   useEffect(() => {
     handleMoveRef.current = handleMove;
   }, [handleMove]);
@@ -7503,6 +7924,132 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   useEffect(() => {
     handleFirstPersonTickRef.current = handleFirstPersonTick;
   }, [handleFirstPersonTick]);
+
+  useEffect(() => {
+    handleThirdPersonTickRef.current = handleThirdPersonTick;
+  }, [handleThirdPersonTick]);
+
+  const confirmThirdPersonGridTarget = useCallback(() => {
+    const selectedCell = hoveredCellRef.current;
+    if (verbTargetingRef.current) {
+      if (selectedCell) {
+        confirmVerbTargetRef.current(selectedCell[0], selectedCell[1]);
+      } else {
+        playSfx("warning", { volume: 0.25, cooldownMs: 140 });
+      }
+      return;
+    }
+    if (targetingSkillIdRef.current) {
+      if (selectedCell) {
+        handleCellClick(selectedCell[0], selectedCell[1]);
+      } else {
+        playSfx("warning", { volume: 0.25, cooldownMs: 140 });
+      }
+      return;
+    }
+    if (inputBlockedRef.current) return;
+    handleActRef.current?.();
+  }, [handleCellClick, playSfx]);
+  confirmThirdPersonGridTargetRef.current = confirmThirdPersonGridTarget;
+
+  const thirdPersonLookGestureRef = useRef({
+    active: false,
+    pointerId: -1,
+    pointerType: "",
+    lastX: 0,
+    lastY: 0,
+  });
+
+  const beginThirdPersonLook = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      const isTouch = event.pointerType === "touch";
+      if (!isTouch && event.button !== 2) return;
+      if (
+        event.target instanceof Element &&
+        event.target.closest(
+          "button, input, select, textarea, a, [role='dialog']",
+        )
+      ) {
+        return;
+      }
+      if (isTouch) {
+        const bounds = event.currentTarget.getBoundingClientRect();
+        if (event.clientX < bounds.left + bounds.width / 2) return;
+      }
+      event.preventDefault();
+      event.currentTarget.setPointerCapture(event.pointerId);
+      thirdPersonLookGestureRef.current = {
+        active: true,
+        pointerId: event.pointerId,
+        pointerType: event.pointerType,
+        lastX: event.clientX,
+        lastY: event.clientY,
+      };
+    },
+    [],
+  );
+
+  const moveThirdPersonLook = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      const gesture = thirdPersonLookGestureRef.current;
+      if (!gesture.active || gesture.pointerId !== event.pointerId) return;
+      event.preventDefault();
+      const dx = event.clientX - gesture.lastX;
+      const dy = event.clientY - gesture.lastY;
+      gesture.lastX = event.clientX;
+      gesture.lastY = event.clientY;
+      if (dx === 0 && dy === 0) return;
+      const isTouch = gesture.pointerType === "touch";
+      const nextLook = applyThirdPersonLookDelta(
+        thirdPersonLookRef.yaw ??
+          thirdPersonVisualYawRef.current ??
+          facingToThirdPersonYaw(
+            usePlayStore.getState().saveData?.player.facing || [0, -1],
+          ),
+        thirdPersonLookRef.pitch,
+        dx,
+        dy,
+        isTouch
+          ? THIRD_PERSON_TOUCH_YAW_SENSITIVITY
+          : THIRD_PERSON_YAW_DRAG_SENSITIVITY,
+        isTouch
+          ? THIRD_PERSON_TOUCH_PITCH_SENSITIVITY
+          : THIRD_PERSON_PITCH_DRAG_SENSITIVITY,
+      );
+      thirdPersonLookRef.yaw = nextLook.yaw;
+      thirdPersonLookRef.pitch = nextLook.pitch;
+      thirdPersonVisualYawRef.current = nextLook.yaw;
+      const actor = getControlledActor(
+        usePlayStore.getState().saveData,
+        getRuntimeGamePackage(),
+      );
+      if (
+        !inputBlockedRef.current &&
+        actor &&
+        (actor.facing[0] !== nextLook.authoritativeFacing[0] ||
+          actor.facing[1] !== nextLook.authoritativeFacing[1])
+      ) {
+        updateControlledActorFacing(nextLook.authoritativeFacing);
+      }
+    },
+    [updateControlledActorFacing],
+  );
+
+  const endThirdPersonLook = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      const gesture = thirdPersonLookGestureRef.current;
+      if (!gesture.active || gesture.pointerId !== event.pointerId) return;
+      gesture.active = false;
+      gesture.pointerId = -1;
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+    },
+    [],
+  );
+  const handleThirdPersonVisualYaw = useCallback((yaw: number) => {
+    thirdPersonVisualYawRef.current = yaw;
+  }, []);
 
   const handlePlayfieldCellClick = useCallback(
     (x: number, z: number) => {
@@ -9280,8 +9827,8 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     ];
   }, [activeMap, renderMapDelta, gamePackage.items, campaignLandmarkItems]);
 
-  // Living hostiles in threat range — drives the danger HUD panel and the
-  // engaged feel (HP bars + threat rings render in GameRenderer).
+  // Living hostiles in threat range — drives the danger HUD panel and
+  // engaged HP-bar presentation in GameRenderer.
   const nearbyHostiles = useMemo(
     () =>
       saveData?.in_combat
@@ -9307,14 +9854,112 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     }).map(([x, z]) => ({ x, z }));
   }, [targetingSkillId, saveData, gamePackage]);
 
-  const combatTacticalSnapshot = useMemo((): ImmersiveStage6TacticalSnapshot | null => {
-    if (!activeMap || !saveData?.in_combat) return null;
-    try {
-      return createImmersiveCombatTacticalSnapshotFromV1(gamePackage, saveData, activeMap.id);
-    } catch {
-      return null;
+  const cameraWindowMacroX = Math.floor(
+    thirdPersonCameraSubjectSnapshot.cell[0] / FINE_PER_MACRO,
+  );
+  const cameraWindowMacroZ = Math.floor(
+    thirdPersonCameraSubjectSnapshot.cell[1] / FINE_PER_MACRO,
+  );
+  const thirdPersonStructuralCameraMacros = useMemo(() => {
+    const structuralMacros = new Map<string, number>();
+    if (!thirdPersonAuthored || !activeMap) return structuralMacros;
+    const recordMacro = (fineX: number, fineZ: number, height: number) => {
+      const macroX = Math.floor(fineX / FINE_PER_MACRO);
+      const macroZ = Math.floor(fineZ / FINE_PER_MACRO);
+      const key = `${macroX}:${macroZ}`;
+      structuralMacros.set(
+        key,
+        Math.max(structuralMacros.get(key) || 0, height),
+      );
+    };
+
+    for (const cell of activeMap.cells || []) {
+      if (cell.active === false) continue;
+      const height = getJamEngineVisualHeight(cell);
+      // Camera collision is structural, not movement collision. Flat pits,
+      // liquids, hazards, and other non-walkable floor semantics must not
+      // masquerade as tall walls in the chase-camera cache.
+      if (!isThirdPersonStructuralCameraCell(cell.blocks_los, height)) continue;
+      recordMacro(cell.x, cell.z, Math.max(2.2, height));
     }
-  }, [activeMap, gamePackage, saveData]);
+    for (const placement of effectiveObjectPlacements) {
+      const definition = objectByIdForPlay.get(placement.object_id);
+      if (
+        !definition ||
+        !placementHasCollision(placement, definition) ||
+        !isStableMemoryStructureObject(definition)
+      ) {
+        continue;
+      }
+      for (const [fineX, fineZ] of getPlacementFootprint(
+        placement,
+        definition,
+      )) {
+        recordMacro(fineX, fineZ, 3.6);
+      }
+    }
+    return structuralMacros;
+  }, [
+    activeMap,
+    effectiveObjectPlacements,
+    objectByIdForPlay,
+    thirdPersonAuthored,
+  ]);
+
+  const thirdPersonCameraBlockers = useMemo<
+    readonly ThirdPersonCameraBlocker[]
+  >(() => {
+    if (!thirdPersonAuthored || !activeMap) return [];
+    // The normal chase boom is four cells long. Filtering eighteen cells of
+    // structural geometry made every camera frame test hundreds of blockers
+    // that it could never reach, especially in the large institutional map.
+    const windowRadius = 7;
+    return [...thirdPersonStructuralCameraMacros.entries()].flatMap(
+      ([key, height]) => {
+        const [macroX, macroZ] = key.split(":").map(Number);
+        if (
+          Math.abs(macroX - cameraWindowMacroX) > windowRadius ||
+          Math.abs(macroZ - cameraWindowMacroZ) > windowRadius
+        ) {
+          return [];
+        }
+        return [
+          {
+            minX: macroX - 0.51,
+            maxX: macroX + 0.51,
+            minZ: macroZ - 0.51,
+            maxZ: macroZ + 0.51,
+            minY: -0.4,
+            maxY: Math.max(2.2, height),
+          },
+        ];
+      },
+    );
+  }, [
+    activeMap,
+    cameraWindowMacroX,
+    cameraWindowMacroZ,
+    thirdPersonStructuralCameraMacros,
+    thirdPersonAuthored,
+  ]);
+
+  const combatTacticalInputKey =
+    activeMap && saveData?.in_combat
+      ? combatTacticalInputKeyForSave(gamePackage, activeMap, saveData)
+      : "";
+  const combatTacticalSnapshot =
+    useMemo((): ImmersiveStage6TacticalSnapshot | null => {
+      if (!activeMap || !saveData?.in_combat) return null;
+      try {
+        return createImmersiveCombatTacticalSnapshotFromV1(
+          gamePackage,
+          saveData,
+          activeMap.id,
+        );
+      } catch {
+        return null;
+      }
+    }, [activeMap, combatTacticalInputKey, gamePackage]);
 
   // The perception advance effect owns this snapshot. Rendering merely reads
   // its latest result, avoiding a second full simulation/LOS pass per step.
@@ -9357,19 +10002,38 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     }
   }, [activeMap, gamePackage, viewerVisibilityInputKey]);
 
+  const viewerVisibilityPresentation = useMemo(
+    (): ImmersiveViewerVisibilitySnapshot | null => {
+      if (!viewerVisibilityBase || !activeMap || !saveData) {
+        return viewerVisibilityBase;
+      }
+      const discoveredByKey = new Map<string, [number, number]>(
+        viewerVisibilityBase.discovered.map((cell) => [
+          fineCoordKey(cell[0], cell[1]),
+          [cell[0], cell[1]],
+        ]),
+      );
+      activeExploredCells.forEach((key) => {
+        const cell = parseFineCoordKey(key);
+        if (!Number.isFinite(cell[0]) || !Number.isFinite(cell[1])) return;
+        discoveredByKey.set(key, [cell[0], cell[1]]);
+      });
+      const sortCells = (left: [number, number], right: [number, number]) =>
+        left[0] - right[0] || left[1] - right[1];
+      return {
+        ...viewerVisibilityBase,
+        discovered: [...discoveredByKey.values()].sort(sortCells),
+      };
+    },
+    [activeMap, activeExploredCells, viewerVisibilityBase],
+  );
+
+  // Hearing/debug stimuli change during nearly every combat action, but they
+  // do not change fog, light, memory structure, or actor visibility. Keep the
+  // renderer on the stable presentation object above so a new sound pulse
+  // cannot regroup and re-upload thousands of terrain instances.
   const viewerVisibility = useMemo((): ImmersiveViewerVisibilitySnapshot | null => {
-    if (!viewerVisibilityBase || !activeMap || !saveData) return viewerVisibilityBase;
-    const discoveredByKey = new Map<string, [number, number]>(
-      viewerVisibilityBase.discovered.map((cell) => [
-        fineCoordKey(cell[0], cell[1]),
-        [cell[0], cell[1]],
-      ]),
-    );
-    activeExploredCells.forEach((key) => {
-      const cell = parseFineCoordKey(key);
-      if (!Number.isFinite(cell[0]) || !Number.isFinite(cell[1])) return;
-      discoveredByKey.set(key, [cell[0], cell[1]]);
-    });
+    if (!viewerVisibilityPresentation) return null;
     const sensedByKey = new Map<string, [number, number]>();
     (perceptionSnapshot?.stimuli || [])
       .filter((stimulus) => stimulus.kind === "sound")
@@ -9379,27 +10043,34 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           [stimulus.cell[0], stimulus.cell[1]],
         );
       });
-    const sortCells = (left: [number, number], right: [number, number]) =>
-      left[0] - right[0] || left[1] - right[1];
-    return {
-      ...viewerVisibilityBase,
-      discovered: [...discoveredByKey.values()].sort(sortCells),
-      sensed: [...sensedByKey.values()].sort(sortCells),
-    };
-  }, [activeMap, activeExploredCells, perceptionSnapshot, viewerVisibilityBase]);
+    const sensed = [...sensedByKey.values()].sort(
+      (left, right) => left[0] - right[0] || left[1] - right[1],
+    );
+    if (
+      sensed.length === viewerVisibilityPresentation.sensed.length &&
+      sensed.every(
+        (cell, index) =>
+          cell[0] === viewerVisibilityPresentation.sensed[index]?.[0] &&
+          cell[1] === viewerVisibilityPresentation.sensed[index]?.[1],
+      )
+    ) {
+      return viewerVisibilityPresentation;
+    }
+    return { ...viewerVisibilityPresentation, sensed };
+  }, [perceptionSnapshot, viewerVisibilityPresentation]);
 
   const memoryDebugState = useMemo(() => {
-    if (!activeMap || !viewerVisibility) {
+    if (!showMemoryDebug || !activeMap || !viewerVisibilityPresentation) {
       return { visible: 0, remembered: 0, unknown: 0 };
     }
     const illuminationByKey = new Map(
-      viewerVisibility.illumination.cells.map((entry) => [
+      viewerVisibilityPresentation.illumination.cells.map((entry) => [
         fineCoordKey(entry.cell[0], entry.cell[1]),
         entry.value,
       ]),
     );
     const visible = new Set(
-      viewerVisibility.terrain_visible
+      viewerVisibilityPresentation.terrain_visible
         .filter((cell) =>
           hasAuthoritativePresentLight(
             illuminationByKey.get(fineCoordKey(cell[0], cell[1])) ?? 0,
@@ -9408,17 +10079,20 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         .map((cell) => fineCoordKey(cell[0], cell[1])),
     );
     const lineOfSight = new Set(
-      (viewerVisibility.line_of_sight || viewerVisibility.terrain_visible).map(
+      (
+        viewerVisibilityPresentation.line_of_sight ||
+        viewerVisibilityPresentation.terrain_visible
+      ).map(
         (cell) => fineCoordKey(cell[0], cell[1]),
       ),
     );
     const remembered = new Set(
-      viewerVisibility.discovered
+      viewerVisibilityPresentation.discovered
         .map((cell) => fineCoordKey(cell[0], cell[1]))
         .filter((key) => lineOfSight.has(key) && !visible.has(key)),
     );
     const activeCells = new Set(
-      viewerVisibility.illumination.cells.map((entry) =>
+      viewerVisibilityPresentation.illumination.cells.map((entry) =>
         fineCoordKey(entry.cell[0], entry.cell[1]),
       ),
     );
@@ -9431,18 +10105,18 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       remembered: remembered.size,
       unknown,
     };
-  }, [activeMap, viewerVisibility]);
+  }, [activeMap, showMemoryDebug, viewerVisibilityPresentation]);
 
   const visibleNearbyHostiles = useMemo(() => {
-    if (!viewerVisibility) return [] as NearbyHostile[];
+    if (!viewerVisibilityPresentation) return [] as NearbyHostile[];
     const illuminationByKey = new Map(
-      viewerVisibility.illumination.cells.map((entry) => [
+      viewerVisibilityPresentation.illumination.cells.map((entry) => [
         fineCoordKey(entry.cell[0], entry.cell[1]),
         entry.value,
       ]),
     );
     const actorVisible = new Set(
-      viewerVisibility.currently_visible
+      viewerVisibilityPresentation.currently_visible
         .map((cell) => fineCoordKey(cell[0], cell[1]))
         .filter((key) =>
           hasAuthoritativePresentLight(illuminationByKey.get(key) ?? 0),
@@ -9451,17 +10125,21 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     return nearbyHostiles.filter((hostile) =>
       actorVisible.has(fineCoordKey(hostile.cell[0], hostile.cell[1])),
     );
-  }, [nearbyHostiles, viewerVisibility]);
+  }, [nearbyHostiles, viewerVisibilityPresentation]);
 
   const playerIllumination = useMemo(
     () =>
-      viewerVisibility && saveData
+      viewerVisibilityPresentation && saveData
         ? queryImmersiveIlluminationAtCell(
-            viewerVisibility.illumination,
+            viewerVisibilityPresentation.illumination,
             saveData.player.cell,
           )
         : null,
-    [viewerVisibility, saveData?.player.cell?.[0], saveData?.player.cell?.[1]],
+    [
+      viewerVisibilityPresentation,
+      saveData?.player.cell?.[0],
+      saveData?.player.cell?.[1],
+    ],
   );
 
   const worldStateCell = saveData
@@ -9750,7 +10428,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   const successionSuccessor = successionNotice
     ? intercessorCampaign?.records[successionNotice.successor_intercessor_id]
     : undefined;
-  const controlledActor = getControlledActor(saveData, gamePackage);
+  const controlledActor = controlledActorSnapshot;
   const activeTurnId = inCombat ? (saveData.active_turn_id ?? null) : null;
 
   // The HUD bars and the camera follow whoever is being commanded — the
@@ -10480,32 +11158,63 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         ? "story"
         : "explore";
   // The view mode is authored per game in the editor (Game panel →
-  // Presentation). First person only holds during plain exploration; combat,
-  // targeting, party command, and story beats glide back to tactical
-  // isometric where their UI is readable.
-  const authoredViewMode = resolveAuthoredViewMode(gamePackage.settings);
+  // Presentation). First person retains its tactical fallback. Third person
+  // deliberately keeps permanent camera ownership in every camera mode.
   const firstPersonAuthored = authoredViewMode === "first_person";
   const firstPersonActive = isFirstPersonExploreActive(
     authoredViewMode,
     cameraMode,
   );
+  const thirdPersonActive = isThirdPersonCameraActive(
+    authoredViewMode,
+    cameraMode,
+  );
   firstPersonActiveRef.current = firstPersonActive;
+  thirdPersonActiveRef.current = thirdPersonActive;
   const visualPlayerPos = logicalCellToWorld(
     renderedPlayerPos,
     "fine",
     FINE_PER_MACRO,
   );
+  const thirdPersonSubjectLogical: [number, number] =
+    thirdPersonCameraSubjectSnapshot.cell;
+  const thirdPersonSubjectFacing: [number, number] =
+    thirdPersonCameraSubjectSnapshot.facing;
+  const visualThirdPersonSubject = logicalCellToWorld(
+    thirdPersonSubjectLogical,
+    "fine",
+    FINE_PER_MACRO,
+  );
+  const thirdPersonSubjectCell = getActiveCell(
+    thirdPersonSubjectLogical[0],
+    thirdPersonSubjectLogical[1],
+  );
+  const thirdPersonSubjectWorldY =
+    (thirdPersonSubjectCell?.y || 0) +
+    getJamEngineVisualHeight(thirdPersonSubjectCell) * 0.5 +
+    0.05;
   const cameraFocusLogical = saveMatchesRenderedMap
     ? cameraFocusOverride ?? (commandingParty ? activeFocusPos : null)
     : renderedPlayerPos;
   const visualCameraFocus = cameraFocusLogical
     ? logicalCellToWorld(cameraFocusLogical, "fine", FINE_PER_MACRO)
     : null;
-  const initialCameraPosition = getInitialPlayCameraPosition(
-    visualPlayerPos,
-    cameraAzimuth,
-    cameraMode,
-  );
+  const initialCameraPosition = thirdPersonActive
+    ? getInitialThirdPersonCameraPosition(
+        visualThirdPersonSubject,
+        thirdPersonSubjectFacing,
+        thirdPersonSubjectWorldY,
+      )
+    : getInitialPlayCameraPosition(
+        visualPlayerPos,
+        cameraAzimuth,
+        cameraMode,
+      );
+  const rendererViewPresentation = thirdPersonActive
+    ? "third_person"
+    : firstPersonActive
+      ? "first_person"
+      : "isometric";
 
   return (
     <div
@@ -10514,6 +11223,8 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       data-active-dialogue={activeDialogueId || ""}
       data-active-map={activeMap.id}
       data-player-cell={`${saveData.player.cell?.[0] ?? 0},${saveData.player.cell?.[1] ?? 0}`}
+      data-player-facing={`${saveData.player.facing?.[0] ?? 0},${saveData.player.facing?.[1] ?? -1}`}
+      data-view-mode={rendererViewPresentation}
       data-player-energy={String(saveData.playerStats.energy || 0)}
       data-current-intercessor-id={currentIntercessor?.id || ""}
       data-current-intercessor-name={currentIntercessor?.display_name || ""}
@@ -10537,7 +11248,8 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             showSaveMenu ||
             showJournal ||
             successionNoticeOpen ||
-            targetingSkillId ||
+            ((targetingSkillId || verbTargeting) &&
+              !thirdPersonActive) ||
             activeDialogueId ||
             activeShopId ||
             activeDocumentId ||
@@ -10548,7 +11260,24 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       className="flex flex-col h-full bg-neutral-950 relative overflow-hidden pb-16 sm:pb-0"
       style={{ touchAction: 'none' }}
     >
-      <div className="flex-1 relative min-h-0">
+      <div
+        className="flex-1 relative min-h-0"
+        onContextMenu={
+          thirdPersonActive ? (event) => event.preventDefault() : undefined
+        }
+        onPointerDownCapture={
+          thirdPersonActive ? beginThirdPersonLook : undefined
+        }
+        onPointerMoveCapture={
+          thirdPersonActive ? moveThirdPersonLook : undefined
+        }
+        onPointerUpCapture={
+          thirdPersonActive ? endThirdPersonLook : undefined
+        }
+        onPointerCancelCapture={
+          thirdPersonActive ? endThirdPersonLook : undefined
+        }
+      >
         <Canvas
           // Background play tabs should not keep submitting a complete 3D
           // scene. They render on state demand and resume the normal animation
@@ -10562,7 +11291,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           }
           camera={{
             position: initialCameraPosition,
-            fov: firstPersonActive
+            fov: thirdPersonActive
+              ? THIRD_PERSON_FOV
+              : firstPersonActive
               ? FIRST_PERSON_FOV
               : PLAY_CAMERA_PROFILES[cameraMode].fov,
           }}
@@ -10582,7 +11313,15 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             })}
             intervalMs={playFrameIntervalMs}
           />
-          {firstPersonAuthored ? (
+          {thirdPersonActive ? (
+            <ThirdPersonCameraRig
+              subjectPos={visualThirdPersonSubject}
+              subjectFacing={thirdPersonSubjectFacing}
+              subjectWorldY={thirdPersonSubjectWorldY}
+              blockers={thirdPersonCameraBlockers}
+              onVisualYawChange={handleThirdPersonVisualYaw}
+            />
+          ) : firstPersonAuthored ? (
             <FirstPersonCameraRig
               playerPos={visualPlayerPos}
               playerFacing={renderedPlayerFacing}
@@ -10653,9 +11392,21 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             playerSpriteId={saveData.player?.sprite_id}
             worldItems={worldItemsRender}
             extraPlacements={containerRenderPlacements}
-            onCellClick={handlePlayfieldCellClick}
-            onCellHover={targetingSkillId || verbTargeting ? handleCellHover : undefined}
-            onPointerOut={handlePointerOut}
+            onCellClick={
+              thirdPersonActive && !targetingSkillId && !verbTargeting
+                ? undefined
+                : handlePlayfieldCellClick
+            }
+            onCellHover={
+              targetingSkillId || verbTargeting
+                ? handleCellHover
+                : undefined
+            }
+            onPointerOut={
+              targetingSkillId || verbTargeting
+                ? handlePointerOut
+                : undefined
+            }
             targetPattern={
               verbTargeting
                 ? hoveredCell
@@ -10675,21 +11426,21 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             combatOverwatchZones={combatTacticalSnapshot?.overwatch_zones}
             combatIntents={combatTacticalSnapshot?.intents}
             perceptionAlerts={perceptionSnapshot?.alerts}
-            perceptionStimuli={perceptionSnapshot?.stimuli}
+            perceptionStimuli={
+              showPerceptionDebug ? perceptionSnapshot?.stimuli : undefined
+            }
             showBehaviorIntents={showBehaviorIntents}
             worldDeniedCells={worldDeniedCells}
             showGrid={false}
-            enableOcclusion={
-              visualPreset !== "performance" &&
-              !bottomPanelOpen &&
-              !firstPersonActive
+            renderCenter={
+              thirdPersonActive
+                ? thirdPersonSubjectLogical
+                : cameraFocusOverride || renderedFocusPos
             }
-            occlusionAzimuth={cameraAzimuth}
-            renderCenter={cameraFocusOverride || renderedFocusPos}
             renderRadius={playRenderRadius}
             fogOfWar={fogOfWar}
             fogResolution={(gamePackage.settings?.fog_los_resolution as "macro" | "fine" | undefined) ?? "macro"}
-            authoritativeVisibility={viewerVisibility}
+            authoritativeVisibility={viewerVisibilityPresentation}
             authoritativeVisibilityExpected
             showPerceptionDebug={showPerceptionDebug}
             showMemoryDebug={showMemoryDebug}
@@ -10699,17 +11450,27 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             }
             initialExplored={rendererExploredCells}
             onExplore={queueExploredCells}
-            firstPersonView={firstPersonActive}
+            viewPresentation={rendererViewPresentation}
+            playerVisualYawRef={
+              thirdPersonActive &&
+              thirdPersonCameraSubjectSnapshot.key === "player"
+                ? thirdPersonVisualYawRef
+                : undefined
+            }
           />
           <ScreenFX inCombat={inCombat} mapId={activeMap.id} />
         </Canvas>
 
-        {/* Virtual Joystick touch zone — covers the full game canvas */}
+        {/* Virtual Joystick touch zone. Third person reserves the right half
+            for camera look, while mouse grid selection remains on the canvas. */}
         {!levelUpOpen && !targetingSkillId && !verbTargeting && !activeShopId && !activeDialogueId && !activeDocumentId && !activeContainerId && !activeAttendNodePanel && (
           <div
             ref={joystickOverlayRef}
             className="absolute inset-0 z-10"
-            style={{ touchAction: 'none' }}
+            style={{
+              touchAction: "none",
+              right: thirdPersonActive ? "50%" : 0,
+            }}
             onPointerDown={joystickStart}
             onPointerMove={joystickMove}
             onPointerUp={joystickEnd}
@@ -10773,7 +11534,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                 {playerStealthActive ? "Stand" : "Sneak"}
               </span>
             </button>
-            {!targetingSkillId && !verbTargeting && (
+            {!targetingSkillId && !verbTargeting ? (
               <button
                 className="w-12 h-12 sm:w-16 sm:h-16 bg-ui-panel active:brightness-150 rounded-full flex flex-col items-center justify-center active:scale-90 transition-all select-none shadow-[0_0_15px_rgba(0,0,0,0.8)] border-ui-accent text-[var(--color-ui-accent)] touch-manipulation gap-0.5"
                 style={{ borderStyle: "solid", borderWidth: "2px" }}
@@ -10781,9 +11542,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                 title="Interact / Act"
               >
                 <Hand className="w-5 h-5 sm:w-7 sm:h-7 drop-shadow-md" />
-                <span className="text-[8px] font-[family-name:var(--font-display)] font-bold tracking-widest uppercase opacity-90 text-accent-glow">Act</span>
+                <span className="text-[8px] font-[family-name:var(--font-display)] font-bold tracking-widest uppercase opacity-90 text-accent-glow">
+                  Act
+                </span>
               </button>
-            )}
+            ) : null}
           </div>
         )}
 

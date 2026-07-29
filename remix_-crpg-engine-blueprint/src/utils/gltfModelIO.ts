@@ -1,8 +1,10 @@
 import * as THREE from "three";
 import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
+import { FBXLoader } from "three/examples/jsm/loaders/FBXLoader.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import type {
   ObjectAssetData,
+  ObjectAnimationSourceData,
   ObjectData,
   ObjectDecalData,
   ObjectMaterialData,
@@ -50,7 +52,12 @@ const dataUrlToSource = async (asset: Pick<ObjectAssetData, "data_url" | "source
     : response.arrayBuffer();
 };
 
-export const loadGltfFromAssetDataUrl = async (asset: ObjectAssetData) => {
+type ModelAssetSource = Pick<
+  ObjectAssetData,
+  "data_url" | "filename" | "source_type"
+>;
+
+export const loadGltfFromAssetDataUrl = async (asset: ModelAssetSource) => {
   const loader = new GLTFLoader();
   const source = await dataUrlToSource(asset);
 
@@ -59,6 +66,78 @@ export const loadGltfFromAssetDataUrl = async (asset: ObjectAssetData) => {
       loader.parse(source, "", resolve, reject);
     },
   );
+};
+
+export interface LoadedModelAsset {
+  scene: THREE.Group;
+  animations: THREE.AnimationClip[];
+}
+
+export const parseFbxAssetSource = (
+  source: ArrayBuffer,
+): LoadedModelAsset => {
+  const scene = new FBXLoader().parse(source, "");
+  return {
+    scene,
+    animations: [...(scene.animations || [])],
+  };
+};
+
+export const loadFbxFromAssetDataUrl = async (
+  asset: ModelAssetSource,
+): Promise<LoadedModelAsset> => {
+  const response = await fetch(asset.data_url);
+  if (!response.ok) {
+    throw new Error(
+      `Could not load FBX asset ${asset.filename}: ${response.status}`,
+    );
+  }
+  return parseFbxAssetSource(await response.arrayBuffer());
+};
+
+const loadSingleModelSource = async (
+  asset: ModelAssetSource,
+): Promise<LoadedModelAsset> => {
+  if (asset.source_type === "fbx") {
+    return loadFbxFromAssetDataUrl(asset);
+  }
+  const gltf = await loadGltfFromAssetDataUrl(asset);
+  gltf.scene.animations = [...gltf.animations];
+  return {
+    scene: gltf.scene,
+    animations: [...gltf.animations],
+  };
+};
+
+const loadExternalAnimationSource = async (
+  source: ObjectAnimationSourceData,
+): Promise<THREE.AnimationClip> => {
+  const loaded = await loadSingleModelSource(source);
+  const sourceClip =
+    loaded.animations.find(
+      (candidate) => candidate.name === source.source_clip_name,
+    ) || loaded.animations[0];
+  if (!sourceClip) {
+    throw new Error(
+      `Animation source ${source.filename} does not contain a clip.`,
+    );
+  }
+  const clip = sourceClip.clone();
+  clip.name = source.clip_name;
+  return clip;
+};
+
+export const loadModelFromAssetDataUrl = async (
+  asset: ObjectAssetData,
+): Promise<LoadedModelAsset> => {
+  const loaded = await loadSingleModelSource(asset);
+  const externalAnimations = await Promise.all(
+    (asset.animation_sources || []).map(loadExternalAnimationSource),
+  );
+  return {
+    scene: loaded.scene,
+    animations: [...loaded.animations, ...externalAnimations],
+  };
 };
 
 const exportSceneAsGltf = (
@@ -348,8 +427,8 @@ const getMaterialTextures = (material: THREE.Material | undefined) => {
   ].filter(Boolean) as THREE.Texture[];
 };
 
-const getGltfMetadata = (
-  gltf: Awaited<ReturnType<GLTFLoader["parseAsync"]>>,
+const getSceneMetadata = (
+  scene: THREE.Object3D,
   bytes: number,
 ) => {
   const bounds = new THREE.Box3();
@@ -360,8 +439,8 @@ const getGltfMetadata = (
   let vertices = 0;
   let triangles = 0;
 
-  gltf.scene.updateWorldMatrix(true, true);
-  gltf.scene.traverse((child) => {
+  scene.updateWorldMatrix(true, true);
+  scene.traverse((child) => {
     const source = child as THREE.Mesh;
     if (!source.isMesh || !source.geometry) return;
 
@@ -552,8 +631,8 @@ export const importObjectFromGltfFile = async (
   const baseName = file.name.replace(/\.(glb|gltf)$/i, "") || "Imported GLB";
 
   if (mode === "asset") {
-    const metadata = getGltfMetadata(
-      gltf,
+    const metadata = getSceneMetadata(
+      gltf.scene,
       isGltfJson ? new Blob([source as string]).size : (source as ArrayBuffer).byteLength,
     );
     const dataUrl = await readFileAsDataUrl(file);
@@ -590,6 +669,20 @@ export const importObjectFromGltfFile = async (
         source_center: metadata.sourceCenter,
         source_bounds: metadata.sourceBounds,
         material_names: metadata.materialNames,
+        animation:
+          gltf.animations.length > 0
+            ? {
+                clip_name: gltf.animations[0].name,
+                autoplay: true,
+                loop: "repeat",
+                time_scale: 1,
+              }
+            : undefined,
+        animation_clips: gltf.animations.map((clip) => ({
+          name: clip.name,
+          duration: clip.duration,
+          tracks: clip.tracks.length,
+        })),
         stats: metadata.stats,
       },
       collision: {
@@ -652,6 +745,104 @@ export const importObjectFromGltfFile = async (
     collision: {
       profile: footprint.length > 1 ? "custom_footprint" : "single",
       footprint,
+    },
+  };
+};
+
+export const importObjectFromFbxFile = async (
+  file: File,
+): Promise<ObjectData> => {
+  const source = await file.arrayBuffer();
+  const loaded = parseFbxAssetSource(source);
+  const metadata = getSceneMetadata(loaded.scene, source.byteLength);
+  const dataUrl = await readFileAsDataUrl(file);
+  const baseName = file.name.replace(/\.fbx$/i, "") || "Imported FBX";
+  const footprint = makeRectFootprint(
+    metadata.sourceBounds[0],
+    metadata.sourceBounds[2],
+  );
+
+  return {
+    id: `obj_${makeSafeId(baseName)}_${Date.now()}`,
+    display_name: baseName,
+    category: "characters",
+    tags: [
+      "imported",
+      "fbx",
+      "asset",
+      ...(loaded.animations.length ? ["animated", "skinned"] : []),
+    ],
+    origin: "center_floor",
+    bounds: metadata.sourceBounds,
+    materials: metadata.materialNames,
+    material_settings: metadata.materialSettings,
+    model_kind: "asset",
+    parts: [],
+    decals: [],
+    reference_images: [],
+    asset: {
+      data_url: dataUrl,
+      filename: file.name,
+      source_type: "fbx",
+      offset: [
+        -metadata.sourceCenter[0],
+        -metadata.sourceMin[1],
+        -metadata.sourceCenter[2],
+      ],
+      rotation: [0, 0, 0],
+      scale: [1, 1, 1],
+      source_min: metadata.sourceMin,
+      source_center: metadata.sourceCenter,
+      source_bounds: metadata.sourceBounds,
+      material_names: metadata.materialNames,
+      animation:
+        loaded.animations.length > 0
+          ? {
+              clip_name: loaded.animations[0].name,
+              autoplay: true,
+              loop: "repeat",
+              time_scale: 1,
+            }
+          : undefined,
+      animation_clips: loaded.animations.map((clip) => ({
+        name: clip.name,
+        duration: clip.duration,
+        tracks: clip.tracks.length,
+      })),
+      stats: metadata.stats,
+    },
+    collision: {
+      profile: footprint.length > 1 ? "custom_footprint" : "single",
+      footprint,
+    },
+  };
+};
+
+export const importAnimationClipFromFbxFile = async (
+  file: File,
+  clipName?: string,
+) => {
+  const source = await file.arrayBuffer();
+  const loaded = parseFbxAssetSource(source);
+  const clip = loaded.animations[0];
+  if (!clip) {
+    throw new Error(`${file.name} does not contain an animation clip.`);
+  }
+  const alias =
+    makeSafeId(clipName || file.name.replace(/\.fbx$/i, "")) || "animation";
+  const animationSource: ObjectAnimationSourceData = {
+    data_url: await readFileAsDataUrl(file),
+    filename: file.name,
+    source_type: "fbx",
+    source_clip_name: clip.name,
+    clip_name: alias,
+  };
+  return {
+    source: animationSource,
+    clip: {
+      name: alias,
+      duration: clip.duration,
+      tracks: clip.tracks.length,
     },
   };
 };

@@ -11,6 +11,7 @@ import {
   BUILTIN_DIALOGUE_KEYWORDS,
   validateKeywordDialoguePackage,
 } from "../engine-core/keywordDialogue";
+import { PLAYER_IDLE_FBX_MODEL_ID } from "../data/playerModelAssets";
 import { normalizeGeneratedIdToken } from "./deterministicIds";
 
 export type ReferenceAuditSeverity = "error" | "warning" | "info";
@@ -122,7 +123,10 @@ export const auditGamePackageReferences = (
   const endingIds = idsFromLooseCollection(pkg.endings as unknown[]);
   const indexes = {
     maps: new Set(pkg.maps.map((entry) => entry.id)),
-    objects: new Set(pkg.object_library.map((entry) => entry.id)),
+    objects: new Set([
+      PLAYER_IDLE_FBX_MODEL_ID,
+      ...pkg.object_library.map((entry) => entry.id),
+    ]),
     sprites: new Set(pkg.sprite_library.map((entry) => entry.id)),
     entities: new Set(pkg.entities.map((entry) => entry.id)),
     dialogue: new Set(pkg.dialogue.map((entry) => entry.id)),
@@ -297,6 +301,7 @@ export const auditGamePackageReferences = (
     });
   }
   reference(indexes.sprites, stringField(settings, "player_sprite_id"), "$.settings.player_sprite_id", "REF_SPRITE_MISSING", "sprite");
+  reference(indexes.objects, stringField(settings, "player_model_id"), "$.settings.player_model_id", "REF_PLAYER_MODEL_MISSING", "player model");
 
   // Campaign lifecycle policy is authored in package settings so old packages
   // remain schema-compatible. Audit it as strongly as first-class content:

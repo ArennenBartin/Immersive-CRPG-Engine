@@ -42,6 +42,10 @@ Inert setting left alone: `attend_ui_mode` (no consumer; revisit when the
 attend HUD lands).
 
 Added later (kept authorable from day one): `settings.view_mode`
-(isometric | first_person) — Game panel · Basics tab · Presentation section.
-First person is exploration-only (combat/targeting/story auto-switch to the
-tactical camera); consumed by PlayMode/PlayScene3D/GameRenderer3D.
+(isometric | first_person | third_person) — Game panel · Basics tab ·
+Presentation section. First person is exploration-only
+(combat/targeting/story auto-switch to the tactical camera). Third person uses
+fine-grid tank controls and keeps its locked-behind chase camera during
+exploration, combat, targeting, dialogue, and story. Skill and verb targeting
+continues to use the normal mouse grid hover/click interaction rather than a
+center reticle or camera ray; consumed by PlayMode/PlayScene3D/GameRenderer3D.

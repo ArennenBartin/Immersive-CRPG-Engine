@@ -1,5 +1,7 @@
 import React, { memo, useEffect, useMemo } from "react";
+import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
+import { clone as cloneSkeleton } from "three/examples/jsm/utils/SkeletonUtils.js";
 import type {
   ObjectData,
   ObjectDecalData,
@@ -16,7 +18,11 @@ import {
   getObjectMaterialTexture,
   resolveObjectMaterial,
 } from "../utils/objectMaterials";
-import { loadGltfFromAssetDataUrl } from "../utils/gltfModelIO";
+import {
+  loadModelFromAssetDataUrl,
+  type LoadedModelAsset,
+} from "../utils/gltfModelIO";
+import { resolveActorSpriteBrightness } from "../utils/lightRendering";
 
 export type ModelSelectionMode = "object" | "part" | "vertex" | "edge" | "face";
 
@@ -135,19 +141,46 @@ const projectTextureUv = (
   return [vertex[0], vertex[1]];
 };
 
-const assetSceneCache = new Map<string, Promise<THREE.Group>>();
+const assetSceneCache = new Map<string, Promise<LoadedModelAsset>>();
 
 const getAssetScene = (object: ObjectData) => {
   if (!object.asset) return null;
 
-  const key = `${object.id}_${object.asset.filename}_${object.asset.data_url.length}`;
+  const key = [
+    object.id,
+    object.asset.source_type,
+    object.asset.filename,
+    object.asset.data_url.length,
+    object.asset.data_url.slice(0, 96),
+    object.asset.data_url.slice(-96),
+    JSON.stringify(object.asset.animation_sources || []),
+  ].join("_");
   const cached = assetSceneCache.get(key);
   if (cached) return cached;
 
-  const promise = loadGltfFromAssetDataUrl(object.asset).then((gltf) => gltf.scene);
+  const promise = loadModelFromAssetDataUrl(object.asset);
   assetSceneCache.set(key, promise);
   return promise;
 };
+
+type AssetRenderAppearance = "default" | "player_default" | "player_xray";
+
+// Keep both player passes in the opaque render list. The x-ray pass draws
+// after world geometry so GreaterDepth can identify occluded fragments, then
+// the textured pass draws over every fragment that is actually visible.
+const PLAYER_MODEL_XRAY_RENDER_ORDER = 89;
+const PLAYER_MODEL_SURFACE_RENDER_ORDER = 90;
+
+function AssetAnimationDriver({
+  mixer,
+}: {
+  mixer: THREE.AnimationMixer;
+}) {
+  useFrame((_, delta) => {
+    mixer.update(Math.min(delta, 0.1));
+  });
+  return null;
+}
 
 const cloneMaterialWithObjectOverrides = (
   sourceMaterial: THREE.Material,
@@ -195,12 +228,91 @@ const cloneMaterialWithObjectOverrides = (
   return anyMaterial;
 };
 
-const cloneAssetSceneForObject = (scene: THREE.Group, object: ObjectData) => {
-  const cloned = scene.clone(true);
+const makeAuthoritativePlayerMaterial = (
+  sourceMaterial: THREE.Material,
+  object: ObjectData,
+  fallbackName: string,
+) => {
+  const source = cloneMaterialWithObjectOverrides(
+    sourceMaterial,
+    object,
+    fallbackName,
+  ) as THREE.MeshStandardMaterial;
+  const baseColor = source.color?.clone() || new THREE.Color("#FFFFFF");
+  const material = new THREE.MeshBasicMaterial({
+    color: baseColor,
+    map: source.map || null,
+    alphaMap: source.alphaMap || null,
+    aoMap: source.aoMap || null,
+    lightMap: source.lightMap || null,
+    transparent: source.transparent,
+    opacity: source.opacity,
+    alphaTest: source.alphaTest,
+    side: source.side,
+    depthTest: source.depthTest,
+    depthWrite: source.depthWrite,
+    vertexColors: source.vertexColors,
+    fog: false,
+    toneMapped: false,
+  });
+  material.name = source.name || fallbackName;
+  material.userData.crpgPlayerBaseColor = baseColor.getHex();
+  source.dispose();
+  return material;
+};
+
+const cloneAssetSceneForObject = (
+  scene: THREE.Group,
+  object: ObjectData,
+  appearance: AssetRenderAppearance,
+) => {
+  // Object3D.clone() leaves cloned skinned meshes bound to the source bones.
+  // SkeletonUtils produces an independent bone graph so every placed or
+  // player-owned animated asset can run its own mixer safely.
+  const cloned = cloneSkeleton(scene) as THREE.Group;
 
   cloned.traverse((child) => {
     const mesh = child as THREE.Mesh;
     if (!mesh.isMesh || !mesh.material) return;
+
+    if (appearance === "player_xray") {
+      mesh.material = new THREE.MeshBasicMaterial({
+        color: "#89E7FF",
+        transparent: false,
+        opacity: 1,
+        depthTest: true,
+        depthFunc: THREE.GreaterDepth,
+        depthWrite: false,
+        side: THREE.FrontSide,
+        fog: false,
+        toneMapped: false,
+      });
+      mesh.renderOrder = PLAYER_MODEL_XRAY_RENDER_ORDER;
+      mesh.castShadow = false;
+      mesh.receiveShadow = false;
+      mesh.raycast = () => null;
+      return;
+    }
+
+    if (appearance === "player_default") {
+      mesh.material = Array.isArray(mesh.material)
+        ? mesh.material.map((material, index) =>
+            makeAuthoritativePlayerMaterial(
+              material,
+              object,
+              `asset_material_${index + 1}`,
+            ),
+          )
+        : makeAuthoritativePlayerMaterial(
+            mesh.material,
+            object,
+            "asset_material_1",
+          );
+      mesh.renderOrder = PLAYER_MODEL_SURFACE_RENDER_ORDER;
+      mesh.castShadow = false;
+      mesh.receiveShadow = false;
+      return;
+    }
 
     if (Array.isArray(mesh.material)) {
       mesh.material = mesh.material.map((material, index) =>
@@ -785,15 +897,26 @@ export function AssetModelRenderer({
   objectSelected = false,
   selectable = false,
   showBounds = false,
+  showPlaceholder = true,
+  appearance = "default",
+  illumination = 1,
+  animationClipName,
+  onReadyChange,
   onObjectClick,
 }: {
   object: ObjectData;
   objectSelected?: boolean;
   selectable?: boolean;
   showBounds?: boolean;
+  showPlaceholder?: boolean;
+  appearance?: AssetRenderAppearance;
+  illumination?: number;
+  animationClipName?: string;
+  onReadyChange?: (ready: boolean) => void;
   onObjectClick?: (event: any) => void;
 }) {
-  const [sourceScene, setSourceScene] = React.useState<THREE.Group | null>(null);
+  const [sourceAsset, setSourceAsset] =
+    React.useState<LoadedModelAsset | null>(null);
   const [loadError, setLoadError] = React.useState(false);
   const asset = object.asset;
   const bounds = object.bounds || [1, 1, 1];
@@ -813,7 +936,8 @@ export function AssetModelRenderer({
   useEffect(() => {
     let cancelled = false;
     setLoadError(false);
-    setSourceScene(null);
+    setSourceAsset(null);
+    onReadyChange?.(false);
 
     const promise = getAssetScene(object);
     if (!promise) {
@@ -822,8 +946,8 @@ export function AssetModelRenderer({
     }
 
     promise
-      .then((scene) => {
-        if (!cancelled) setSourceScene(scene);
+      .then((loaded) => {
+        if (!cancelled) setSourceAsset(loaded);
       })
       .catch(() => {
         if (!cancelled) setLoadError(true);
@@ -832,7 +956,14 @@ export function AssetModelRenderer({
     return () => {
       cancelled = true;
     };
-  }, [object.id, asset?.data_url, asset?.filename]);
+  }, [
+    object.id,
+    asset?.data_url,
+    asset?.filename,
+    asset?.source_type,
+    asset?.animation_sources,
+    onReadyChange,
+  ]);
 
   useEffect(
     () => () => {
@@ -842,8 +973,118 @@ export function AssetModelRenderer({
   );
 
   const renderedScene = useMemo(
-    () => (sourceScene ? cloneAssetSceneForObject(sourceScene, object) : null),
-    [sourceScene, object],
+    () =>
+      sourceAsset
+        ? cloneAssetSceneForObject(sourceAsset.scene, object, appearance)
+        : null,
+    [sourceAsset, object, appearance],
+  );
+  const mixer = useMemo(
+    () => (renderedScene ? new THREE.AnimationMixer(renderedScene) : null),
+    [renderedScene],
+  );
+  const activeActionRef = React.useRef<THREE.AnimationAction | null>(null);
+
+  useEffect(() => {
+    onReadyChange?.(Boolean(renderedScene));
+  }, [renderedScene, onReadyChange]);
+
+  useEffect(() => {
+    if (!mixer || !sourceAsset?.animations.length) return;
+    // Creating an AnimationAction binds every FBX track to the cloned skeleton.
+    // Doing that for the first time in response to W made the player's first
+    // step pay the full idle-to-walk setup cost (twice when the x-ray pass was
+    // mounted). Pre-bind during the browser's next idle slice instead.
+    const warmAnimationBindings = () => {
+      sourceAsset.animations.forEach((clip) => {
+        mixer.clipAction(clip);
+      });
+    };
+    if (typeof window.requestIdleCallback === "function") {
+      const idleId = window.requestIdleCallback(warmAnimationBindings, {
+        timeout: 160,
+      });
+      return () => window.cancelIdleCallback(idleId);
+    }
+    const timeoutId = window.setTimeout(warmAnimationBindings, 0);
+    return () => window.clearTimeout(timeoutId);
+  }, [mixer, sourceAsset]);
+
+  useEffect(() => {
+    if (!renderedScene || appearance !== "player_default") return;
+    const brightness = resolveActorSpriteBrightness(illumination);
+    renderedScene.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (!mesh.isMesh || !mesh.material) return;
+      const materials = Array.isArray(mesh.material)
+        ? mesh.material
+        : [mesh.material];
+      materials.forEach((material) => {
+        const basic = material as THREE.MeshBasicMaterial;
+        const baseColor = basic.userData.crpgPlayerBaseColor;
+        if (!basic.color || typeof baseColor !== "number") return;
+        basic.color.setHex(baseColor).multiplyScalar(brightness);
+      });
+    });
+  }, [appearance, illumination, renderedScene]);
+
+  useEffect(() => {
+    if (!mixer || !sourceAsset?.animations.length) return;
+    const playback = asset?.animation;
+    if (playback?.autoplay === false) {
+      activeActionRef.current?.fadeOut(0.12);
+      activeActionRef.current = null;
+      return;
+    }
+
+    const clip =
+      sourceAsset.animations.find(
+        (candidate) =>
+          candidate.name === (animationClipName || playback?.clip_name),
+      ) || sourceAsset.animations[0];
+    const action = mixer.clipAction(clip);
+    action.enabled = true;
+    action.timeScale = Math.max(0.01, playback?.time_scale || 1);
+    action.clampWhenFinished = playback?.loop === "once";
+    if (playback?.loop === "once") {
+      action.setLoop(THREE.LoopOnce, 1);
+    } else if (playback?.loop === "ping_pong") {
+      action.setLoop(THREE.LoopPingPong, Infinity);
+    } else {
+      action.setLoop(THREE.LoopRepeat, Infinity);
+    }
+    const previous = activeActionRef.current;
+    if (previous === action) return;
+    action.reset().fadeIn(0.12).play();
+    previous?.fadeOut(0.12);
+    activeActionRef.current = action;
+  }, [
+    mixer,
+    renderedScene,
+    sourceAsset,
+    animationClipName,
+    asset?.animation?.autoplay,
+    asset?.animation?.clip_name,
+    asset?.animation?.loop,
+    asset?.animation?.time_scale,
+  ]);
+
+  useEffect(
+    () => () => {
+      activeActionRef.current = null;
+      mixer?.stopAllAction();
+      if (mixer && renderedScene) mixer.uncacheRoot(renderedScene);
+      if (!renderedScene) return;
+      renderedScene.traverse((child) => {
+        const mesh = child as THREE.Mesh;
+        if (!mesh.isMesh || !mesh.material) return;
+        const materials = Array.isArray(mesh.material)
+          ? mesh.material
+          : [mesh.material];
+        materials.forEach((material) => material.dispose());
+      });
+    },
+    [mixer, renderedScene],
   );
 
   return (
@@ -856,13 +1097,14 @@ export function AssetModelRenderer({
     >
       {renderedScene ? (
         <group scale={assetScale as [number, number, number]}>
+          {mixer && <AssetAnimationDriver mixer={mixer} />}
           <primitive
             object={renderedScene}
             position={assetOffset as [number, number, number]}
             rotation={assetRotation as [number, number, number]}
           />
         </group>
-      ) : (
+      ) : showPlaceholder ? (
         <mesh position={[0, Math.max(0.05, bounds[1] || 1) / 2, 0]}>
           <primitive object={boundsGeometry} attach="geometry" />
           <meshStandardMaterial
@@ -872,7 +1114,7 @@ export function AssetModelRenderer({
             opacity={0.45}
           />
         </mesh>
-      )}
+      ) : null}
       {(showBounds || objectSelected || selectable) && (
         <lineSegments
           position={[0, Math.max(0.05, bounds[1] || 1) / 2, 0]}

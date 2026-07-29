@@ -10,7 +10,7 @@ import {
 } from "./gridCoordinates";
 import { isFineExpandedPackage } from "./fineWorld";
 import {
-  createSimulationSnapshotFromV1,
+  createCachedSimulationSnapshotFromV1,
   type SimulationCellState,
   type SimulationMapSnapshot,
 } from "./simulation";
@@ -703,7 +703,7 @@ const createVisibilitySimulation = (
 ) => applyAuthoredSmokeToSimulation(
   gamePackage,
   mapId,
-  createSimulationSnapshotFromV1(gamePackage, save, mapId),
+  createCachedSimulationSnapshotFromV1(gamePackage, save, mapId),
 );
 
 const analyzeLightLine = (
@@ -780,6 +780,7 @@ const illuminationFromSimulation = (
   sources: ImmersiveResolvedLightSource[],
   preparedVision?: PreparedVisionMap,
   sharedLineCache?: LightLineCache,
+  includedCellKeys?: ReadonlySet<string>,
 ): ImmersiveIlluminationSnapshot => {
   const map = gamePackage.maps.find((candidate) => candidate.id === mapId);
   const authoredAmbient = Number((map as unknown as { ambient_light?: number } | undefined)?.ambient_light);
@@ -793,7 +794,15 @@ const illuminationFromSimulation = (
     string,
     ImmersiveIlluminationContribution[]
   >();
-  const activeCells = simulation.cells.filter((cell) => cell.active);
+  // Viewer visibility is range-bounded. Allow that caller to solve and
+  // serialize only cells the viewer can possibly perceive while leaving the
+  // full-map illumination/perception contracts unchanged for simulation and
+  // AI callers.
+  const activeCells = simulation.cells.filter(
+    (cell) =>
+      cell.active &&
+      (!includedCellKeys || includedCellKeys.has(coordKey(cell.cell))),
+  );
   const activeBounds = activeCells.reduce(
     (bounds, cell) => ({
       minX: Math.min(bounds.minX, cell.cell[0]),
@@ -846,6 +855,7 @@ const illuminationFromSimulation = (
     for (let z = minZ; z <= maxZ; z += 1) {
       for (let x = minX; x <= maxX; x += 1) {
         const key = fineCoordKey(x, z);
+        if (includedCellKeys && !includedCellKeys.has(key)) continue;
         if (!visionByKey.get(key)?.active) continue;
         const distance = Math.hypot(x - sourceX, z - sourceZ);
         if (distance > sourceRadius) continue;
@@ -1091,6 +1101,23 @@ export const createImmersiveViewerVisibilityFromV1 = (
   const sources = resolveImmersiveLightSources(gamePackage, save, mapId);
   const visionByKey = prepareVisionMap(simulation, spatialRatio(gamePackage));
   const lineCache = new Map<string, LightLineAnalysis>();
+  const viewerCell = asCell(options.viewer_cell || save.player.cell);
+  const maxRange = Math.max(
+    0,
+    Number(options.max_range ?? DEFAULT_VISUAL_RANGE_MACRO * spatialRatio(gamePackage)),
+  );
+  const minimumLight = clamp01(Number(options.minimum_light ?? DEFAULT_MINIMUM_LIGHT));
+  const visibilityCandidateCells = simulation.cells.filter((cell) => {
+    if (!cell.active) return false;
+    const candidate = cell.cell;
+    return Math.hypot(
+      candidate[0] - viewerCell[0],
+      candidate[1] - viewerCell[1],
+    ) <= maxRange;
+  });
+  const visibilityCandidateKeys = new Set(
+    visibilityCandidateCells.map((cell) => coordKey(cell.cell)),
+  );
   const illumination = illuminationFromSimulation(
     gamePackage,
     save,
@@ -1099,6 +1126,7 @@ export const createImmersiveViewerVisibilityFromV1 = (
     sources,
     visionByKey,
     lineCache,
+    visibilityCandidateKeys,
   );
   const context = createVisualAcquisitionContext(
     simulation,
@@ -1106,27 +1134,15 @@ export const createImmersiveViewerVisibilityFromV1 = (
     visionByKey,
     lineCache,
   );
-  const viewerCell = asCell(options.viewer_cell || save.player.cell);
-  const maxRange = Math.max(
-    0,
-    Number(options.max_range ?? DEFAULT_VISUAL_RANGE_MACRO * spatialRatio(gamePackage)),
-  );
-  const minimumLight = clamp01(Number(options.minimum_light ?? DEFAULT_MINIMUM_LIGHT));
-  const visibilityCandidates = simulation.cells
-    .filter((cell) => cell.active)
+  const visibilityCandidates = visibilityCandidateCells
     .map((cell) => {
       const candidateCell = asCell(cell.cell);
       const isViewerCell = sameCell(candidateCell, viewerCell);
-      const inRange =
-        Math.hypot(
-          candidateCell[0] - viewerCell[0],
-          candidateCell[1] - viewerCell[1],
-        ) <= maxRange;
       return {
         cell: candidateCell,
         isViewerCell,
         acquisition:
-          !isViewerCell && inRange
+          !isViewerCell
             ? acquisitionFromContext(
                 save,
                 {

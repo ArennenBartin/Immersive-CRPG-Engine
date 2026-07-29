@@ -1129,15 +1129,6 @@ export function GameRenderer2D(props: GameRenderer2DProps) {
         ctx.fillStyle = frac > 0.5 ? "#7bd88f" : frac > 0.25 ? "#e9c46a" : "#e76f51";
         ctx.fillRect(x0, y0, w * frac, h);
       };
-      const drawRing = (cx: number, cz: number, color: string, alpha: number, r: number) => {
-        ctx.globalAlpha = alpha;
-        ctx.strokeStyle = color;
-        ctx.lineWidth = Math.max(1.5, macroTile * 0.06);
-        ctx.beginPath();
-        ctx.ellipse(cx, cz + macroTile * 0.32, r, r * 0.5, 0, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.globalAlpha = 1;
-      };
       const actorSpriteRect = (
         cx: number,
         cz: number,
@@ -1221,7 +1212,6 @@ export function GameRenderer2D(props: GameRenderer2DProps) {
         const engaged = !def.is_npc && !!p.playerPos &&
           Math.abs(cellCoord[0] - p.playerPos[0]) + Math.abs(cellCoord[1] - p.playerPos[1]) <= THREAT_RADIUS;
         if (hp < def.max_hp || engaged || p.inCombat) drawHpBar(cx, cz, hp, def.max_hp);
-        if (p.activeTurnKey === key) drawRing(cx, cz, "#ffd166", 0.9, macroTile * 0.42);
         drawPhysicalStateBadge(ctx, cx, cz, macroTile, p.actorPhysicalStates?.[key] || p.actorPhysicalStates?.[placement.entity_id]);
         drawAlertBadge(ctx, cx, cz, macroTile, alertByActor.get(key) || alertByActor.get(placement.entity_id));
         if (p.showBehaviorIntents) {
@@ -1248,7 +1238,6 @@ export function GameRenderer2D(props: GameRenderer2DProps) {
         actorScreenPositions.set(follower.entity_id, { cx, cz, headY, cell: [follower.cell[0], follower.cell[1]] });
         const hp = st?.hp ?? def.max_hp;
         if (hp < def.max_hp || p.inCombat) drawHpBar(cx, cz, hp, def.max_hp);
-        if (p.activeTurnKey === follower.entity_id) drawRing(cx, cz, "#ffd166", 0.9, macroTile * 0.42);
         drawPhysicalStateBadge(ctx, cx, cz, macroTile, p.actorPhysicalStates?.[follower.entity_id]);
       });
 
@@ -1266,7 +1255,6 @@ export function GameRenderer2D(props: GameRenderer2DProps) {
         const animated = isAnimatedSprite(sprite);
         const img = sprite && !animated ? getSpriteRenderable(sprite) : null;
         const s = macroTile * 0.95;
-        drawRing(cx, cz, "#88C0D0", p.activeTurnKey === "player" ? 0.9 : 0.5, macroTile * 0.4);
         const rect = actorSpriteRect(cx, cz, sprite, img, s);
         actorScreenPositions.set("player", {
           cx,

@@ -817,6 +817,7 @@ export const createPhase11IntegratedArchitectureFixture = (
     },
     settings: {
       ...bake.package.settings,
+      view_mode: "third_person",
       initial_known_skills: [PHASE_11_SIGNATURE_SKILL_ID],
       world_state_policy: {
         ...worldPolicy,

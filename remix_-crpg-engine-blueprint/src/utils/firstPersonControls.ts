@@ -4,17 +4,23 @@
 // (movement legality, energy, LOS, perception, combat) is identical in both
 // views. First person only changes the camera, the fog presentation, and how
 // held keys resolve into fine-grid steps: W/S step along the current facing,
-// A/D turn the facing through the 8-direction ring in 45° increments, and Q/E
-// strafe without turning. Combat, targeting, party command, and story beats
-// always fall back to the tactical isometric camera; first person is an
-// exploration-only stance.
+// A/D turn the facing through the 8-direction ring in 45° increments, and
+// Shift+A/D strafe without turning. Held Q/E tilt the camera up/down and
+// spring back to level on release — a look affordance with no simulation
+// meaning. Combat, targeting, party command, and story beats always fall back
+// to the tactical isometric camera; first person is an exploration-only
+// stance.
 
-export type AuthoredViewMode = "isometric" | "first_person";
+export type AuthoredViewMode = "isometric" | "first_person" | "third_person";
 
 export const resolveAuthoredViewMode = (
   settings: Record<string, unknown> | undefined | null,
-): AuthoredViewMode =>
-  settings?.view_mode === "first_person" ? "first_person" : "isometric";
+): AuthoredViewMode => {
+  const authored = settings?.view_mode;
+  return authored === "first_person" || authored === "third_person"
+    ? authored
+    : "isometric";
+};
 
 // Exploration is the only camera mode that stays in first person. Every other
 // play camera (tactical combat/targeting, story panels) needs the top-down
@@ -78,6 +84,12 @@ export interface HeldFirstPersonIntent {
   turn: number;
   /** +1 strafe right, -1 strafe left, 0 none. */
   strafe: number;
+  /**
+   * Camera pitch pressure: +1 look up, -1 look down, 0 level. Presentation
+   * only — pitch never touches facing, movement, visibility, or perception,
+   * and it springs back to level the moment the key is released.
+   */
+  pitch: number;
   wait: boolean;
 }
 
@@ -85,24 +97,29 @@ export interface HeldFirstPersonIntent {
 // key discipline, different semantics. Arrow keys mirror WASD so the virtual
 // joystick's synthesized arrows drive forward/turn without any joystick-side
 // special casing.
+//
+// Holding Shift converts the A/D turn into a strafe, which keeps lateral
+// movement reachable now that Q/E own the look pitch.
 export const resolveHeldFirstPersonIntent = (
   heldKeys: ReadonlySet<string>,
   consumedKeys: ReadonlySet<string>,
 ): HeldFirstPersonIntent => {
   const held = (key: string) => heldKeys.has(key) && !consumedKeys.has(key);
+  const strafeModifier = heldKeys.has("shift");
   let forward = 0;
-  let turn = 0;
-  let strafe = 0;
+  let lateral = 0;
+  let pitch = 0;
   if (held("arrowup") || held("w")) forward += 1;
   if (held("arrowdown") || held("s")) forward -= 1;
-  if (held("arrowleft") || held("a")) turn -= 1;
-  if (held("arrowright") || held("d")) turn += 1;
-  if (held("q")) strafe -= 1;
-  if (held("e")) strafe += 1;
+  if (held("arrowleft") || held("a")) lateral -= 1;
+  if (held("arrowright") || held("d")) lateral += 1;
+  if (held("q")) pitch += 1;
+  if (held("e")) pitch -= 1;
   return {
     forward,
-    turn,
-    strafe,
+    turn: strafeModifier ? 0 : lateral,
+    strafe: strafeModifier ? lateral : 0,
+    pitch,
     wait: held("z") || held("."),
   };
 };
@@ -160,3 +177,28 @@ export const FIRST_PERSON_ATMOSPHERE: PlayAtmosphereProfile = {
 
 export const FIRST_PERSON_EYE_HEIGHT = 0.62;
 export const FIRST_PERSON_FOV = 68;
+
+// ── Turn cadence ───────────────────────────────────────────────────────────
+// A 45° turn is a discrete commitment, not analog rotation, so a tap must
+// produce exactly one turn. Fine steps can share the generic movement
+// hold delay (a fast walk is desirable), but reusing it for turning let a
+// ~150 ms keypress fire twice and overshoot the intended facing. Turning
+// therefore waits noticeably longer before auto-repeat engages, then
+// repeats at its own slower cadence.
+export const FIRST_PERSON_TURN_HOLD_START_MS = 340;
+export const FIRST_PERSON_TURN_REPEAT_MS = 210;
+
+// ── Look pitch ─────────────────────────────────────────────────────────────
+// Held Q/E tilt the view up/down and release springs it back to level. This
+// is a camera affordance for reading tall architecture and floor detail; it
+// deliberately has no simulation meaning, so it never re-resolves visibility
+// or lets the player see around a corner they could not otherwise see.
+export const FIRST_PERSON_MAX_PITCH_RADIANS = (38 * Math.PI) / 180;
+// Rising to a held pitch is quick; the return to level is a touch softer so
+// letting go reads as relaxing rather than snapping.
+export const FIRST_PERSON_PITCH_RISE_DAMPING = 9;
+export const FIRST_PERSON_PITCH_RETURN_DAMPING = 6.5;
+
+// Clamp raw pitch pressure to the authored maximum tilt.
+export const resolveFirstPersonPitchTarget = (pitchInput: number): number =>
+  Math.max(-1, Math.min(1, pitchInput)) * FIRST_PERSON_MAX_PITCH_RADIANS;

@@ -6,6 +6,10 @@ import { OBLIQUE_STRUCTURE_SPRITES } from "../data/obliqueStructureAssets";
 import { OBLIQUE_BARRIER_SPRITES } from "../data/obliqueBarrierAssets";
 import { OBLIQUE_PROP_SPRITES } from "../data/obliquePropAssets";
 import { GENERATED_INTERCESSOR_PLAYER_SPRITES } from "../data/generatedPlayerAssets";
+import {
+  BUNDLED_PLAYER_IDLE_MODEL,
+  PLAYER_IDLE_FBX_MODEL_ID,
+} from "../data/playerModelAssets";
 
 export const asciiToPixels = (
   ascii: string,
@@ -1364,9 +1368,16 @@ const baseObjectLibraryPresets: ObjectData[] = [
 
 // Bind each preset object to its generated default top-down tile sprite, so the
 // bundled game renders as a complete tile map in the 2D renderer.
-export const objectLibraryPresets: ObjectData[] = baseObjectLibraryPresets.map(
-  (o) => ({
-    ...o,
-    tile_sprite_id: o.tile_sprite_id ?? defaultObjectTileMap[o.id],
-  }),
-);
+export const objectLibraryPresets: ObjectData[] = [
+  ...baseObjectLibraryPresets.map(
+    (o): ObjectData => ({
+      ...o,
+      tile_sprite_id: o.tile_sprite_id ?? defaultObjectTileMap[o.id],
+    }),
+  ),
+  ...(baseObjectLibraryPresets.some(
+    (object) => object.id === PLAYER_IDLE_FBX_MODEL_ID,
+  )
+    ? []
+    : [BUNDLED_PLAYER_IDLE_MODEL]),
+];

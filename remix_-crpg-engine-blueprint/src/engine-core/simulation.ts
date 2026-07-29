@@ -1161,6 +1161,108 @@ export const createSimulationSnapshotFromV1 = (
   };
 };
 
+interface RuntimeSimulationCacheEntry {
+  input_key: string;
+  map: MapData | undefined;
+  map_cells: MapData["cells"] | undefined;
+  object_placements: MapData["custom_object_placements"] | undefined;
+  entity_placements: MapData["entity_placements"] | undefined;
+  container_placements: MapData["container_placements"] | undefined;
+  item_placements: MapData["item_placements"] | undefined;
+  object_library: GamePackage["object_library"];
+  item_library: GamePackage["items"];
+  entity_library: GamePackage["entities"];
+  material_library: GamePackage["simulation_materials"];
+  snapshot: SimulationMapSnapshot;
+}
+
+// Visibility, perception, and tactical combat often request the same physical
+// world during one React update. On a generated fine-grid ruin that used to
+// rebuild every cell and every debug overlay three times. Cache only the latest
+// semantic simulation input per recently used map; presentation-only save
+// changes (facts, UI feedback, dialogue memory) deliberately do not invalidate
+// the physical world.
+const RUNTIME_SIMULATION_CACHE_MAP_LIMIT = 4;
+const runtimeSimulationCache = new WeakMap<
+  GamePackage,
+  Map<string, RuntimeSimulationCacheEntry>
+>();
+
+const runtimeSimulationInputKey = (
+  save: PlaySave,
+  mapId: string,
+): string =>
+  JSON.stringify({
+    map_id: mapId,
+    save_map_id: save.current_map_id,
+    tick: currentTick(save),
+    map_delta: getMapDelta(save, mapId) || null,
+    entity_states: save.entity_states || {},
+    simulation_regions: Object.values(save.simulation_regions || {}).filter(
+      (region) => region.map_id === mapId,
+    ),
+  });
+
+export const createCachedSimulationSnapshotFromV1 = (
+  gamePackage: GamePackage,
+  save: PlaySave,
+  mapId = save.current_map_id || gamePackage.metadata.start_map_id,
+  cacheNamespace = "default",
+): SimulationMapSnapshot => {
+  const map =
+    gamePackage.maps.find((candidate) => candidate.id === mapId) ||
+    gamePackage.maps[0];
+  const inputKey = runtimeSimulationInputKey(save, mapId);
+  const cacheSlot = `${cacheNamespace}\u0000${mapId}`;
+  let packageCache = runtimeSimulationCache.get(gamePackage);
+  if (!packageCache) {
+    packageCache = new Map();
+    runtimeSimulationCache.set(gamePackage, packageCache);
+  }
+  const cached = packageCache.get(cacheSlot);
+  if (
+    cached?.input_key === inputKey &&
+    cached.map === map &&
+    cached.map_cells === map?.cells &&
+    cached.object_placements === map?.custom_object_placements &&
+    cached.entity_placements === map?.entity_placements &&
+    cached.container_placements === map?.container_placements &&
+    cached.item_placements === map?.item_placements &&
+    cached.object_library === gamePackage.object_library &&
+    cached.item_library === gamePackage.items &&
+    cached.entity_library === gamePackage.entities &&
+    cached.material_library === gamePackage.simulation_materials
+  ) {
+    // Refresh insertion order so the least recently used map is evicted first.
+    packageCache.delete(cacheSlot);
+    packageCache.set(cacheSlot, cached);
+    return cached.snapshot;
+  }
+
+  const snapshot = createSimulationSnapshotFromV1(gamePackage, save, mapId);
+  packageCache.delete(cacheSlot);
+  packageCache.set(cacheSlot, {
+    input_key: inputKey,
+    map,
+    map_cells: map?.cells,
+    object_placements: map?.custom_object_placements,
+    entity_placements: map?.entity_placements,
+    container_placements: map?.container_placements,
+    item_placements: map?.item_placements,
+    object_library: gamePackage.object_library,
+    item_library: gamePackage.items,
+    entity_library: gamePackage.entities,
+    material_library: gamePackage.simulation_materials,
+    snapshot,
+  });
+  while (packageCache.size > RUNTIME_SIMULATION_CACHE_MAP_LIMIT) {
+    const oldestMapId = packageCache.keys().next().value;
+    if (oldestMapId === undefined) break;
+    packageCache.delete(oldestMapId);
+  }
+  return snapshot;
+};
+
 export const getSimulationMap = (
   gamePackage: GamePackage,
   save?: PlaySave,

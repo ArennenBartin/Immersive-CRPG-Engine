@@ -35,6 +35,7 @@ import * as THREE from "three";
 import { useEngineStore } from "../store/engineStore";
 import { useFrame, useThree } from "@react-three/fiber";
 import {
+  AssetModelRenderer,
   createRuntimeMeshGeometryGroups,
   ObjectModelRenderer,
   ObjectRuntimeModelRenderer,
@@ -68,17 +69,20 @@ import {
   logicalCellToMacro,
   logicalCellWorldSize,
   dedupeFineTerrainCellsFor3D,
-  isWorldPointInCameraOcclusionCorridor,
   worldPointToLogicalCell,
   worldPointToWorldMacroCell,
   type RendererGridSpace,
 } from "../utils/renderSpace";
 import {
+  resolvePlayerLocomotionClip,
+  resolvePlayerModelObject,
+} from "../data/playerModelAssets";
+import {
   buildAuthoritativeFogPresentationPlan,
   computeFogVisibleCells,
   fogCellKey,
   isStableMemoryStructureObject,
-  resolveStructureFogCompositePolicy,
+  resolvePlayerStructureOcclusionPolicy,
   shouldRenderDarkAdjacentEntity,
   type AuthoritativeFogPresentationCell,
   type FogRenderState,
@@ -277,6 +281,9 @@ const showAnimatedSpriteAtlasFrame = (
     left / source.atlasWidth,
     1 - (top + source.frameHeight) / source.atlasHeight,
   );
+  // Custom sprite materials share this matrix with Three's standard map
+  // shader. Updating it here keeps every pass on the exact active GIF frame.
+  entry.texture.updateMatrix();
   source.frameIndex = frameIndex;
 };
 
@@ -569,6 +576,8 @@ interface ReferenceGameRendererProps {
   map: MapData;
   playerPos?: [number, number];
   playerFacing?: [number, number];
+  playerVisualYaw?: number;
+  playerVisualYawRef?: React.MutableRefObject<number>;
   playerSpriteId?: string;
   // Ground items currently visible (authored minus taken, plus dropped).
   worldItems?: { id: string; cell: [number, number]; icon: string }[];
@@ -595,8 +604,6 @@ interface ReferenceGameRendererProps {
   inCombat?: boolean;
   activeTurnKey?: string | null;
   showGrid?: boolean;
-  enableOcclusion?: boolean;
-  occlusionAzimuth?: number;
   renderCenter?: [number, number];
   renderRadius?: number;
   fxCellTransform?: (cell: readonly [number, number]) => [number, number];
@@ -611,14 +618,24 @@ interface ReferenceGameRendererProps {
   suppressPlacementLights?: boolean;
 }
 
-// True while the play camera is at the player's eye. Presentation-only: fog
-// silhouettes lift from black to haze and join scene fog, boundary curtains
-// disappear, and the player's own marker is not drawn. The authoritative
-// visibility data feeding all of it is identical in both views.
-const FirstPersonViewContext = React.createContext(false);
+export type RendererViewPresentation =
+  | "isometric"
+  | "first_person"
+  | "third_person";
 
-const fogVariantFor = (firstPerson: boolean): "isometric" | "first_person" =>
-  firstPerson ? "first_person" : "isometric";
+// Camera presentation never changes authoritative visibility. First person
+// alone lifts unseen silhouettes into near-camera haze and hides the player;
+// locked third person keeps the same black/memory language and x-ray player
+// readability as isometric play.
+const ViewPresentationContext =
+  React.createContext<RendererViewPresentation>("isometric");
+
+const fogVariantFor = (
+  presentation: RendererViewPresentation | boolean,
+): "isometric" | "first_person" =>
+  presentation === "first_person" || presentation === true
+    ? "first_person"
+    : "isometric";
 
 export interface GameRenderer3DProps {
   map: MapData;
@@ -626,6 +643,8 @@ export interface GameRenderer3DProps {
   fineRatio?: number;
   playerPos?: [number, number];
   playerFacing?: [number, number];
+  playerVisualYaw?: number;
+  playerVisualYawRef?: React.MutableRefObject<number>;
   playerSpriteId?: string;
   worldItems?: { id: string; cell: [number, number]; icon: string }[];
   extraPlacements?: ObjectPlacementData[];
@@ -650,8 +669,6 @@ export interface GameRenderer3DProps {
   showBehaviorIntents?: boolean;
   worldDeniedCells?: { x: number; z: number; kind?: string }[];
   showGrid?: boolean;
-  enableOcclusion?: boolean;
-  occlusionAzimuth?: number;
   renderCenter?: [number, number];
   renderRadius?: number;
   lintProblems?: { cell?: [number, number] | null; severity: string }[];
@@ -668,15 +685,40 @@ export interface GameRenderer3DProps {
   showMemoryDebug?: boolean;
   performanceMode?: boolean;
   authoritativePointLightBudget?: number;
+  viewPresentation?: RendererViewPresentation;
+  /** @deprecated Use viewPresentation. Retained for preview call sites. */
   firstPersonView?: boolean;
 }
 
 const TILE_SLIDE_SPEED = 8.5;
 const TILE_SLIDE_SNAP_DISTANCE = 10;
 const TILE_SLIDE_EPSILON = 0.000001;
+const PLAYER_WALK_IDLE_GRACE_MS = 140;
 const RENDER_CHUNK_SIZE = 12;
 const RENDER_WINDOW_SHIFT_DISTANCE = 8;
 const DEFAULT_RENDER_RADIUS = 28;
+
+function PlayerVisualYawGroup({
+  authoritativeYaw,
+  visualYawRef,
+  children,
+}: {
+  authoritativeYaw: number;
+  visualYawRef?: React.MutableRefObject<number>;
+  children: React.ReactNode;
+}) {
+  const groupRef = useRef<THREE.Group>(null);
+  useFrame(() => {
+    if (!groupRef.current) return;
+    groupRef.current.rotation.y =
+      visualYawRef?.current ?? authoritativeYaw;
+  });
+  return (
+    <group ref={groupRef} rotation={[0, authoritativeYaw, 0]}>
+      {children}
+    </group>
+  );
+}
 
 // ── Rainbow-dusk sky ────────────────────────────────────────────────────────
 // A large inverted sphere with an unlit gradient shader: indigo zenith →
@@ -746,11 +788,13 @@ function SmoothPositionGroup({
   position,
   snapDistance = TILE_SLIDE_SNAP_DISTANCE,
   onPositionUpdate,
+  onMovingChange,
   children,
 }: {
   position: [number, number, number];
   snapDistance?: number;
   onPositionUpdate?: (position: THREE.Vector3) => void;
+  onMovingChange?: (moving: boolean) => void;
   children: React.ReactNode;
 }) {
   const groupRef = useRef<THREE.Group>(null);
@@ -759,11 +803,23 @@ function SmoothPositionGroup({
   const nextTargetRef = useRef(new THREE.Vector3(...position));
   const stepRef = useRef(new THREE.Vector3());
   const hasPositionRef = useRef(false);
+  const movingRef = useRef(false);
   const onPositionUpdateRef = useRef(onPositionUpdate);
+  const onMovingChangeRef = useRef(onMovingChange);
 
   useEffect(() => {
     onPositionUpdateRef.current = onPositionUpdate;
   }, [onPositionUpdate]);
+
+  useEffect(() => {
+    onMovingChangeRef.current = onMovingChange;
+  }, [onMovingChange]);
+
+  const reportMoving = (moving: boolean) => {
+    if (movingRef.current === moving) return;
+    movingRef.current = moving;
+    onMovingChangeRef.current?.(moving);
+  };
 
   useLayoutEffect(() => {
     const nextTarget = nextTargetRef.current.set(
@@ -788,11 +844,13 @@ function SmoothPositionGroup({
       targetRef.current.copy(nextTarget);
       groupRef.current.position.copy(nextTarget);
       hasPositionRef.current = true;
+      reportMoving(false);
       onPositionUpdateRef.current?.(currentRef.current);
       return;
     }
 
     targetRef.current.copy(nextTarget);
+    reportMoving(true);
   }, [
     position[0],
     position[1],
@@ -809,9 +867,13 @@ function SmoothPositionGroup({
 
     // Almost every actor is stationary on almost every visual frame. Avoid a
     // square root for those callbacks; only moving groups need exact distance.
-    if (distanceSquared < TILE_SLIDE_EPSILON) return;
+    if (distanceSquared < TILE_SLIDE_EPSILON) {
+      reportMoving(false);
+      return;
+    }
 
     const distance = Math.sqrt(distanceSquared);
+    reportMoving(true);
 
     if (distance > snapDistance) {
       current.copy(target);
@@ -827,6 +889,10 @@ function SmoothPositionGroup({
             .multiplyScalar(maxStep / distance),
         );
       }
+    }
+
+    if (current.distanceToSquared(target) < TILE_SLIDE_EPSILON) {
+      reportMoving(false);
     }
 
     groupRef.current.position.copy(current);
@@ -885,16 +951,63 @@ const updateActorRenderPosition = (actorId: string, position: THREE.Vector3) => 
 };
 
 const ACTOR_SPRITE_RENDER_ORDER = 200;
+const PLAYER_XRAY_RENDER_ORDER = ACTOR_SPRITE_RENDER_ORDER + 1;
 const ACTOR_EFFECT_RENDER_ORDER = 210;
 const ACTOR_UI_RENDER_ORDER = 220;
-const ACTOR_RING_RENDER_ORDER = 180;
-const PLAYER_RING_RENDER_ORDER = 190;
 const DARK_ADJACENT_ENTITY_TINT = "#625B7D";
 const DARK_ADJACENT_ENTITY_OPACITY = 0.42;
-// Fog and its debug boundary top out at order 90. A camera-faded wall remains
-// a readable silhouette above those screen-space overlays, while actor bands
-// begin at 180 so the wall can never tint an actor standing in front of it.
-const VISIBLE_STRUCTURE_RENDER_ORDER = 100;
+const PLAYER_XRAY_TINT = "#89E7FF";
+const PLAYER_XRAY_COLOR = new THREE.Color(PLAYER_XRAY_TINT);
+const PLAYER_XRAY_VERTEX_SHADER = `
+  uniform mat3 spriteMapTransform;
+  varying vec2 vMapUv;
+
+  void main() {
+    vMapUv = (spriteMapTransform * vec3(uv, 1.0)).xy;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+const PLAYER_XRAY_FRAGMENT_SHADER = `
+  uniform sampler2D spriteMap;
+  uniform vec2 spriteTexel;
+  uniform vec3 tint;
+  uniform float xrayOpacity;
+  varying vec2 vMapUv;
+
+  void main() {
+    vec2 edgeStep = spriteTexel * 1.75;
+    float centerAlpha = texture2D(spriteMap, vMapUv).a;
+    float leftAlpha = texture2D(spriteMap, vMapUv + vec2(-edgeStep.x, 0.0)).a;
+    float rightAlpha = texture2D(spriteMap, vMapUv + vec2(edgeStep.x, 0.0)).a;
+    float downAlpha = texture2D(spriteMap, vMapUv + vec2(0.0, -edgeStep.y)).a;
+    float upAlpha = texture2D(spriteMap, vMapUv + vec2(0.0, edgeStep.y)).a;
+    float downLeftAlpha = texture2D(spriteMap, vMapUv - edgeStep).a;
+    float upRightAlpha = texture2D(spriteMap, vMapUv + edgeStep).a;
+    float upLeftAlpha = texture2D(
+      spriteMap,
+      vMapUv + vec2(-edgeStep.x, edgeStep.y)
+    ).a;
+    float downRightAlpha = texture2D(
+      spriteMap,
+      vMapUv + vec2(edgeStep.x, -edgeStep.y)
+    ).a;
+
+    float neighborMax = max(
+      max(max(leftAlpha, rightAlpha), max(downAlpha, upAlpha)),
+      max(max(downLeftAlpha, upRightAlpha), max(upLeftAlpha, downRightAlpha))
+    );
+    float neighborMin = min(
+      min(min(leftAlpha, rightAlpha), min(downAlpha, upAlpha)),
+      min(min(downLeftAlpha, upRightAlpha), min(upLeftAlpha, downRightAlpha))
+    );
+    float innerEdge = max(0.0, centerAlpha - neighborMin);
+    float outerEdge = max(0.0, neighborMax - centerAlpha);
+    float outlineAlpha = smoothstep(0.04, 0.4, max(innerEdge, outerEdge));
+
+    if (outlineAlpha < 0.02) discard;
+    gl_FragColor = vec4(tint, outlineAlpha * xrayOpacity);
+  }
+`;
 
 const actorSpriteTint = (illumination: number | undefined) => {
   const brightness = resolveActorSpriteBrightness(illumination ?? 1);
@@ -921,7 +1034,6 @@ const EntityNode = memo(function EntityNode({
   maxHp,
   fxKey,
   engaged,
-  isActive,
   showHpWhenFull,
   actorId,
   illumination,
@@ -938,8 +1050,6 @@ const EntityNode = memo(function EntityNode({
   // Hostile within threat range of the player — keeps its HP bar visible
   // even at full health so a fight reads at a glance.
   engaged?: boolean;
-  // This entity owns the current combat turn (bright cyan ring).
-  isActive?: boolean;
   // Force the HP bar even at full health (party members during combat).
   showHpWhenFull?: boolean;
   actorId?: string;
@@ -992,42 +1102,6 @@ const EntityNode = memo(function EntityNode({
         }
       }}
     >
-      {engaged && !isActive && !darkSilhouette && (
-        <mesh
-          position={[0, 0.015, 0]}
-          rotation={[-Math.PI / 2, 0, 0]}
-          renderOrder={ACTOR_RING_RENDER_ORDER}
-        >
-          <ringGeometry args={[0.34, 0.44, 20]} />
-          <meshBasicMaterial
-            color="#BF616A"
-            transparent
-            opacity={0.55}
-            depthTest
-            depthWrite={false}
-            toneMapped={false}
-          />
-        </mesh>
-      )}
-      {/* Active-turn ring: whoever is acting right now wears the bright ring */}
-      {isActive && !darkSilhouette && (
-        <mesh
-          position={[0, 0.02, 0]}
-          rotation={[-Math.PI / 2, 0, 0]}
-          renderOrder={ACTOR_RING_RENDER_ORDER}
-        >
-          <ringGeometry args={[0.38, 0.52, 24]} />
-          <meshBasicMaterial
-            color="#7DF9FF"
-            transparent
-            opacity={0.9}
-            depthTest
-            depthWrite={false}
-            toneMapped={false}
-          />
-        </mesh>
-      )}
-
       {texture && ready ? (
         <Billboard position={[0, renderHeight * 0.5, 0]}>
           <mesh renderOrder={ACTOR_SPRITE_RENDER_ORDER}>
@@ -1645,6 +1719,7 @@ function ActorReadoutLayer({
   actorPhysicalStates,
   perceptionAlerts,
   combatIntents,
+  showPerceptionDebug,
   showBehaviorIntents,
   transformCell,
   isCellVisible,
@@ -1654,6 +1729,7 @@ function ActorReadoutLayer({
   actorPhysicalStates?: Record<string, ActorPhysicalStateRecord>;
   perceptionAlerts?: ImmersivePerceptionAlertRecord[];
   combatIntents?: ImmersiveCombatIntentRecord[];
+  showPerceptionDebug?: boolean;
   showBehaviorIntents?: boolean;
   transformCell: (cell: readonly unknown[]) => [number, number];
   isCellVisible?: (cell: readonly [number, number]) => boolean;
@@ -1724,45 +1800,49 @@ function ActorReadoutLayer({
     );
   }
   const tethers: React.ReactNode[] = [];
-  (perceptionAlerts || []).forEach((alert, index) => {
-    if (alert.alertness === "oblivious") return;
-    const source = transformCell(alert.cell);
-    if (isCellVisible && !isCellVisible(source)) return;
-    const target = transformCell(alert.target_cell);
-    tethers.push(
-      <ActorTether
-        key={`perception:${alert.actor_id}:${index}`}
-        sourceActorIds={[alert.actor_id, alert.entity_id]}
-        sourceFallback={source}
-        targetActorIds={alert.tracks_live_target ? ["player"] : []}
-        targetFallback={target}
-        color={alert.alertness === "combat" ? "#fb7185" : "#fbbf24"}
-        dashed={alert.alertness !== "combat"}
-      />,
-    );
-  });
-  (combatIntents || []).forEach((intent, index) => {
-    if (intent.action_type === "overwatch") return;
-    const targetCell = intent.target_cells[0];
-    if (!targetCell) return;
-    const sourceState = entityStates?.[intent.actor_id];
-    if (
-      isCellVisible &&
-      sourceState?.cell &&
-      !isCellVisible(sourceState.cell as [number, number])
-    ) return;
-    tethers.push(
-      <ActorTether
-        key={`combat-intent:${intent.actor_id}:${index}`}
-        sourceActorIds={[intent.actor_id]}
-        sourceFallback={[0, 0]}
-        targetActorIds={intent.target_actor_id ? [intent.target_actor_id] : []}
-        targetFallback={transformCell(targetCell)}
-        color="#ef4444"
-        dashed={intent.action_type === "advance"}
-      />,
-    );
-  });
+  if (showPerceptionDebug) {
+    (perceptionAlerts || []).forEach((alert, index) => {
+      if (alert.alertness === "oblivious") return;
+      const source = transformCell(alert.cell);
+      if (isCellVisible && !isCellVisible(source)) return;
+      const target = transformCell(alert.target_cell);
+      tethers.push(
+        <ActorTether
+          key={`perception:${alert.actor_id}:${index}`}
+          sourceActorIds={[alert.actor_id, alert.entity_id]}
+          sourceFallback={source}
+          targetActorIds={alert.tracks_live_target ? ["player"] : []}
+          targetFallback={target}
+          color={alert.alertness === "combat" ? "#fb7185" : "#fbbf24"}
+          dashed={alert.alertness !== "combat"}
+        />,
+      );
+    });
+  }
+  if (showBehaviorIntents) {
+    (combatIntents || []).forEach((intent, index) => {
+      if (intent.action_type === "overwatch") return;
+      const targetCell = intent.target_cells[0];
+      if (!targetCell) return;
+      const sourceState = entityStates?.[intent.actor_id];
+      if (
+        isCellVisible &&
+        sourceState?.cell &&
+        !isCellVisible(sourceState.cell as [number, number])
+      ) return;
+      tethers.push(
+        <ActorTether
+          key={`combat-intent:${intent.actor_id}:${index}`}
+          sourceActorIds={[intent.actor_id]}
+          sourceFallback={[0, 0]}
+          targetActorIds={intent.target_actor_id ? [intent.target_actor_id] : []}
+          targetFallback={transformCell(targetCell)}
+          color="#ef4444"
+          dashed={intent.action_type === "advance"}
+        />,
+      );
+    });
+  }
   return <>{badges}{tethers}</>;
 }
 
@@ -2177,25 +2257,14 @@ const getStandingSurfaceY = (
   return baseHeight + surfaceOffset;
 };
 
-const getOcclusionTopY = (cell: CellData) => {
-  const height = (cell.visual_height || 0) * 0.5;
-  return (cell.y || 0) + (height > 0 ? height : 0.5);
-};
-
-const OCCLUSION_MIN_TOP_Y = 0.6;
-const OCCLUSION_RAY_LENGTH = 7;
-const OCCLUSION_RAY_HALF_WIDTH = 1.45;
-const OCCLUSION_FADE_OPACITY = 0.38;
+const STRUCTURE_MIN_TOP_Y = 0.6;
 // Cells whose base elevation is at least this are overhead geometry (roofs,
-// high bridges). They occlude regardless of visual_height or object tags —
+// high bridges). They remain structural regardless of visual_height or tags —
 // roof cells are flat "floor" tiles raised to y=2, which the height/object
 // tests alone would never catch.
-const OCCLUSION_OVERHEAD_MIN_Y = 1.5;
-// Roofs hide in a wider bubble than walls so a building's interior reads as
-// a room, not a small fading patch around the player.
-const OCCLUSION_OVERHEAD_PLAYER_RADIUS_SQ = 42;
+const STRUCTURE_OVERHEAD_MIN_Y = 1.5;
 
-const isOccludingCellObject = (object: ObjectData | null | undefined) =>
+const isStructuralCellObject = (object: ObjectData | null | undefined) =>
   Boolean(
     object &&
       !object.tags?.includes("floor") &&
@@ -2204,16 +2273,16 @@ const isOccludingCellObject = (object: ObjectData | null | undefined) =>
   );
 
 const isOverheadCell = (cell: CellData) =>
-  (cell.y || 0) >= OCCLUSION_OVERHEAD_MIN_Y;
+  (cell.y || 0) >= STRUCTURE_OVERHEAD_MIN_Y;
 
-const shouldRenderCellWithOcclusion = (
+const shouldRenderCellAsStructure = (
   cell: CellData,
   object: ObjectData | null | undefined,
 ) =>
   cell.active !== false &&
-  ((cell.visual_height || 0) * 0.5 > OCCLUSION_MIN_TOP_Y ||
+  ((cell.visual_height || 0) * 0.5 > STRUCTURE_MIN_TOP_Y ||
     isOverheadCell(cell) ||
-    isOccludingCellObject(object));
+    isStructuralCellObject(object));
 
 const isWallObject = (object: ObjectData | null | undefined) =>
   Boolean(object?.tags?.includes("wall"));
@@ -2364,18 +2433,16 @@ type CellVisualGroup = {
 
 function InstancedCellGroup({
   group,
-  hiddenCellKeys,
   memoryOrigin,
 }: {
   group: CellVisualGroup;
-  hiddenCellKeys?: Set<string>;
   memoryOrigin?: [number, number];
 }) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
-  const firstPersonView = useContext(FirstPersonViewContext);
+  const viewPresentation = useContext(ViewPresentationContext);
   const fogMaterial = resolveStaticFogMaterialPolicy(
     group.fogState,
-    fogVariantFor(firstPersonView),
+    fogVariantFor(viewPresentation),
   );
   const texture = fogMaterial.preserveTextureMaps
     ? getObjectMaterialTexture(group.material)
@@ -2408,15 +2475,14 @@ function InstancedCellGroup({
     const dummy = new THREE.Object3D();
     group.cells.forEach((cell, index) => {
       const y = cell.y || 0;
-      const hidden = hiddenCellKeys?.has(getCellCoordKey(cell.x, cell.z));
       if (group.kind === "plane") {
         dummy.position.set(cell.x, y + 0.001, cell.z);
         dummy.rotation.set(-Math.PI / 2, 0, 0);
-        dummy.scale.set(hidden ? 0.0001 : 1, hidden ? 0.0001 : 1, hidden ? 0.0001 : 1);
+        dummy.scale.set(1, 1, 1);
       } else {
         dummy.position.set(cell.x, y + group.height / 2, cell.z);
         dummy.rotation.set(0, 0, 0);
-        dummy.scale.set(hidden ? 0.0001 : 1, hidden ? 0.0001 : 1, hidden ? 0.0001 : 1);
+        dummy.scale.set(1, 1, 1);
       }
       dummy.updateMatrix();
       meshRef.current!.setMatrixAt(index, dummy.matrix);
@@ -2437,7 +2503,7 @@ function InstancedCellGroup({
       meshRef.current.instanceColor.needsUpdate = true;
     }
     meshRef.current.computeBoundingSphere();
-  }, [group, hiddenCellKeys, memoryOrigin?.[0], memoryOrigin?.[1]]);
+  }, [group, memoryOrigin?.[0], memoryOrigin?.[1]]);
 
   return (
     <instancedMesh
@@ -2484,72 +2550,6 @@ function InstancedCellGroup({
       )}
     </instancedMesh>
   );
-}
-
-function getOccludedCellKeys(
-  cells: CellData[],
-  objectById: Map<string, ObjectData>,
-  playerPos: [number, number] | undefined,
-  cameraAzimuth: number,
-) {
-  const occludedKeys = new Set<string>();
-  if (!playerPos) return occludedKeys;
-
-  const [px, pz] = playerPos;
-
-  const playerY = playerStateRef.ready ? playerStateRef.py : 0;
-  // The wide roof-reveal bubble only applies while the player is actually
-  // beneath overhead geometry (indoors). Outside, roofs fade via the camera
-  // ray like walls do, so buildings don't peel open as the player walks past.
-  const playerUnderOverhead = cells.some(
-    (cell) =>
-      isOverheadCell(cell) &&
-      cell.x === px &&
-      cell.z === pz &&
-      (cell.y || 0) > playerY + 1.0,
-  );
-
-  cells.forEach((cell) => {
-    const object = cell.object_id ? objectById.get(cell.object_id) : null;
-    if (!shouldRenderCellWithOcclusion(cell, object)) return;
-
-    const overhead = isOverheadCell(cell);
-    // Overhead geometry only occludes while it is actually above the player;
-    // if the player ever stands at roof height it must stay solid.
-    if (overhead && (cell.y || 0) <= playerY + 1.0) return;
-
-    // Geometry whose highest point is at or below the player never blocks the camera
-    if (getOcclusionTopY(cell) <= playerY + 0.1) return;
-
-    const dx = cell.x - px;
-    const dz = cell.z - pz;
-    const playerDistSq = dx * dx + dz * dz;
-    const heightBias = THREE.MathUtils.clamp(
-      (getOcclusionTopY(cell) - OCCLUSION_MIN_TOP_Y) * 0.08,
-      0,
-      0.65,
-    );
-
-    const insideIndoorRoofReveal =
-      overhead &&
-      playerUnderOverhead &&
-      playerDistSq <= OCCLUSION_OVERHEAD_PLAYER_RADIUS_SQ;
-    const betweenCameraAndPlayer = isWorldPointInCameraOcclusionCorridor(
-      [cell.x, cell.z],
-      playerPos,
-      cameraAzimuth,
-      OCCLUSION_RAY_LENGTH,
-      OCCLUSION_RAY_HALF_WIDTH + heightBias,
-    );
-
-    // Walls and props fade only when they sit between the camera and player.
-    // The radius reveal is reserved for roofs while the player is indoors.
-    if (insideIndoorRoofReveal || betweenCameraAndPlayer) {
-      occludedKeys.add(getCellCoordKey(cell.x, cell.z));
-    }
-  });
-
-  return occludedKeys;
 }
 
 const resolveStructureEmission = (
@@ -2643,10 +2643,7 @@ function applyGroupStructurePolicy(
     if (child.userData[baseRenderOrderKey] === undefined) {
       child.userData[baseRenderOrderKey] = child.renderOrder || 0;
     }
-    child.renderOrder =
-      opacity < 0.999
-        ? VISIBLE_STRUCTURE_RENDER_ORDER
-        : child.userData[baseRenderOrderKey];
+    child.renderOrder = child.userData[baseRenderOrderKey];
 
     if (fogMaterial.flatUnlit) {
       const flatMaterial =
@@ -2716,8 +2713,8 @@ function applyGroupStructurePolicy(
       const baseDepthWrite = material.userData[baseDepthWriteKey] as boolean;
       const targetOpacity = baseOpacity * opacity;
       // Fog stays in its own depth-tested overlay pass. Static geometry keeps
-      // ordinary opaque depth behavior; only a camera-faded wall becomes
-      // transparent, which prevents it from painting over actors behind it.
+      // ordinary opaque depth behavior; isometric player readability is
+      // handled by a separate depth-aware player contour.
       const targetTransparent = baseTransparent || opacity < 0.999;
       const targetDepthWrite = baseDepthWrite && opacity >= 0.999;
       const updateProgram =
@@ -2734,7 +2731,7 @@ function applyGroupStructurePolicy(
   });
 }
 
-function OccludingCellRenderer({
+function StaticStructureCellRenderer({
   cell,
   object,
   rotationY,
@@ -2752,7 +2749,8 @@ function OccludingCellRenderer({
   memoryOrigin?: [number, number];
 }) {
   const groupRef = useRef<THREE.Group>(null);
-  const firstPersonView = useContext(FirstPersonViewContext);
+  const viewPresentation = useContext(ViewPresentationContext);
+  const firstPersonView = viewPresentation === "first_person";
   const height = Math.max(0, (cell.visual_height || 0) * 0.5);
   const kind = height > 0 ? "box" : "plane";
   const material = getCellMaterialProps(object, cell.walkable);
@@ -2860,7 +2858,7 @@ function OccludingCellRenderer({
       ref={groupRef}
       position={[cell.x, cell.y || 0, cell.z]}
       rotation={[0, rotationY, 0]}
-      renderOrder={opacity < 0.999 ? VISIBLE_STRUCTURE_RENDER_ORDER : 0}
+      renderOrder={0}
     >
       {!fastTile && object ? (
         <ObjectRuntimeModelRenderer object={object} />
@@ -3070,8 +3068,6 @@ function CellVisualLayers({
   objectById,
   wallRotationByCell,
   playerPos,
-  enableOcclusion,
-  occlusionAzimuth,
   getCellFogState,
   getStructureIllumination,
 }: {
@@ -3079,75 +3075,28 @@ function CellVisualLayers({
   objectById: Map<string, ObjectData>;
   wallRotationByCell: Map<string, number>;
   playerPos?: [number, number];
-  enableOcclusion: boolean;
-  occlusionAzimuth: number;
   getCellFogState?: (cell: readonly [number, number]) => FogRenderState;
   getStructureIllumination?: (cell: readonly [number, number]) => number;
 }) {
   const sampledMemoryOrigin = useMemo<[number, number] | undefined>(() => {
     if (!playerPos) return undefined;
     // Fine-grid movement advances by thirds of one rendered macro tile. The
-    // camera corridor and remembered-wall gradient do not meaningfully change
-    // inside that tile. Sample once per rendered macro tile so neither feature
-    // rewrites every structure instance on every fine-grid step.
+    // remembered-wall gradient does not meaningfully change inside that tile,
+    // so sample once per rendered macro tile.
     return [Math.round(playerPos[0]), Math.round(playerPos[1])];
   }, [
     playerPos ? Math.round(playerPos[0]) : undefined,
     playerPos ? Math.round(playerPos[1]) : undefined,
   ]);
-  const sampledPlayerPos = enableOcclusion ? sampledMemoryOrigin : undefined;
-
-  const occludedCellKeys = useMemo(
-    () =>
-      enableOcclusion
-        ? getOccludedCellKeys(
-            cells,
-            objectById,
-            sampledPlayerPos,
-            occlusionAzimuth,
-          )
-        : new Set<string>(),
-    [
-      enableOcclusion,
-      cells,
-      objectById,
-      occlusionAzimuth,
-      sampledPlayerPos?.[0],
-      sampledPlayerPos?.[1],
-    ],
-  );
-
-  const cameraFadedCellKeys = useMemo(() => {
-    if (occludedCellKeys.size === 0) return occludedCellKeys;
-    const faded = new Set<string>();
-    cells.forEach((cell) => {
-      const key = getCellCoordKey(cell.x, cell.z);
-      if (!occludedCellKeys.has(key)) return;
-      // Camera fading is a player-readability treatment, not present-tense
-      // vision. Retain each wall's fog material while fading any foreground
-      // wall that crosses the camera corridor, including dark memory walls.
-      if (
-        !getCellFogState ||
-        resolveStructureFogCompositePolicy(
-          getCellFogState([cell.x, cell.z]),
-          true,
-        ).cameraFaded
-      ) {
-        faded.add(key);
-      }
-    });
-    return faded;
-  }, [cells, occludedCellKeys, getCellFogState]);
 
   const {
     groups,
-    occludableGroups,
+    structuralGroups,
     modelCells,
-    occludableModelCells,
-    occludableFastCells,
+    structuralModelCells,
   } = useMemo(() => {
     const groupedCells = new Map<CellVisualGroup["key"], CellVisualGroup>();
-    const groupedOccludableCells = new Map<
+    const groupedStructuralCells = new Map<
       CellVisualGroup["key"],
       CellVisualGroup
     >();
@@ -3156,14 +3105,9 @@ function CellVisualLayers({
       object: ObjectData;
       rotationY: number;
     }> = [];
-    const renderedOccludableModelCells: Array<{
+    const renderedStructuralModelCells: Array<{
       cell: CellData;
       object: ObjectData;
-      rotationY: number;
-    }> = [];
-    const renderedOccludableFastCells: Array<{
-      cell: CellData;
-      object: ObjectData | null | undefined;
       rotationY: number;
     }> = [];
 
@@ -3211,40 +3155,38 @@ function CellVisualLayers({
         isWallObject(object)
           ? wallRotationByCell.get(getCellCoordKey(cell.x, cell.z)) || 0
           : 0;
-      // Structure routing is independent from camera fading. Performance mode
-      // may disable occlusion, but wall materials still need the authoritative
-      // fog and surface-lighting policy.
-      const canOcclude = shouldRenderCellWithOcclusion(cell, object);
+      // Structure routing is independent from player readability. Walls and
+      // roofs retain their camera-specific fog and surface-lighting materials.
+      const isStructure = shouldRenderCellAsStructure(cell, object);
       const fogState = getCellFogState?.([cell.x, cell.z]) || "visible";
 
       // Unseen structures are solid black, so their authored part detail is
       // unobservable. Keep their full-height topology with one instanced proxy
       // instead of mounting every wall part and material in hidden space.
-      if (canOcclude && fogState === "unseen") {
+      if (isStructure && fogState === "unseen") {
         addGroupedCell(
-          groupedOccludableCells,
+          groupedStructuralCells,
           cell,
           object,
-          "occludable_unseen",
+          "structure_unseen",
         );
         return;
       }
 
       const fastTile = isFastTileObject(object);
 
-      if (canOcclude && fastTile) {
-        renderedOccludableFastCells.push({ cell, object, rotationY });
+      if (isStructure && fastTile) {
         addGroupedCell(
-          groupedOccludableCells,
+          groupedStructuralCells,
           cell,
           object,
-          "occludable",
+          "structure",
         );
         return;
       }
 
-      if (canOcclude && !fastTile && object) {
-        renderedOccludableModelCells.push({ cell, object, rotationY });
+      if (isStructure && !fastTile && object) {
+        renderedStructuralModelCells.push({ cell, object, rotationY });
         return;
       }
 
@@ -3258,10 +3200,9 @@ function CellVisualLayers({
 
     return {
       groups: Array.from(groupedCells.values()),
-      occludableGroups: Array.from(groupedOccludableCells.values()),
+      structuralGroups: Array.from(groupedStructuralCells.values()),
       modelCells: renderedModelCells,
-      occludableModelCells: renderedOccludableModelCells,
-      occludableFastCells: renderedOccludableFastCells,
+      structuralModelCells: renderedStructuralModelCells,
     };
   }, [
     cells,
@@ -3282,33 +3223,20 @@ function CellVisualLayers({
     [modelCells, getCellFogState, getStructureIllumination],
   );
 
-  const occludableModelInstances = useMemo(() => {
-    const visible: typeof occludableModelCells = [];
-    const faded: typeof occludableModelCells = [];
-
-    occludableModelCells.forEach((item) => {
-      if (cameraFadedCellKeys.has(getCellCoordKey(item.cell.x, item.cell.z))) {
-        faded.push(item);
-      } else {
-        visible.push(item);
-      }
-    });
-
-    return {
-      visible: groupFogAwareRuntimeInstances(
-        visible,
+  const structuralModelInstances = useMemo(
+    () =>
+      groupFogAwareRuntimeInstances(
+        structuralModelCells,
         ({ cell }) => [cell.x, cell.y || 0, cell.z],
         ({ cell }) => getCellFogState?.([cell.x, cell.z]) || "visible",
         ({ cell }) => getStructureIllumination?.([cell.x, cell.z]) || 0,
       ),
-      faded,
-    };
-  }, [
-    occludableModelCells,
-    cameraFadedCellKeys,
-    getCellFogState,
-    getStructureIllumination,
-  ]);
+    [
+      structuralModelCells,
+      getCellFogState,
+      getStructureIllumination,
+    ],
+  );
 
   return (
     <>
@@ -3319,11 +3247,10 @@ function CellVisualLayers({
           memoryOrigin={sampledMemoryOrigin}
         />
       ))}
-      {occludableGroups.map((group) => (
+      {structuralGroups.map((group) => (
         <InstancedCellGroup
           key={group.key}
           group={group}
-          hiddenCellKeys={cameraFadedCellKeys}
           memoryOrigin={sampledMemoryOrigin}
         />
       ))}
@@ -3338,7 +3265,7 @@ function CellVisualLayers({
         />
       ))}
       {staticModelInstances.singles.map(({ cell, object, rotationY }, index) => (
-        <OccludingCellRenderer
+        <StaticStructureCellRenderer
           key={`model_cell_${cell.x}_${cell.y || 0}_${cell.z}_${index}`}
           cell={cell}
           object={object}
@@ -3349,7 +3276,7 @@ function CellVisualLayers({
           memoryOrigin={sampledMemoryOrigin}
         />
       ))}
-      {occludableModelInstances.visible.groups.map((group) => (
+      {structuralModelInstances.groups.map((group) => (
         <RuntimeObjectInstances
           key={`occ_cell_instances_${group.key}`}
           object={group.object}
@@ -3359,10 +3286,10 @@ function CellVisualLayers({
           memoryOrigin={sampledMemoryOrigin}
         />
       ))}
-      {occludableModelInstances.visible.singles.map(
+      {structuralModelInstances.singles.map(
         ({ cell, object, rotationY }, index) => (
-          <OccludingCellRenderer
-            key={`occ_model_visible_cell_${cell.x}_${cell.y || 0}_${cell.z}_${index}`}
+          <StaticStructureCellRenderer
+            key={`structure_model_cell_${cell.x}_${cell.y || 0}_${cell.z}_${index}`}
             cell={cell}
             object={object}
             rotationY={rotationY}
@@ -3374,36 +3301,6 @@ function CellVisualLayers({
             memoryOrigin={sampledMemoryOrigin}
           />
         ),
-      )}
-      {occludableModelInstances.faded.map(({ cell, object, rotationY }, index) => (
-        <OccludingCellRenderer
-          key={`occ_model_faded_cell_${cell.x}_${cell.y || 0}_${cell.z}_${index}`}
-          cell={cell}
-          object={object}
-          rotationY={rotationY}
-          opacity={OCCLUSION_FADE_OPACITY}
-          illumination={
-            getStructureIllumination?.([cell.x, cell.z]) || 0
-          }
-          fogState={getCellFogState?.([cell.x, cell.z]) || "visible"}
-          memoryOrigin={sampledMemoryOrigin}
-        />
-      ))}
-      {occludableFastCells.map(({ cell, object, rotationY }, index) =>
-        cameraFadedCellKeys.has(getCellCoordKey(cell.x, cell.z)) ? (
-        <OccludingCellRenderer
-          key={`occ_fast_cell_${cell.x}_${cell.y || 0}_${cell.z}_${index}`}
-          cell={cell}
-          object={object}
-          rotationY={rotationY}
-          opacity={OCCLUSION_FADE_OPACITY}
-          illumination={
-            getStructureIllumination?.([cell.x, cell.z]) || 0
-          }
-          fogState={getCellFogState?.([cell.x, cell.z]) || "visible"}
-          memoryOrigin={sampledMemoryOrigin}
-        />
-        ) : null,
       )}
     </>
   );
@@ -3648,10 +3545,10 @@ function InstancedRuntimeGeometryGroup({
   memoryOrigin?: [number, number];
 }) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
-  const firstPersonView = useContext(FirstPersonViewContext);
+  const viewPresentation = useContext(ViewPresentationContext);
   const material = resolveObjectMaterial(object, geometryGroup.materialRef);
   const fogMaterial = fogState
-    ? resolveStaticFogMaterialPolicy(fogState, fogVariantFor(firstPersonView))
+    ? resolveStaticFogMaterialPolicy(fogState, fogVariantFor(viewPresentation))
     : null;
   const preserveTextureMaps = fogMaterial?.preserveTextureMaps !== false;
   const texture = preserveTextureMaps ? getObjectMaterialTexture(material) : null;
@@ -4387,7 +4284,8 @@ function FoggedMemoryObject({
   memoryColor: string;
 }) {
   const groupRef = useRef<THREE.Group>(null);
-  const firstPersonView = useContext(FirstPersonViewContext);
+  const viewPresentation = useContext(ViewPresentationContext);
+  const firstPersonView = viewPresentation === "first_person";
   const settledRef = useRef(false);
   const probesRef = useRef(0);
   const meshCountRef = useRef(-1);
@@ -4501,6 +4399,8 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
   map,
   playerPos,
   playerFacing = [0, -1],
+  playerVisualYaw,
+  playerVisualYawRef,
   playerSpriteId,
   worldItems,
   extraPlacements,
@@ -4519,8 +4419,6 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
   inCombat = false,
   activeTurnKey = null,
   showGrid,
-  enableOcclusion = false,
-  occlusionAzimuth = Math.PI / 4,
   renderCenter,
   renderRadius = DEFAULT_RENDER_RADIUS,
   fxCellTransform,
@@ -4533,7 +4431,48 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
   suppressPlacementLights = false,
 }: ReferenceGameRendererProps) {
   const gamePackage = useEngineStore((state) => state.gamePackage);
-  const firstPersonView = useContext(FirstPersonViewContext);
+  const viewPresentation = useContext(ViewPresentationContext);
+  const firstPersonView = viewPresentation === "first_person";
+  const playerStructureOcclusion =
+    resolvePlayerStructureOcclusionPolicy(firstPersonView);
+  const playerModelObject = useMemo(
+    () => resolvePlayerModelObject(gamePackage),
+    [gamePackage],
+  );
+  const [playerModelReady, setPlayerModelReady] = useState(false);
+  const [playerMoving, setPlayerMoving] = useState(false);
+  const playerWalkStopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const handlePlayerMovingChange = useCallback((moving: boolean) => {
+    if (playerWalkStopTimerRef.current) {
+      clearTimeout(playerWalkStopTimerRef.current);
+      playerWalkStopTimerRef.current = null;
+    }
+    if (moving) {
+      setPlayerMoving(true);
+      return;
+    }
+    playerWalkStopTimerRef.current = setTimeout(() => {
+      playerWalkStopTimerRef.current = null;
+      setPlayerMoving(false);
+    }, PLAYER_WALK_IDLE_GRACE_MS);
+  }, []);
+  useEffect(
+    () => () => {
+      if (playerWalkStopTimerRef.current) {
+        clearTimeout(playerWalkStopTimerRef.current);
+      }
+    },
+    [],
+  );
+  useEffect(() => {
+    setPlayerModelReady(false);
+  }, [
+    playerModelObject?.id,
+    playerModelObject?.asset?.data_url,
+    playerModelObject?.asset?.filename,
+  ]);
   useWebGLContextRecovery();
 
   const snappedRenderCenter = useMemo<[number, number] | null>(() => {
@@ -4801,6 +4740,30 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
     playerSpriteId || gamePackage.settings?.player_sprite_id,
     gamePackage,
   );
+  const playerXrayUniforms = useMemo(() => {
+    if (!playerSpriteTex) return undefined;
+    playerSpriteTex.updateMatrix();
+    const image = playerSpriteTex.image as
+      | { width?: number; height?: number }
+      | undefined;
+    const textureWidth = Math.max(1, Number(image?.width || 1));
+    const textureHeight = Math.max(1, Number(image?.height || 1));
+    return {
+      spriteMap: { value: playerSpriteTex },
+      spriteMapTransform: { value: playerSpriteTex.matrix },
+      spriteTexel: {
+        value: new THREE.Vector2(1 / textureWidth, 1 / textureHeight),
+      },
+      tint: { value: PLAYER_XRAY_COLOR },
+      xrayOpacity: {
+        value: playerStructureOcclusion.xrayOpacity,
+      },
+    };
+  }, [
+    playerSpriteTex,
+    playerSpriteReady,
+    playerStructureOcclusion.xrayOpacity,
+  ]);
 
   // Memoize materials so we don't recreate them every frame
   const materials = useMemo(
@@ -4883,8 +4846,6 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
         objectById={objectById}
         wallRotationByCell={wallRotationByCell}
         playerPos={playerPos}
-        enableOcclusion={enableOcclusion}
-        occlusionAzimuth={occlusionAzimuth}
         getCellFogState={getCellFogState}
         getStructureIllumination={getStructureIllumination}
       />
@@ -4994,7 +4955,6 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
             fxKey={key}
             actorId={placement.entity_id}
             engaged={engaged}
-            isActive={activeTurnKey === key}
             illumination={
               darkSilhouette
                 ? 0
@@ -5038,7 +4998,6 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
             maxHp={entityDef.max_hp}
             fxKey={follower.entity_id}
             actorId={follower.entity_id}
-            isActive={activeTurnKey === follower.entity_id}
             showHpWhenFull={inCombat}
             illumination={
               darkSilhouette ? 0 : getCellIllumination?.(follower.cell)
@@ -5075,93 +5034,140 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
                 playerStateRef.pz = position.z;
                 playerStateRef.ready = true;
               }}
+              onMovingChange={handlePlayerMovingChange}
             >
               {/* In first person the camera IS the player: keep this group
                   mounted (its slide drives playerStateRef, which the eye
                   rides), but draw no marker or ring. */}
-              {!firstPersonView &&
-                (playerSpriteTex && playerSpriteReady ? (
-                <Billboard
-                  follow={true}
-                  lockX={false}
-                  lockY={false}
-                  lockZ={false}
-                >
-                  <mesh
-                    position={[0, renderHeight * 0.5, 0]}
-                    renderOrder={ACTOR_SPRITE_RENDER_ORDER}
-                  >
-                    <planeGeometry args={[renderWidth, renderHeight]} />
-                    <meshBasicMaterial
-                      map={playerSpriteTex}
-                      color={actorSpriteTint(playerIllumination)}
-                      transparent={true}
-                      alphaTest={0.1}
-                      depthTest
-                      depthWrite={false}
-                      fog={false}
-                      side={THREE.DoubleSide}
-                      toneMapped={false}
-                    />
-                  </mesh>
-                </Billboard>
-              ) : (
-                <mesh
-                  position={[0, 0.4, 0]}
-                  renderOrder={ACTOR_SPRITE_RENDER_ORDER}
-                  rotation={[
-                    0,
-                    Math.atan2(playerFacing[0], playerFacing[1]),
-                    0,
-                  ]}
-                >
-                  <cylinderGeometry args={[0, 0.3, 0.8, 4]} />
-                  <meshBasicMaterial
-                    color={actorFallbackTint("#5E81AC", playerIllumination)}
-                    transparent
-                    opacity={1}
-                    depthTest
-                    depthWrite={false}
-                    toneMapped={false}
-                  />
-                </mesh>
-              ))}
-              {!firstPersonView &&
-                (activeTurnKey === "player" ? (
-                <mesh
-                  position={[0, 0.02, 0]}
-                  rotation={[-Math.PI / 2, 0, 0]}
-                  renderOrder={PLAYER_RING_RENDER_ORDER}
-                >
-                  <ringGeometry args={[0.38, 0.52, 24]} />
-                  <meshBasicMaterial
-                    color="#7DF9FF"
-                    transparent
-                    opacity={0.95}
-                    depthTest
-                    depthWrite={false}
-                    toneMapped={false}
-                    fog={false}
-                  />
-                </mesh>
-              ) : (
-                <mesh
-                  position={[0, 0.01, 0]}
-                  rotation={[-Math.PI / 2, 0, 0]}
-                  renderOrder={PLAYER_RING_RENDER_ORDER}
-                >
-                  <ringGeometry args={[0.3, 0.4, 16]} />
-                  <meshBasicMaterial
-                    color="#88C0D0"
-                    transparent
-                    opacity={inCombat ? 0.72 : 0.82}
-                    depthTest
-                    depthWrite={false}
-                    toneMapped={false}
-                    fog={false}
-                  />
-                </mesh>
-              ))}
+              {!firstPersonView && (
+                <>
+                  {playerModelObject && (
+                    <PlayerVisualYawGroup
+                      authoritativeYaw={
+                        playerVisualYaw ??
+                        Math.atan2(playerFacing[0], playerFacing[1])
+                      }
+                      visualYawRef={playerVisualYawRef}
+                    >
+                      <AssetModelRenderer
+                        object={playerModelObject}
+                        showPlaceholder={false}
+                        appearance="player_default"
+                        illumination={playerIllumination}
+                        animationClipName={resolvePlayerLocomotionClip(
+                          playerMoving,
+                        )}
+                        onReadyChange={setPlayerModelReady}
+                      />
+                      {playerModelReady &&
+                        playerStructureOcclusion.renderXrayPass && (
+                          <AssetModelRenderer
+                            object={playerModelObject}
+                            showPlaceholder={false}
+                            appearance="player_xray"
+                            animationClipName={resolvePlayerLocomotionClip(
+                              playerMoving,
+                            )}
+                          />
+                        )}
+                    </PlayerVisualYawGroup>
+                  )}
+                  {(!playerModelObject || !playerModelReady) &&
+                    (playerSpriteTex && playerSpriteReady ? (
+                    <Billboard
+                      follow={true}
+                      lockX={false}
+                      lockY={false}
+                      lockZ={false}
+                    >
+                      <mesh
+                        position={[0, renderHeight * 0.5, 0]}
+                        renderOrder={ACTOR_SPRITE_RENDER_ORDER}
+                      >
+                        <planeGeometry args={[renderWidth, renderHeight]} />
+                        <meshBasicMaterial
+                          map={playerSpriteTex}
+                          color={actorSpriteTint(playerIllumination)}
+                          transparent={true}
+                          alphaTest={0.1}
+                          depthTest
+                          depthWrite={false}
+                          fog={false}
+                          side={THREE.DoubleSide}
+                          toneMapped={false}
+                        />
+                      </mesh>
+                      {playerStructureOcclusion.renderXrayPass && (
+                        <mesh
+                          position={[0, renderHeight * 0.5, 0]}
+                          renderOrder={PLAYER_XRAY_RENDER_ORDER}
+                          raycast={() => null}
+                        >
+                          <planeGeometry args={[renderWidth, renderHeight]} />
+                          <shaderMaterial
+                            uniforms={playerXrayUniforms}
+                            vertexShader={PLAYER_XRAY_VERTEX_SHADER}
+                            fragmentShader={PLAYER_XRAY_FRAGMENT_SHADER}
+                            transparent
+                            depthTest
+                            depthFunc={THREE.GreaterDepth}
+                            depthWrite={false}
+                            side={THREE.DoubleSide}
+                            toneMapped={false}
+                          />
+                        </mesh>
+                      )}
+                    </Billboard>
+                  ) : (
+                    <>
+                      <mesh
+                        position={[0, 0.4, 0]}
+                        renderOrder={ACTOR_SPRITE_RENDER_ORDER}
+                        rotation={[
+                          0,
+                          playerVisualYaw ??
+                            Math.atan2(playerFacing[0], playerFacing[1]),
+                          0,
+                        ]}
+                      >
+                        <cylinderGeometry args={[0, 0.3, 0.8, 4]} />
+                        <meshBasicMaterial
+                          color={actorFallbackTint("#5E81AC", playerIllumination)}
+                          transparent
+                          opacity={1}
+                          depthTest
+                          depthWrite={false}
+                          toneMapped={false}
+                        />
+                      </mesh>
+                      {playerStructureOcclusion.renderXrayPass && (
+                        <mesh
+                          position={[0, 0.4, 0]}
+                          renderOrder={PLAYER_XRAY_RENDER_ORDER}
+                          rotation={[
+                            0,
+                            playerVisualYaw ??
+                              Math.atan2(playerFacing[0], playerFacing[1]),
+                            0,
+                          ]}
+                          raycast={() => null}
+                        >
+                          <cylinderGeometry args={[0, 0.3, 0.8, 4]} />
+                          <meshBasicMaterial
+                            color={PLAYER_XRAY_TINT}
+                            transparent
+                            opacity={playerStructureOcclusion.xrayOpacity}
+                            depthTest
+                            depthFunc={THREE.GreaterDepth}
+                            depthWrite={false}
+                            toneMapped={false}
+                          />
+                        </mesh>
+                      )}
+                    </>
+                  ))}
+                </>
+              )}
             </SmoothPositionGroup>
           );
         })()}
@@ -5319,7 +5325,7 @@ function AuthoritativeGroundLightField({
             x: world[0],
             // Floor tile models rise a few hundredths above the authored cell
             // base. Keep the authoritative light wash just above that stable
-            // surface (but below actor rings and tactical annotations) so it
+            // surface (but below actors and tactical annotations) so it
             // is not swallowed inside the floor geometry.
             y: value.y + 0.052,
             z: world[1],
@@ -5369,10 +5375,6 @@ function AuthoritativeGroundLightField({
         if (dx * dx + dz * dz > paddedRadius * paddedRadius) return [];
       }
 
-      const contributionTotal = entry.contributions.reduce(
-        (sum, contribution) => sum + Math.max(0, contribution.value),
-        0,
-      );
       const absoluteLight = Math.max(0, Math.min(1, entry.value));
       const presentationStrength =
         resolveAuthoritativeGroundLightPresentationStrength(absoluteLight);
@@ -5381,19 +5383,19 @@ function AuthoritativeGroundLightField({
       // alpha would be genuinely imperceptible; do not make light pop on at
       // the visible/remembered classification boundary.
       if (presentationStrength <= 0.001) return [];
-      const sourceTint =
-        contributionTotal > 0.0001
-          ? entry.contributions
-              .reduce((mixed, contribution) => {
-                const source = sourceById.get(contribution.source_id);
-                return mixed.add(
-                  new THREE.Color(source?.color || "#facc15").multiplyScalar(
-                    Math.max(0, contribution.value),
-                  ),
-                );
-              }, new THREE.Color(0, 0, 0))
-              .multiplyScalar(1 / contributionTotal)
-          : new THREE.Color("#b8c1e8");
+      // Color follows the mechanically strongest source. Averaging every
+      // overlapping source allowed complementary amber and violet lights to
+      // cancel into a broad white/gray floor even though no white light was
+      // authored there.
+      const dominantSourceId =
+        entry.strongest_source_id || entry.contributions[0]?.source_id;
+      const dominantSource = dominantSourceId
+        ? sourceById.get(dominantSourceId)
+        : undefined;
+      const sourceTint = new THREE.Color(
+        dominantSource?.color ||
+          (dominantSourceId ? "#facc15" : "#b8c1e8"),
+      );
       // The exact mechanical value still owns the footprint. Presentation
       // deliberately compresses its weakest tail so the light dissolves into
       // the black fog field instead of leaving a uniformly readable floor.
@@ -5638,6 +5640,8 @@ export const GameRenderer3D = memo(function GameRenderer3D({
   fineRatio = 3,
   playerPos,
   playerFacing,
+  playerVisualYaw,
+  playerVisualYawRef,
   playerSpriteId,
   worldItems,
   extraPlacements,
@@ -5662,8 +5666,6 @@ export const GameRenderer3D = memo(function GameRenderer3D({
   showBehaviorIntents,
   worldDeniedCells,
   showGrid,
-  enableOcclusion,
-  occlusionAzimuth,
   renderCenter,
   renderRadius,
   fogOfWar,
@@ -5677,8 +5679,13 @@ export const GameRenderer3D = memo(function GameRenderer3D({
   showMemoryDebug,
   performanceMode = false,
   authoritativePointLightBudget = MAX_AUTHORITATIVE_POINT_LIGHTS,
+  viewPresentation,
   firstPersonView = false,
 }: GameRenderer3DProps) {
+  const resolvedViewPresentation: RendererViewPresentation =
+    viewPresentation ?? (firstPersonView ? "first_person" : "isometric");
+  const resolvedFirstPersonView =
+    resolvedViewPresentation === "first_person";
   const objectLibrary = useEngineStore((state) => state.gamePackage.object_library);
   // Footsteps and trace layers replace the save's MapDelta on every fine step,
   // but they do not alter terrain, doors, or object placements. Keep a narrow
@@ -5994,12 +6001,14 @@ export const GameRenderer3D = memo(function GameRenderer3D({
   }, [authoritativeVisibility, gridSpace, fineRatio]);
 
   return (
-    <FirstPersonViewContext.Provider value={firstPersonView}>
+    <ViewPresentationContext.Provider value={resolvedViewPresentation}>
       <group>
       <ReferenceGameRenderer
         map={visualWorld.map}
         playerPos={transformPoint(playerPos)}
         playerFacing={playerFacing}
+        playerVisualYaw={playerVisualYaw}
+        playerVisualYawRef={playerVisualYawRef}
         playerSpriteId={playerSpriteId}
         worldItems={visualWorldItems}
         extraPlacements={visualExtraPlacements}
@@ -6018,8 +6027,6 @@ export const GameRenderer3D = memo(function GameRenderer3D({
         inCombat={inCombat}
         activeTurnKey={activeTurnKey}
         showGrid={showGrid}
-        enableOcclusion={enableOcclusion}
-        occlusionAzimuth={occlusionAzimuth}
         renderCenter={transformPoint(renderCenter)}
         renderRadius={visualRadius}
         fxCellTransform={transformCell}
@@ -6047,10 +6054,9 @@ export const GameRenderer3D = memo(function GameRenderer3D({
         mapDelta={mapDelta}
         gridSpace={gridSpace}
         fineRatio={fineRatio}
-        // Authoritative fog never derives visibility from this coordinate,
-        // but camera occlusion still needs a player anchor. Feed it the
-        // macro-cadenced render center so foreground walls fade correctly
-        // without invalidating the structure tree on every fine-grid step.
+        // Authoritative fog never derives visibility from this coordinate.
+        // The macro-cadenced center only anchors the remembered-structure
+        // gradient, avoiding structure-tree work on every fine-grid step.
         playerPos={
           authoritativeVisibility ? stableOverlayRenderCenter : playerPos
         }
@@ -6072,7 +6078,7 @@ export const GameRenderer3D = memo(function GameRenderer3D({
         showPerceptionDebug={showPerceptionDebug}
         showMemoryDebug={showMemoryDebug}
         performanceMode={performanceMode}
-        firstPersonView={firstPersonView}
+        firstPersonView={resolvedFirstPersonView}
       />
       <ActorReadoutLayer
         map={visualWorld.map}
@@ -6080,6 +6086,7 @@ export const GameRenderer3D = memo(function GameRenderer3D({
         actorPhysicalStates={actorPhysicalStates}
         perceptionAlerts={perceptionAlerts}
         combatIntents={combatIntents}
+        showPerceptionDebug={showPerceptionDebug}
         showBehaviorIntents={showBehaviorIntents}
         transformCell={transformCell}
         isCellVisible={isVisualCellVisible}
@@ -6092,7 +6099,7 @@ export const GameRenderer3D = memo(function GameRenderer3D({
         />
       )}
       </group>
-    </FirstPersonViewContext.Provider>
+    </ViewPresentationContext.Provider>
   );
 });
 

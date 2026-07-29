@@ -13,7 +13,7 @@ import type {
 } from "../schema/save";
 import {
   compactNpcTaskHistory,
-  createSimulationSnapshotFromV1,
+  createCachedSimulationSnapshotFromV1,
   resolveObjectManipulationAffordance,
   type SimulationCellState,
   type SimulationMapSnapshot,
@@ -958,7 +958,11 @@ export const createImmersiveStage2SnapshotFromV1 = (
   save: PlaySave,
   mapId = save.current_map_id || gamePackage.metadata.start_map_id,
 ): ImmersiveStage2Snapshot => {
-  const simulation = createSimulationSnapshotFromV1(gamePackage, save, mapId);
+  const simulation = createCachedSimulationSnapshotFromV1(
+    gamePackage,
+    save,
+    mapId,
+  );
   return {
     map_id: simulation.map_id,
     generated_at_tick: simulation.generated_at_tick,
@@ -2893,7 +2897,11 @@ export const createImmersivePerceptionSnapshotFromV1 = (
   // illumination, and every visual channel query each reconstructed the full
   // simulation independently. A populated fine-grid map could therefore do
   // dozens of identical world builds for one player macro step.
-  const simulation = createSimulationSnapshotFromV1(gamePackage, save, mapId);
+  const simulation = createCachedSimulationSnapshotFromV1(
+    gamePackage,
+    save,
+    mapId,
+  );
   const stage2: ImmersiveStage2Snapshot = {
     map_id: simulation.map_id,
     generated_at_tick: simulation.generated_at_tick,
@@ -4243,12 +4251,30 @@ interface ImmersiveCombatActorRef {
 const nextCombatFactId = (save: PlaySave, offset: number) =>
   `wfact:combat:${String((save.world_facts?.length || 0) + offset + 1).padStart(6, "0")}`;
 
+const tacticalHeightIndexCache = new WeakMap<
+  MapData,
+  Map<string, number>
+>();
+
 const heightAtCell = (
   gamePackage: GamePackage,
   mapId: string,
   cell: [number, number],
-): number =>
-  getImmersiveMap(gamePackage, mapId)?.cells.find((candidate) => candidate.x === cell[0] && candidate.z === cell[1])?.height || 0;
+): number => {
+  const map = getImmersiveMap(gamePackage, mapId);
+  if (!map) return 0;
+  let index = tacticalHeightIndexCache.get(map);
+  if (!index) {
+    index = new Map(
+      map.cells.map((candidate) => [
+        cellKey([candidate.x, candidate.z]),
+        candidate.height || 0,
+      ]),
+    );
+    tacticalHeightIndexCache.set(map, index);
+  }
+  return index.get(cellKey(cell)) || 0;
+};
 
 const actorTeamsOpposed = (a: ImmersiveCombatTeam, b: ImmersiveCombatTeam): boolean =>
   (a === "hostile" && (b === "player" || b === "ally")) ||
@@ -4533,25 +4559,53 @@ const overwatchCellsForActor = (
   actor: ImmersiveCombatActorRef,
   snapshot: ImmersiveStage2Snapshot,
   radius = 4,
+  preparedCellsByKey?: Map<string, ImmersiveTileLayerCellState>,
 ): [number, number][] => {
-  const byKey = new Map(snapshot.tile_layers.cells.map((cell) => [cellKey(cell.cell), cell]));
-  return snapshot.tile_layers.cells
-    .filter((cell) =>
-      !sameCell(cell.cell, actor.cell) &&
-      !cell.blocks_movement &&
-      manhattan(actor.cell, cell.cell) <= radius &&
-      hasTileLineOfSight(byKey, actor.cell, cell.cell)
-    )
-    .map((cell) => cloneCell(cell.cell));
+  const byKey =
+    preparedCellsByKey ||
+    new Map(
+      snapshot.tile_layers.cells.map((cell) => [cellKey(cell.cell), cell]),
+    );
+  const cells: [number, number][] = [];
+  for (let x = actor.cell[0] - radius; x <= actor.cell[0] + radius; x += 1) {
+    const remaining = radius - Math.abs(x - actor.cell[0]);
+    for (
+      let z = actor.cell[1] - remaining;
+      z <= actor.cell[1] + remaining;
+      z += 1
+    ) {
+      const candidate: [number, number] = [x, z];
+      if (sameCell(candidate, actor.cell)) continue;
+      const tile = byKey.get(cellKey(candidate));
+      if (
+        !tile ||
+        tile.blocks_movement ||
+        !hasTileLineOfSight(byKey, actor.cell, candidate)
+      ) {
+        continue;
+      }
+      cells.push(cloneCell(candidate));
+    }
+  }
+  return cells;
 };
 
 const nextStepToward = (
   from: [number, number],
   to: [number, number],
   snapshot: ImmersiveStage2Snapshot,
+  preparedCellsByKey?: Map<string, ImmersiveTileLayerCellState>,
 ): [number, number] => {
+  const byKey =
+    preparedCellsByKey ||
+    new Map(
+      snapshot.tile_layers.cells.map((cell) => [cellKey(cell.cell), cell]),
+    );
   const candidates = orthogonalNeighborCells(from)
-    .filter((cell) => snapshot.tile_layers.cells.some((tile) => sameCell(tile.cell, cell) && !tile.blocks_movement))
+    .filter((cell) => {
+      const tile = byKey.get(cellKey(cell));
+      return Boolean(tile && !tile.blocks_movement);
+    })
     .sort((a, b) => manhattan(a, to) - manhattan(b, to) || a[0] - b[0] || a[1] - b[1]);
   return candidates[0] ? cloneCell(candidates[0]) : cloneCell(from);
 };
@@ -4569,12 +4623,18 @@ const telegraphedIntentForActor = (
   actor: ImmersiveCombatActorRef,
   actors: ImmersiveCombatActorRef[],
   snapshot: ImmersiveStage2Snapshot,
+  cellsByKey: Map<string, ImmersiveTileLayerCellState>,
 ): ImmersiveCombatIntentRecord | undefined => {
   if (actor.overwatch) {
     return {
       actor_id: actor.actor_id,
       action_type: "overwatch",
-      target_cells: overwatchCellsForActor(actor, snapshot, scaleMacroDistanceForPackage(gamePackage, 4)),
+      target_cells: overwatchCellsForActor(
+        actor,
+        snapshot,
+        scaleMacroDistanceForPackage(gamePackage, 4),
+        cellsByKey,
+      ),
       estimated_damage: 2,
       priority: 70,
     };
@@ -4596,9 +4656,137 @@ const telegraphedIntentForActor = (
     actor_id: actor.actor_id,
     action_type: "advance",
     target_actor_id: target.actor_id,
-    target_cells: [nextStepToward(actor.cell, target.cell, snapshot)],
+    target_cells: [
+      nextStepToward(actor.cell, target.cell, snapshot, cellsByKey),
+    ],
     estimated_damage: 0,
     priority: 40,
+  };
+};
+
+interface RuntimeCombatTileLayerCacheEntry {
+  simulation: SimulationMapSnapshot;
+  saved_blocking_key: string;
+  tile_layers: ImmersiveTileLayerSnapshot;
+}
+
+const runtimeCombatTileLayerCache = new WeakMap<
+  GamePackage,
+  Map<string, RuntimeCombatTileLayerCacheEntry>
+>();
+
+const combatSavedBlockingKey = (
+  layers: Record<string, ImmersiveTileLayerRecord>,
+): string =>
+  JSON.stringify(
+    Object.entries(layers)
+      .filter(
+        ([, layer]) =>
+          Boolean(layer.blocks_movement) ||
+          Boolean(layer.blocks_vision) ||
+          Boolean(layer.gas),
+      )
+      .map(([key, layer]) => [
+        key,
+        Boolean(layer.blocks_movement),
+        Boolean(layer.blocks_vision),
+        layer.gas?.kind || null,
+        layer.gas?.density ?? null,
+        layer.gas?.visibility_modifier ?? null,
+      ]),
+  );
+
+// Tactical cover, overwatch, and intent previews need structural collision and
+// smoke, but they do not need the transient footstep/surface history produced
+// by every moving combatant. Keeping that evidence in the general simulation
+// cache remains important for hearing and perception; this dedicated snapshot
+// prevents those short-lived records (and exact actor motion) from rebuilding
+// all 13k+ dungeon cells for every combat pulse.
+const createImmersiveCombatStage2SnapshotFromV1 = (
+  gamePackage: GamePackage,
+  save: PlaySave,
+  mapId: string,
+): ImmersiveStage2Snapshot => {
+  const map = getImmersiveMap(gamePackage, mapId);
+  const delta = save.map_deltas?.[mapId];
+  const structuralDelta: MapDelta | undefined = delta
+    ? {
+        opened_doors: delta.opened_doors,
+        unlocked_doors: delta.unlocked_doors,
+        moved_objects: delta.moved_objects,
+        carried_objects: delta.carried_objects,
+        removed_objects: delta.removed_objects,
+        simulation_conditions: delta.simulation_conditions,
+        environment_fields: delta.environment_fields
+          ? Object.fromEntries(
+              Object.entries(delta.environment_fields).flatMap(
+                ([key, fields]) => {
+                  const structuralFields = fields.filter(
+                    (field) => field.kind !== "sound",
+                  );
+                  return structuralFields.length
+                    ? [[key, structuralFields]]
+                    : [];
+                },
+              ),
+            )
+          : undefined,
+      }
+    : undefined;
+  // Simulation-map entity occupants are not used by tactical targeting: live
+  // actor cells are resolved separately below. Hiding them here also avoids
+  // stale authored placement cells becoming false path blockers after actors
+  // move.
+  const structuralEntityStates = Object.fromEntries(
+    (map?.entity_placements || []).map((placement, index) => [
+      entityPlacementStateKey(mapId, placement, index),
+      { hidden: true },
+    ]),
+  );
+  const structuralSave: PlaySave = {
+    ...save,
+    entity_states: structuralEntityStates,
+    map_deltas: structuralDelta
+      ? { [mapId]: structuralDelta }
+      : {},
+  };
+  const simulation = createCachedSimulationSnapshotFromV1(
+    gamePackage,
+    structuralSave,
+    mapId,
+    "combat_structure",
+  );
+  const savedLayers =
+    save.immersive_tile_layers?.[simulation.map_id] || {};
+  const savedBlockingKey = combatSavedBlockingKey(savedLayers);
+  let packageCache = runtimeCombatTileLayerCache.get(gamePackage);
+  if (!packageCache) {
+    packageCache = new Map();
+    runtimeCombatTileLayerCache.set(gamePackage, packageCache);
+  }
+  const cached = packageCache.get(mapId);
+  const tileLayers =
+    cached?.simulation === simulation &&
+    cached.saved_blocking_key === savedBlockingKey
+      ? cached.tile_layers
+      : createImmersiveTileLayerSnapshot(simulation, savedLayers);
+  if (tileLayers !== cached?.tile_layers) {
+    packageCache.set(mapId, {
+      simulation,
+      saved_blocking_key: savedBlockingKey,
+      tile_layers: tileLayers,
+    });
+    while (packageCache.size > 4) {
+      const oldestMapId = packageCache.keys().next().value;
+      if (oldestMapId === undefined) break;
+      packageCache.delete(oldestMapId);
+    }
+  }
+  return {
+    map_id: simulation.map_id,
+    generated_at_tick: simulation.generated_at_tick,
+    tile_layers: tileLayers,
+    scheduler: createImmersiveSchedulerStateFromV1(gamePackage, save),
   };
 };
 
@@ -4607,10 +4795,22 @@ export const createImmersiveCombatTacticalSnapshotFromV1 = (
   save: PlaySave,
   mapId = save.current_map_id || gamePackage.metadata.start_map_id,
 ): ImmersiveStage6TacticalSnapshot => {
-  const stage2 = createImmersiveStage2SnapshotFromV1(gamePackage, save, mapId);
+  const stage2 = createImmersiveCombatStage2SnapshotFromV1(
+    gamePackage,
+    save,
+    mapId,
+  );
   const actors = combatActorsFromSave(gamePackage, save, mapId);
   const cellsByKey = new Map(stage2.tile_layers.cells.map((cell) => [cellKey(cell.cell), cell]));
-  const coverEdges = stage2.tile_layers.cells.flatMap((cell) =>
+  // Cover matters only at a combatant's current targetable cell. Scanning
+  // every fine-grid cell made one tactical refresh traverse the entire 72×72
+  // ruin even though a fight contains only a handful of actors.
+  const occupiedCombatCells = new Map<string, ImmersiveTileLayerCellState>();
+  actors.forEach((actor) => {
+    const cell = cellsByKey.get(cellKey(actor.cell));
+    if (cell) occupiedCombatCells.set(cellKey(cell.cell), cell);
+  });
+  const coverEdges = [...occupiedCombatCells.values()].flatMap((cell) =>
     coverEdgesForCell(gamePackage, save, mapId, cell, cellsByKey),
   );
   const overwatchZones = actors
@@ -4619,10 +4819,21 @@ export const createImmersiveCombatTacticalSnapshotFromV1 = (
       actor_id: actor.actor_id,
       origin_cell: cloneCell(actor.cell),
       radius: scaleMacroDistanceForPackage(gamePackage, 4),
-      cells: overwatchCellsForActor(actor, stage2, scaleMacroDistanceForPackage(gamePackage, 4)),
+      cells: overwatchCellsForActor(
+        actor,
+        stage2,
+        scaleMacroDistanceForPackage(gamePackage, 4),
+        cellsByKey,
+      ),
     }));
   const intents = actors.flatMap((actor) => {
-    const intent = telegraphedIntentForActor(gamePackage, actor, actors, stage2);
+    const intent = telegraphedIntentForActor(
+      gamePackage,
+      actor,
+      actors,
+      stage2,
+      cellsByKey,
+    );
     return intent ? [intent] : [];
   });
   return {
@@ -4685,6 +4896,17 @@ const resolveImmersiveOverwatchTriggers = (
   movingActor: ImmersiveCombatActorRef,
   path: [number, number][],
 ): { save: PlaySave; triggers: ImmersiveCombatOverwatchTrigger[]; world_facts: PlaySaveWorldFact[] } => {
+  const hasArmedOverwatch =
+    Boolean(save.flags?.immersive_overwatch_player) ||
+    Object.values(save.entity_states || {}).some(
+      (state) =>
+        Boolean(state.overwatch) &&
+        !Boolean(state.dead) &&
+        !Boolean(state.hidden),
+    );
+  if (!hasArmedOverwatch) {
+    return { save, triggers: [], world_facts: [] };
+  }
   const tactical = createImmersiveCombatTacticalSnapshotFromV1(gamePackage, save, mapId);
   const validPath = path.filter(
     (cell): cell is [number, number] =>
