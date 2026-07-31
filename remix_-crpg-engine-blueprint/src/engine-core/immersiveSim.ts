@@ -2623,7 +2623,14 @@ const scoreStimulusAtActor = (
       max_range: channelRange,
       minimum_light: channel.requires_illumination ? 0.001 : 0,
     });
-    if (!acquisition.acquired) {
+    // Some creatures are authored to see in darkness. They still use the
+    // authoritative structural ray, but low illumination must not veto an
+    // otherwise clear line of sight. Ordinary illuminated sight continues to
+    // require the complete acquisition score.
+    const acquiredForChannel = channel.requires_illumination
+      ? acquisition.acquired
+      : acquisition.line_of_sight;
+    if (!acquiredForChannel) {
       if (!sourceTraceAllowed) {
         return { score: 0, raw_score: 0, acquisition };
       }
@@ -2653,7 +2660,9 @@ const scoreStimulusAtActor = (
         )
       : undefined;
   const base = stimulus.kind === "visible_player" && acquisition
-    ? acquisition.score
+    ? channel.requires_illumination
+      ? acquisition.score
+      : stimulus.intensity * falloff
     : compactSound ?? propagatedSound ?? stimulus.intensity * falloff;
   const traceMultiplier = sourceTraced ? 0.72 : 1;
   const rawScore = Number(
@@ -3459,6 +3468,11 @@ export const advanceImmersivePerceptionForSave = (
           investigation_target_cell: cloneCell(alert.target_cell),
           perception_search_expires_at_tick: snapshot.generated_at_tick + Math.max(1, profile.search_ticks),
           perception_memory_expires_at_tick: snapshot.generated_at_tick + Math.max(1, profile.memory_ticks),
+          independent_search_origin: undefined,
+          independent_search_target: undefined,
+          independent_search_step: undefined,
+          independent_search_evidence_key: undefined,
+          independent_search_complete_evidence_key: undefined,
         }];
       })),
     },

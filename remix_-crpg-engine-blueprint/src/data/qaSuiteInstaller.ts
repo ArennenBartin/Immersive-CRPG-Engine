@@ -9,6 +9,7 @@ import {
 } from "../store/packageMigration";
 import { withTestingMapSuite } from "./testingMapSuite";
 import { migrateLegacyDialoguePackage } from "../engine-core/keywordDialogue";
+import { withQaRoomCeilingArchitecture } from "./qaSuite/shared";
 
 export type QaSuiteInstallMode = "empty" | "merge" | "replace";
 
@@ -123,6 +124,14 @@ export const mergeQaSuiteIntoPackage = (source: GamePackage): PackageMigrationRe
   const addedMapIds = qa.maps
     .filter((map) => !source.maps.some((existing) => existing.id === map.id))
     .map((map) => map.id);
+  const sourceMapsWithQaArchitecture = source.maps.map((map) =>
+    map.id.startsWith("qa_")
+      ? withQaRoomCeilingArchitecture(map)
+      : map,
+  );
+  const architectureBackfillIds = sourceMapsWithQaArchitecture
+    .filter((map, index) => map !== source.maps[index])
+    .map((map) => map.id);
   const initialSkills = [
     ...new Set([
       ...(source.settings.initial_known_skills || []),
@@ -135,7 +144,7 @@ export const mergeQaSuiteIntoPackage = (source: GamePackage): PackageMigrationRe
       ...source.settings,
       initial_known_skills: initialSkills,
     },
-    maps: appendMissingById(source.maps, qa.maps),
+    maps: appendMissingById(sourceMapsWithQaArchitecture, qa.maps),
     object_library: appendMissingById(source.object_library, qa.object_library),
     sprite_library: appendMissingById(source.sprite_library, qa.sprite_library),
     entities: appendMissingById(source.entities, qa.entities),
@@ -171,8 +180,8 @@ export const mergeQaSuiteIntoPackage = (source: GamePackage): PackageMigrationRe
       {
         code: "qa_suite_merged",
         path: "maps",
-        message: `Merged QA content while preserving all existing IDs; added ${addedMapIds.length} QA map${addedMapIds.length === 1 ? "" : "s"}.`,
-        affectedIds: addedMapIds,
+        message: `Merged QA content while preserving all existing IDs; added ${addedMapIds.length} QA map${addedMapIds.length === 1 ? "" : "s"} and updated ceiling architecture on ${architectureBackfillIds.length} existing QA map${architectureBackfillIds.length === 1 ? "" : "s"}.`,
+        affectedIds: [...new Set([...addedMapIds, ...architectureBackfillIds])],
       },
     ],
   });

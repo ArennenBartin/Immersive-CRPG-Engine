@@ -3,15 +3,22 @@
 // authored content lives in src/data/qaSuite/* wing modules; this file merges
 // them into a package for the explicit builders in qaSuiteInstaller.ts.
 //
-// The suite is the engine's living acceptance test: a hub and eleven labs that
-// prove the fine-grid movement rebuild, the flowing chemistry (button-released
-// floods, a viscosity race, fire with a wet moat, dissipating gas), the
-// emotional layer, dialogue/cutscene/quest/story systems, combat, world
-// simulation, and persistence. Everything is authored in MACRO tiles — the
-// fineWorld expansion produces the fine world at load.
+// The suite is the engine's living acceptance test: a hub, eleven labs, and a
+// reusable Level Zero environment that prove the fine-grid movement rebuild,
+// flowing chemistry, emotional layer, dialogue/cutscene/quest/story systems,
+// combat, world simulation, persistence, and authored corridor traversal.
+// Everything is authored in MACRO tiles — fineWorld expands it at load.
 
 import type { GamePackage } from "../schema/game";
+import {
+  BACKROOMS_LEVEL_ZERO_FLOOR_OBJECT_ID,
+  BACKROOMS_LEVEL_ZERO_LIGHT_OBJECT_ID,
+  BACKROOMS_LEVEL_ZERO_WALL_OBJECT_ID,
+  INSTITUTIONAL_CEILING_LIGHT_OBJECT_ID,
+  objectLibraryPresets,
+} from "../schema/presets";
 import { peopleHorrorSpriteId } from "./animatedSprites";
+import { BACKROOMS_PARASITE_MODEL_OBJECT_ID } from "./backroomsEntityAssets";
 import { DEFAULT_UNLOCKED_ABILITY_IDS, mergeDefaultAbilities } from "./defaultAbilities";
 import {
   QA_START_MAP_ID,
@@ -22,6 +29,7 @@ import {
   mergeWings,
 } from "./qaSuite/shared";
 import { hubWing } from "./qaSuite/hub";
+import { backroomsWing } from "./qaSuite/backroomsWing";
 import { chemistryWing } from "./qaSuite/chemistryWing";
 import { storyWing } from "./qaSuite/storyWing";
 import { combatWing } from "./qaSuite/combatWing";
@@ -40,10 +48,11 @@ export const TEST_SUITE_PLAYER_SPRITE_ID = peopleHorrorSpriteId(1, 1);
 // Bump on any suite-content change: persisted packages refresh their qa_*
 // content when this differs (engineStore hydration), and stale play saves
 // rebuild against the new version.
-export const TEST_SUITE_VERSION = "3.2.0";
+export const TEST_SUITE_VERSION = "3.5.0";
 
 const wings = mergeWings([
   hubWing,
+  backroomsWing,
   chemistryWing,
   storyWing,
   combatWing,
@@ -53,6 +62,16 @@ const wings = mergeWings([
 ]);
 export const TEST_SUITE_MAP_IDS = wings.maps.map((map) => map.id);
 const TEST_SUITE_MAP_ID_SET = new Set(TEST_SUITE_MAP_IDS);
+const QA_ARCHITECTURE_OBJECT_IDS = new Set([
+  INSTITUTIONAL_CEILING_LIGHT_OBJECT_ID,
+  BACKROOMS_LEVEL_ZERO_FLOOR_OBJECT_ID,
+  BACKROOMS_LEVEL_ZERO_WALL_OBJECT_ID,
+  BACKROOMS_LEVEL_ZERO_LIGHT_OBJECT_ID,
+  BACKROOMS_PARASITE_MODEL_OBJECT_ID,
+]);
+const qaArchitectureObjects = objectLibraryPresets.filter((object) =>
+  QA_ARCHITECTURE_OBJECT_IDS.has(object.id),
+);
 
 /**
  * Low-level QA content assembler. It intentionally replaces the map collection
@@ -92,6 +111,15 @@ export const withTestingMapSuite = (
       ],
       clock_start_hour: 9,
       end_title: "QA SUITE COMPLETE",
+      movement_hearing: {
+        ...(pkg.settings?.movement_hearing || {}),
+        // Backrooms carpet muffles a footstep's rendered sound, but the
+        // Parasite should still hear purposeful movement through nearby
+        // corners and adjoining rooms. Sneaking stays meaningfully quieter
+        // even against that more aggressive normal-movement baseline.
+        normal_movement_loudness: 6.5,
+        stealth_noise_multiplier: 0.1,
+      },
       world_state_policy: {
         campaign_switch_ids: ["qa_persistence_major"],
         expedition_switch_ids: ["qa_persistence_hazard"],
@@ -124,6 +152,7 @@ export const withTestingMapSuite = (
     // The bundled game is the QA suite itself. Do not retain legacy worlds,
     // generated regions, or author-added maps when installing the suite.
     maps: [...wings.maps],
+    object_library: mergeById(pkg.object_library, qaArchitectureObjects),
     entities: mergedEntities,
     keywords: mergeById(pkg.keywords, wings.keywords),
     dynamic_topics: mergeById(pkg.dynamic_topics, wings.dynamicTopics),

@@ -23,6 +23,7 @@ import {
   keywordResponse,
   roomCells,
   stampCells,
+  withQaRoomCeilingArchitecture,
   type CellOverrides,
 } from "./shared";
 
@@ -265,7 +266,7 @@ const createHubMap = (
 ): MapData => {
   const overrides: CellOverrides = {};
   stampCells(overrides, [[0, -4]], DOORWAY);
-  return MapDataSchema.parse({
+  return withQaRoomCeilingArchitecture(MapDataSchema.parse({
     id: PHASE_11_HUB_MAP_ID,
     display_name: "Phase 11 — Expedition Architecture Hub",
     width: 9,
@@ -316,7 +317,7 @@ const createHubMap = (
         transition_kind: "portal",
       },
     ],
-  });
+  }));
 };
 
 const authoredItems = (): GamePackage["items"] => [

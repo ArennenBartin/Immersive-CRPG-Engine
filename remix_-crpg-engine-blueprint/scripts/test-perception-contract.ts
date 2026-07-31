@@ -10,6 +10,7 @@ import {
   createSimulationSnapshotFromV1,
   createImmersiveViewerVisibilityFromV1,
   dispatchV1EmitSound,
+  dispatchV1EnemyPulse,
   dispatchV1PushObject,
   dispatchV1UpdateCombatSession,
   expandGamePackageToFine,
@@ -1066,6 +1067,170 @@ console.log("perception contract: physical actions become hearing evidence");
       sameCell(hunterState?.last_known_position, pushPayload!.to!) &&
       Boolean(hunterTask) &&
       sameCell(hunterTask!.target_cell, pushPayload!.to!),
+  );
+}
+
+console.log("perception contract: Backrooms predator sight and hearing");
+{
+  const backroomsMap = gamePackage.maps.find(
+    (candidate) => candidate.id === "qa_backrooms_level_zero",
+  );
+  if (!backroomsMap) throw new Error("QA package is missing Level Zero");
+  const parasiteIndex = backroomsMap.entity_placements.findIndex(
+    (placement) => placement.entity_id === "ent_backrooms_parasite",
+  );
+  if (parasiteIndex < 0) {
+    throw new Error("Level Zero is missing its Parasite");
+  }
+  const parasiteKey = entityPlacementStateKey(
+    backroomsMap.id,
+    backroomsMap.entity_placements[parasiteIndex],
+    parasiteIndex,
+  );
+  const makeBackroomsSave = (cell: [number, number]): PlaySave =>
+    makeSave(cell, {
+      current_map_id: backroomsMap.id,
+      player: { cell: [...cell], facing: [1, 0] },
+      map_deltas: {},
+    });
+
+  const longHallCell: [number, number] = [-13, 13];
+  const longHallSight = advanceImmersivePerceptionForSave(
+    gamePackage,
+    makeBackroomsSave(longHallCell),
+    backroomsMap.id,
+  );
+  const longHallAlert = longHallSight.snapshot.alerts.find(
+    (alert) => alert.actor_id === parasiteKey,
+  );
+  check(
+    "Parasite sees Steve across Level Zero's long open hallway even in dim light",
+    longHallAlert?.stimulus.kind === "visible_player" &&
+      longHallAlert.alertness === "combat" &&
+      longHallAlert.tracks_live_target === true &&
+      longHallAlert.target_actor_id === "player",
+  );
+  const liveBackroomsPackage = expandGamePackageToFine(gamePackage);
+  const liveBackroomsMap = liveBackroomsPackage.maps.find(
+    (candidate) => candidate.id === backroomsMap.id,
+  );
+  if (!liveBackroomsMap) {
+    throw new Error("Fine-grid QA package is missing Level Zero");
+  }
+  const liveParasiteIndex = liveBackroomsMap.entity_placements.findIndex(
+    (placement) => placement.entity_id === "ent_backrooms_parasite",
+  );
+  const liveParasiteKey = entityPlacementStateKey(
+    liveBackroomsMap.id,
+    liveBackroomsMap.entity_placements[liveParasiteIndex]!,
+    liveParasiteIndex,
+  );
+  const liveLongHallSight = advanceImmersivePerceptionForSave(
+    liveBackroomsPackage,
+    makeBackroomsSave([
+      fineCenterOfMacro([-15, 13])[0],
+      fineCenterOfMacro([-15, 13])[1],
+    ]),
+    liveBackroomsMap.id,
+  );
+  check(
+    "Parasite's Play-mode fine-grid sight reaches across Level Zero's full hallway",
+    liveLongHallSight.snapshot.alerts.some(
+      (alert) =>
+        alert.actor_id === liveParasiteKey &&
+        alert.stimulus.kind === "visible_player" &&
+        alert.tracks_live_target === true,
+    ),
+  );
+  const liveWallOccluded = advanceImmersivePerceptionForSave(
+    liveBackroomsPackage,
+    makeBackroomsSave([
+      fineCenterOfMacro([7, 7])[0],
+      fineCenterOfMacro([7, 7])[1],
+    ]),
+    liveBackroomsMap.id,
+  );
+  check(
+    "Play-mode Level Zero walls still block that extended sight range",
+    !liveWallOccluded.snapshot.alerts.some(
+      (alert) =>
+        alert.actor_id === liveParasiteKey &&
+        alert.stimulus.kind === "visible_player",
+    ),
+  );
+
+  const behindWallCell: [number, number] = [7, 7];
+  const wallOccluded = advanceImmersivePerceptionForSave(
+    gamePackage,
+    makeBackroomsSave(behindWallCell),
+    backroomsMap.id,
+  );
+  check(
+    "Level Zero walls block the Parasite's long-range sight",
+    !wallOccluded.snapshot.alerts.some(
+      (alert) =>
+        alert.actor_id === parasiteKey &&
+        alert.stimulus.kind === "visible_player",
+    ),
+  );
+
+  const heardPulse = dispatchV1EmitSound({
+    gamePackage,
+    save: makeBackroomsSave(behindWallCell),
+    mapId: backroomsMap.id,
+    actorId: "player",
+    cell: behindWallCell,
+    loudness: 12,
+    tag: "footstep",
+    materialTag: "soft",
+  });
+  if (!heardPulse.ok) throw new Error("Level Zero hearing pulse failed");
+  const heardBehindWall = advanceImmersivePerceptionForSave(
+    gamePackage,
+    heardPulse.save,
+    backroomsMap.id,
+  );
+  const heardParasite = heardBehindWall.save.entity_states?.[parasiteKey];
+  check(
+    "Parasite hears movement around an occluding corner without gaining wall vision",
+    heardParasite?.last_detection_cause === "heard" &&
+      (heardParasite.alertness === "searching" ||
+        heardParasite.alertness === "suspicious") &&
+      heardParasite.perception_tracks_live_target === false &&
+      Boolean(heardParasite.last_known_position),
+  );
+
+  let cornerPursuitSave = heardBehindWall.save;
+  const cornerPursuitCells: [number, number][] = [];
+  for (let pulseIndex = 0; pulseIndex < 6; pulseIndex += 1) {
+    const pulse = dispatchV1EnemyPulse({
+      gamePackage,
+      save: cornerPursuitSave,
+      mapId: backroomsMap.id,
+      actorIds: [parasiteKey],
+      movementSteps: 1,
+      allowAttack: true,
+      independentMovement: true,
+    });
+    if (!pulse.ok) break;
+    cornerPursuitSave = pulse.save;
+    const cell = cornerPursuitSave.entity_states?.[parasiteKey]?.cell;
+    if (cell) cornerPursuitCells.push([cell[0], cell[1]]);
+  }
+  const walkableBackroomsCells = new Set(
+    backroomsMap.cells
+      .filter((cell) => cell.walkable)
+      .map((cell) => `${cell.x}:${cell.z}`),
+  );
+  check(
+    "heard evidence makes the Parasite route around the corner without crossing a wall",
+    cornerPursuitCells.length >= 4 &&
+      cornerPursuitCells.some((cell) => cell[0] !== 7) &&
+      cornerPursuitCells.every((cell) =>
+        walkableBackroomsCells.has(`${cell[0]}:${cell[1]}`),
+      ) &&
+      cornerPursuitSave.playerStats.hp ===
+        heardBehindWall.save.playerStats.hp,
   );
 }
 

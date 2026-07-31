@@ -15,6 +15,10 @@ import {
   useEngineStore,
 } from "../src/store/engineStore";
 import { TEST_SUITE_MAP_IDS } from "../src/data/testingMapSuite";
+import {
+  BACKROOMS_LEVEL_ZERO_LIGHT_OBJECT_ID,
+  INSTITUTIONAL_CEILING_LIGHT_OBJECT_ID,
+} from "../src/schema/presets";
 
 const base = createEmptyGamePackage();
 const template = base.maps[0];
@@ -156,6 +160,42 @@ for (const map of authoredPackage.maps) {
 for (const qaMapId of TEST_SUITE_MAP_IDS) {
   assert.ok(merged.package.maps.some((map) => map.id === qaMapId), `QA merge omitted ${qaMapId}`);
 }
+
+const legacyQaPackage: GamePackage = {
+  ...qaPackage,
+  maps: qaPackage.maps.map((map, index) => ({
+    ...map,
+    display_name:
+      index === 0 ? "Authored QA Hub Name" : map.display_name,
+    custom_object_placements: map.custom_object_placements.filter(
+      (placement) =>
+        placement.object_id !== INSTITUTIONAL_CEILING_LIGHT_OBJECT_ID &&
+        placement.object_id !== BACKROOMS_LEVEL_ZERO_LIGHT_OBJECT_ID,
+    ),
+  })),
+};
+const backfilledQaPackage = mergeQaSuiteIntoPackage(legacyQaPackage);
+assert.equal(backfilledQaPackage.applied, true);
+assert.equal(
+  backfilledQaPackage.package.maps.length,
+  legacyQaPackage.maps.length,
+  "ceiling backfill must not duplicate existing QA maps",
+);
+assert.equal(
+  backfilledQaPackage.package.maps[0]?.display_name,
+  "Authored QA Hub Name",
+  "ceiling backfill must preserve authored QA map edits",
+);
+assert.ok(
+  backfilledQaPackage.package.maps.every((map) =>
+    map.custom_object_placements.some(
+      (placement) =>
+        placement.object_id === INSTITUTIONAL_CEILING_LIGHT_OBJECT_ID &&
+        placement.collision_mode === "none",
+    ),
+  ),
+  "merging the QA suite must backfill collision-free ceiling lights into legacy QA maps",
+);
 
 const proposedReplace = replaceWithQaSuite(authoredPackage);
 assert.equal(proposedReplace.applied, false);

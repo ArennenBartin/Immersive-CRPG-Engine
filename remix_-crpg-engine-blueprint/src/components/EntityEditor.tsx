@@ -434,6 +434,108 @@ export function EntityEditor() {
                 Friendly NPC / talkable entity
               </label>
 
+              {!activeEntity.is_npc && (
+                <div className="space-y-3 rounded-lg border border-amber-500/20 bg-amber-950/10 p-3">
+                  <label className="flex items-start gap-2 text-sm text-neutral-200">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(activeEntity.independent_movement?.enabled)}
+                      onChange={(event) =>
+                        handleUpdate({
+                          independent_movement: event.target.checked
+                            ? {
+                                enabled: true,
+                                interval_ms:
+                                  activeEntity.independent_movement?.interval_ms ?? 650,
+                                activation_radius:
+                                  activeEntity.independent_movement?.activation_radius ?? 18,
+                                steps_per_pulse:
+                                  activeEntity.independent_movement?.steps_per_pulse ?? 1,
+                              }
+                            : undefined,
+                        })
+                      }
+                      className="mt-0.5 rounded bg-neutral-900 border-neutral-700"
+                    />
+                    <span>
+                      <span className="block font-medium">Independent real-time movement</span>
+                      <span className="mt-0.5 block text-xs text-neutral-500">
+                        Once it has sight or sound evidence, this hostile pursues and can strike
+                        between player steps.
+                      </span>
+                    </span>
+                  </label>
+                  {activeEntity.independent_movement?.enabled && (
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                      <Field label="Movement interval (ms)">
+                        <input
+                          type="number"
+                          min={180}
+                          max={5000}
+                          step={20}
+                          value={activeEntity.independent_movement.interval_ms ?? 650}
+                          onChange={(event) =>
+                            handleUpdate({
+                              independent_movement: {
+                                ...activeEntity.independent_movement!,
+                                enabled: true,
+                                interval_ms: Math.max(
+                                  180,
+                                  Math.min(5000, parseInt(event.target.value, 10) || 650),
+                                ),
+                              },
+                            })
+                          }
+                          className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-amber-500"
+                        />
+                      </Field>
+                      <Field label="Activation radius (macro cells)">
+                        <input
+                          type="number"
+                          min={1}
+                          max={60}
+                          value={activeEntity.independent_movement.activation_radius ?? 18}
+                          onChange={(event) =>
+                            handleUpdate({
+                              independent_movement: {
+                                ...activeEntity.independent_movement!,
+                                enabled: true,
+                                activation_radius: Math.max(
+                                  1,
+                                  Math.min(60, parseInt(event.target.value, 10) || 18),
+                                ),
+                              },
+                            })
+                          }
+                          className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-amber-500"
+                        />
+                      </Field>
+                      <Field label="Fine steps per pulse">
+                        <input
+                          type="number"
+                          min={1}
+                          max={3}
+                          value={activeEntity.independent_movement.steps_per_pulse ?? 1}
+                          onChange={(event) =>
+                            handleUpdate({
+                              independent_movement: {
+                                ...activeEntity.independent_movement!,
+                                enabled: true,
+                                steps_per_pulse: Math.max(
+                                  1,
+                                  Math.min(3, parseInt(event.target.value, 10) || 1),
+                                ),
+                              },
+                            })
+                          }
+                          className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-amber-500"
+                        />
+                      </Field>
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <Field label="World Dialogue">
                   <select
@@ -515,6 +617,29 @@ export function EntityEditor() {
                   {gamePackage.sprite_library.map((sprite) => (
                     <option key={sprite.id} value={sprite.id}>{sprite.display_name || sprite.id}</option>
                   ))}
+                </select>
+              </Field>
+              <Field label="3D Entity Model">
+                <select
+                  className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500"
+                  value={activeEntity.model_object_id || ""}
+                  onChange={(event) =>
+                    handleUpdate({
+                      model_object_id: event.target.value || undefined,
+                    })
+                  }
+                >
+                  <option value="">-- Use Sprite --</option>
+                  {gamePackage.object_library
+                    .filter(
+                      (object) =>
+                        object.model_kind === "asset" && Boolean(object.asset),
+                    )
+                    .map((object) => (
+                      <option key={object.id} value={object.id}>
+                        {object.display_name || object.id}
+                      </option>
+                    ))}
                 </select>
               </Field>
             </section>
@@ -790,6 +915,7 @@ export function EntityEditor() {
                 display_name: { type: "STRING" },
                 is_npc: { type: "BOOLEAN" },
                 sprite_id: { type: "STRING" },
+                model_object_id: { type: "STRING" },
                 dialogue_id: { type: "STRING" },
                 party_dialogue_id: { type: "STRING" },
                 max_hp: { type: "NUMBER" },
@@ -799,6 +925,15 @@ export function EntityEditor() {
                 speed: { type: "NUMBER" },
                 xp_reward: { type: "NUMBER" },
                 skills: { type: "ARRAY", items: { type: "STRING" } },
+                independent_movement: {
+                  type: "OBJECT",
+                  properties: {
+                    enabled: { type: "BOOLEAN" },
+                    interval_ms: { type: "NUMBER" },
+                    activation_radius: { type: "NUMBER" },
+                    steps_per_pulse: { type: "NUMBER" },
+                  },
+                },
                 emotional_axes: {
                   type: "OBJECT",
                   properties: {

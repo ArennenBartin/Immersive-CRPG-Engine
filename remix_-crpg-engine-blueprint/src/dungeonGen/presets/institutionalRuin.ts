@@ -1,5 +1,9 @@
 import { ItemSchema, type GamePackage } from "../../schema/game";
 import {
+  INSTITUTIONAL_CEILING_LIGHT_OBJECT_ID,
+  objectLibraryPresets,
+} from "../../schema/presets";
+import {
   DungeonEncounterProfileSchema,
   DungeonHazardProfileSchema,
   DungeonNarrativeProfileSchema,
@@ -445,6 +449,7 @@ export const INSTITUTIONAL_RUIN_THEME: DungeonThemeProfileDef =
       hazardProfileIds: [INSTITUTIONAL_RUIN_HAZARD_PROFILE_ID],
       rewardProfileIds: [INSTITUTIONAL_RUIN_REWARD_PROFILE_ID],
       narrativeProfileIds: [INSTITUTIONAL_RUIN_NARRATIVE_PROFILE_ID],
+      roomLightObjectIds: [INSTITUTIONAL_CEILING_LIGHT_OBJECT_ID],
     },
     keyItemPool: [{ id: "itm_practice_key", weight: 1 }],
     rewardItemPool: [
@@ -542,7 +547,7 @@ export const createInstitutionalRuinRecipe = (
 
 export const FRACTURE_STARTER_LANTERN: GamePackage["items"][number] = ItemSchema.parse({
   id: FRACTURE_STARTER_LANTERN_ITEM_ID,
-  display_name: "Expedition Lantern",
+  display_name: "Backrooms Lantern",
   description: "A durable survey lantern placed beside the entrance to a generated fracture.",
   icon: "◉",
   category: "key",
@@ -669,6 +674,7 @@ export const createInstitutionalRuinSingleMapRecipe = (
 
 export interface DungeonGeneratorAuthoringContent {
   items: GamePackage["items"];
+  objects: GamePackage["object_library"];
   recipes: DungeonRecipeDef[];
   themes: DungeonThemeProfileDef[];
   roomArchetypes: DungeonRoomArchetypeDef[];
@@ -681,20 +687,26 @@ export interface DungeonGeneratorAuthoringContent {
 
 export const createInstitutionalRuinGeneratorContent = (
   seed?: string,
-): DungeonGeneratorAuthoringContent => ({
-  items: [FRACTURE_STARTER_LANTERN],
-  recipes: [
-    createInstitutionalRuinRecipe(seed),
-    createInstitutionalRuinSingleMapRecipe(seed),
-  ],
-  themes: [INSTITUTIONAL_RUIN_THEME],
-  roomArchetypes: INSTITUTIONAL_RUIN_ARCHETYPES,
-  roomTemplates: INSTITUTIONAL_RUIN_ROOM_TEMPLATES,
-  encounterProfiles: [INSTITUTIONAL_RUIN_ENCOUNTER_PROFILE],
-  hazardProfiles: [INSTITUTIONAL_RUIN_HAZARD_PROFILE],
-  rewardProfiles: [INSTITUTIONAL_RUIN_REWARD_PROFILE],
-  narrativeProfiles: [INSTITUTIONAL_RUIN_NARRATIVE_PROFILE],
-});
+): DungeonGeneratorAuthoringContent => {
+  const ceilingLight = objectLibraryPresets.find(
+    (object) => object.id === INSTITUTIONAL_CEILING_LIGHT_OBJECT_ID,
+  );
+  return {
+    items: [FRACTURE_STARTER_LANTERN],
+    objects: ceilingLight ? [ceilingLight] : [],
+    recipes: [
+      createInstitutionalRuinRecipe(seed),
+      createInstitutionalRuinSingleMapRecipe(seed),
+    ],
+    themes: [INSTITUTIONAL_RUIN_THEME],
+    roomArchetypes: INSTITUTIONAL_RUIN_ARCHETYPES,
+    roomTemplates: INSTITUTIONAL_RUIN_ROOM_TEMPLATES,
+    encounterProfiles: [INSTITUTIONAL_RUIN_ENCOUNTER_PROFILE],
+    hazardProfiles: [INSTITUTIONAL_RUIN_HAZARD_PROFILE],
+    rewardProfiles: [INSTITUTIONAL_RUIN_REWARD_PROFILE],
+    narrativeProfiles: [INSTITUTIONAL_RUIN_NARRATIVE_PROFILE],
+  };
+};
 
 const mergeMissingById = <T extends { id: string }>(
   existing: readonly T[],
@@ -714,18 +726,45 @@ const mergeMissingById = <T extends { id: string }>(
 export const mergeDungeonGeneratorAuthoringContent = (
   pkg: GamePackage,
   content: DungeonGeneratorAuthoringContent,
-): GamePackage => ({
-  ...pkg,
-  items: mergeMissingById(pkg.items, content.items),
-  dungeon_recipes: mergeMissingById(pkg.dungeon_recipes, content.recipes),
-  dungeon_themes: mergeMissingById(pkg.dungeon_themes, content.themes),
-  dungeon_room_archetypes: mergeMissingById(pkg.dungeon_room_archetypes, content.roomArchetypes),
-  dungeon_room_templates: mergeMissingById(pkg.dungeon_room_templates, content.roomTemplates),
-  dungeon_encounter_profiles: mergeMissingById(pkg.dungeon_encounter_profiles, content.encounterProfiles),
-  dungeon_hazard_profiles: mergeMissingById(pkg.dungeon_hazard_profiles, content.hazardProfiles),
-  dungeon_reward_profiles: mergeMissingById(pkg.dungeon_reward_profiles, content.rewardProfiles),
-  dungeon_narrative_profiles: mergeMissingById(pkg.dungeon_narrative_profiles, content.narrativeProfiles),
-});
+): GamePackage => {
+  const themeAdditionsById = new Map(
+    content.themes.map((theme) => [theme.id, theme]),
+  );
+  const themes = mergeMissingById(pkg.dungeon_themes, content.themes).map(
+    (theme) => {
+      const addition = themeAdditionsById.get(theme.id);
+      if (
+        !addition ||
+        theme.population.roomLightObjectIds.length > 0 ||
+        addition.population.roomLightObjectIds.length === 0
+      ) {
+        return theme;
+      }
+      return {
+        ...theme,
+        population: {
+          ...theme.population,
+          roomLightObjectIds: [
+            ...addition.population.roomLightObjectIds,
+          ],
+        },
+      };
+    },
+  );
+  return {
+    ...pkg,
+    items: mergeMissingById(pkg.items, content.items),
+    object_library: mergeMissingById(pkg.object_library, content.objects),
+    dungeon_recipes: mergeMissingById(pkg.dungeon_recipes, content.recipes),
+    dungeon_themes: themes,
+    dungeon_room_archetypes: mergeMissingById(pkg.dungeon_room_archetypes, content.roomArchetypes),
+    dungeon_room_templates: mergeMissingById(pkg.dungeon_room_templates, content.roomTemplates),
+    dungeon_encounter_profiles: mergeMissingById(pkg.dungeon_encounter_profiles, content.encounterProfiles),
+    dungeon_hazard_profiles: mergeMissingById(pkg.dungeon_hazard_profiles, content.hazardProfiles),
+    dungeon_reward_profiles: mergeMissingById(pkg.dungeon_reward_profiles, content.rewardProfiles),
+    dungeon_narrative_profiles: mergeMissingById(pkg.dungeon_narrative_profiles, content.narrativeProfiles),
+  };
+};
 
 export const installInstitutionalRuinGeneratorContent = (
   pkg: GamePackage,

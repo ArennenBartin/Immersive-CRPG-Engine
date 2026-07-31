@@ -6,7 +6,9 @@ import {
   createEmptyGamePackage,
 } from "../src/schema/game";
 import {
+  BUNDLED_PLAYER_MODEL_SCALE,
   BUNDLED_PLAYER_IDLE_MODEL,
+  PLAYER_COLLISION_HEIGHT,
   PLAYER_IDLE_FBX_CLIP,
   PLAYER_IDLE_FBX_MODEL_ID,
   PLAYER_WALK_FBX_CLIP,
@@ -107,6 +109,20 @@ assert.equal(
   53,
   "the walking animation must retain every authored track",
 );
+assert.ok(
+  Math.abs(
+    (BUNDLED_PLAYER_IDLE_MODEL.asset?.source_bounds?.[1] || 0) *
+      BUNDLED_PLAYER_MODEL_SCALE -
+      PLAYER_COLLISION_HEIGHT,
+  ) < 0.000001,
+  "the bundled player model must scale to the player collision height",
+);
+assert.ok(
+  Math.abs(
+    BUNDLED_PLAYER_IDLE_MODEL.bounds[1] - PLAYER_COLLISION_HEIGHT,
+  ) < 0.000001,
+  "the bundled player bounds must match the player collision height",
+);
 
 const runtimeAsset = structuredClone(BUNDLED_PLAYER_IDLE_MODEL.asset);
 assert.ok(runtimeAsset, "the bundled player must have an asset");
@@ -145,6 +161,30 @@ assert.equal(
   resolvePlayerModelObject(freshPackage)?.id,
   PLAYER_IDLE_FBX_MODEL_ID,
   "the configured player model must resolve",
+);
+const legacyScalePackage = structuredClone(freshPackage);
+const legacyScalePlayer = legacyScalePackage.object_library.find(
+  (object) => object.id === PLAYER_IDLE_FBX_MODEL_ID,
+);
+assert.ok(legacyScalePlayer?.asset, "the bundled player asset must exist");
+legacyScalePlayer.asset.scale = [1, 1, 1];
+legacyScalePlayer.bounds = [...legacyScalePlayer.asset.source_bounds];
+const upgradedLegacyScalePlayer =
+  resolvePlayerModelObject(legacyScalePackage);
+assert.deepEqual(
+  upgradedLegacyScalePlayer?.asset?.scale,
+  [
+    BUNDLED_PLAYER_MODEL_SCALE,
+    BUNDLED_PLAYER_MODEL_SCALE,
+    BUNDLED_PLAYER_MODEL_SCALE,
+  ],
+  "existing authored copies of the bundled player must gain the collision-matched scale",
+);
+assert.ok(
+  Math.abs(
+    (upgradedLegacyScalePlayer?.bounds[1] || 0) - PLAYER_COLLISION_HEIGHT,
+  ) < 0.000001,
+  "existing authored copies must gain collision-matched bounds",
 );
 assert.doesNotThrow(
   () => GamePackageSchema.parse(freshPackage),

@@ -28,6 +28,7 @@ import {
   isDoorPlacementUnlocked,
 } from "../utils/doorPlacement";
 import { entityPlacementStateKey } from "../utils/entityState";
+import { isStableMemoryStructureObject } from "../utils/fogOfWar";
 import { getEnemyXpReward, grantExperienceToSave } from "../utils/leveling";
 import {
   applyPlacementDeltas,
@@ -150,6 +151,7 @@ export interface V1MoveDispatchOptions extends V1GridWorldOptions, V1ActionCostO
   dx: number;
   dy: number;
   allowDoorwayAssist?: boolean;
+  allowCornerAssist?: boolean;
   // Keep this facing after the move instead of turning into the step
   // direction. First-person strafes and backsteps are moves that must not
   // rotate the actor; sound, energy, and collision behave exactly like an
@@ -301,12 +303,14 @@ export interface V1CombatTurnDispatchOptions extends V1GridWorldOptions {
   advanceTurn?: boolean;
   movementSteps?: number;
   allowAttack?: boolean;
+  independentMovement?: boolean;
 }
 
 export interface V1EnemyPulseDispatchOptions extends V1GridWorldOptions {
   actorIds: string[];
   movementSteps?: number;
   allowAttack?: boolean;
+  independentMovement?: boolean;
 }
 
 export interface V1SkillTargetOptions extends V1GridWorldOptions {
@@ -454,6 +458,173 @@ export type V1AttendNodeDispatchResult = AlderamonticoAttendNodeResult;
 const coordKey = fineCoordKey;
 const cloneCell = (cell: [number, number]): [number, number] => [cell[0], cell[1]];
 
+export type V1IndependentPursuitEvidence =
+  | "live"
+  | "local_search"
+  | "task"
+  | "memory";
+
+export interface V1IndependentPursuitTarget {
+  cell: [number, number];
+  origin: [number, number];
+  evidence: V1IndependentPursuitEvidence;
+  evidenceKey: string;
+  tracksLiveTarget: boolean;
+  targetActorId?: string;
+  taskId?: string;
+}
+
+const finiteCell = (value: unknown): [number, number] | undefined => {
+  if (!Array.isArray(value) || value.length < 2) return undefined;
+  const x = Number(value[0]);
+  const y = Number(value[1]);
+  return Number.isFinite(x) && Number.isFinite(y) ? [x, y] : undefined;
+};
+
+const independentEvidenceKey = (
+  state: Record<string, any>,
+  cell: [number, number],
+) =>
+  [
+    Number(state.last_evidence_tick ?? state.last_stimulus?.tick ?? 0),
+    Number(state.last_heard_sequence ?? state.last_stimulus?.sequence ?? 0),
+    cell[0],
+    cell[1],
+  ].join(":");
+
+/**
+ * Selects the only position an independently moving hostile is allowed to
+ * pursue. Direct sight may follow the live actor; every other state follows
+ * authored perception evidence or a deterministic local-search waypoint.
+ * This pure selector is shared by Play's wall-clock scheduler and the core
+ * turn resolver so distance gating cannot leak Steve's hidden position.
+ */
+export const resolveV1IndependentPursuitTarget = (
+  save: PlaySave,
+  actorId: string,
+  mapId = save.current_map_id,
+): V1IndependentPursuitTarget | undefined => {
+  const state = (save.entity_states?.[actorId] || {}) as Record<string, any>;
+  const tick = Number(save.clock_minutes || 0);
+
+  // Combat is already shared, explicit knowledge of the opposing side. The
+  // wall-clock scheduler must not strand an independently moving enemy just
+  // because its exploration perception memory expired during the combat
+  // transition.
+  if (save.in_combat) {
+    const cell = cloneCell(save.player.cell);
+    return {
+      cell,
+      origin: cell,
+      evidence: "live",
+      evidenceKey: `combat:${mapId}:${cell[0]}:${cell[1]}`,
+      tracksLiveTarget: true,
+      targetActorId: PLAYER_ENTITY_ID,
+    };
+  }
+
+  const explicitlyTracks = state.perception_tracks_live_target;
+  const legacyLiveAlert =
+    state.alertness === "combat" &&
+    explicitlyTracks === undefined &&
+    state.target_actor_id === undefined;
+  if (
+    (explicitlyTracks === true && state.target_actor_id === PLAYER_ENTITY_ID) ||
+    legacyLiveAlert
+  ) {
+    const cell = cloneCell(save.player.cell);
+    return {
+      cell,
+      origin: cell,
+      evidence: "live",
+      evidenceKey: `live:${Number(state.last_evidence_tick || tick)}`,
+      tracksLiveTarget: true,
+      targetActorId: PLAYER_ENTITY_ID,
+    };
+  }
+
+  const memoryExpiry = Number(state.perception_memory_expires_at_tick);
+  const memoryActive =
+    !Number.isFinite(memoryExpiry) || memoryExpiry > tick;
+  const rememberedCell =
+    finiteCell(state.last_known_position) ||
+    finiteCell(state.investigation_target_cell) ||
+    finiteCell(state.last_heard_position) ||
+    finiteCell(state.last_seen_position) ||
+    (state.alertness && state.alertness !== "oblivious"
+      ? finiteCell(state.last_stimulus?.cell)
+      : undefined);
+  const evidenceKey = rememberedCell
+    ? independentEvidenceKey(state, rememberedCell)
+    : undefined;
+
+  if (
+    evidenceKey &&
+    state.independent_search_complete_evidence_key === evidenceKey
+  ) {
+    return undefined;
+  }
+  const localSearchTarget = finiteCell(state.independent_search_target);
+  const localSearchOrigin = finiteCell(state.independent_search_origin);
+  if (
+    memoryActive &&
+    evidenceKey &&
+    localSearchTarget &&
+    localSearchOrigin &&
+    state.independent_search_evidence_key === evidenceKey
+  ) {
+    return {
+      cell: localSearchTarget,
+      origin: localSearchOrigin,
+      evidence: "local_search",
+      evidenceKey,
+      tracksLiveTarget: false,
+    };
+  }
+
+  const activeTask = (save.map_deltas?.[mapId]?.npc_tasks || [])
+    .filter(
+      (task) =>
+        task.actor_id === actorId &&
+        task.state !== "done" &&
+        task.state !== "failed" &&
+        (!task.expires_at_tick || task.expires_at_tick > tick),
+    )
+    .sort(
+      (left, right) =>
+        right.priority - left.priority ||
+        Number(right.updated_at_tick || 0) -
+          Number(left.updated_at_tick || 0),
+    )[0];
+  const taskCell = finiteCell(activeTask?.target_cell);
+  if (taskCell) {
+    const origin =
+      finiteCell(activeTask?.search_origin_cell) ||
+      rememberedCell ||
+      taskCell;
+    const key = evidenceKey || independentEvidenceKey(state, origin);
+    if (state.independent_search_complete_evidence_key !== key) {
+      return {
+        cell: taskCell,
+        origin,
+        evidence: "task",
+        evidenceKey: key,
+        tracksLiveTarget: false,
+        taskId: activeTask?.id,
+      };
+    }
+  }
+
+  if (!memoryActive || !rememberedCell || !evidenceKey) return undefined;
+  return {
+    cell: rememberedCell,
+    origin: rememberedCell,
+    evidence: "memory",
+    evidenceKey,
+    tracksLiveTarget: false,
+  };
+};
+
 const cloneSaveForRuntime = (save: PlaySave): PlaySave => ({
   ...save,
   player: {
@@ -549,6 +720,18 @@ const COMBAT_CRIT_MULT = 1.5;
 const COMBAT_ALERT_CHASE_RADIUS_MACRO = 14;
 const activeCellIndexCache = new WeakMap<MapData, Map<string, CellData>>();
 const objectDefinitionIndexCache = new WeakMap<GamePackage, Map<string, ObjectData>>();
+const independentChaseRouteCache = new WeakMap<
+  GamePackage,
+  Map<
+    string,
+    {
+      mapId: string;
+      target: [number, number];
+      expectedFrom: [number, number];
+      remaining: [number, number][];
+    }
+  >
+>();
 
 type CombatActorRuntime = {
   id: string;
@@ -713,28 +896,241 @@ export class V1GridWorld implements InteractiveGridWorld {
     return true;
   }
 
-  // Movement legality for a footprint actor: every fine cell of the
-  // FINE_PER_MACRO² footprint centered on (x,y) must be present, walkable,
-  // within the height step, and clear of objects/containers; no other actor's
-  // footprint may overlap the destination.
-  canMoveEntity(id: string, x: number, y: number) {
-    const entity = this.getEntity(id);
-    if (!entity) return { ok: false, reason: "actor not found" };
-    const current = this.getActiveCell(entity.x, entity.y);
+  private validateEntityOccupancy(
+    id: string,
+    x: number,
+    y: number,
+    current: CellData | undefined,
+  ): ValidationResult {
     for (const [fx, fy] of this.actorFootprintCells([x, y])) {
       const target = this.getActiveCell(fx, fy);
       if (!target) return { ok: false, reason: "missing cell" };
       if (!target.walkable) return { ok: false, reason: "blocked" };
-      if (getJamEngineVisualHeight(target) - getJamEngineVisualHeight(current) > 1) {
+      if (
+        getJamEngineVisualHeight(target) -
+          getJamEngineVisualHeight(current) >
+        1
+      ) {
         return { ok: false, reason: "height blocked" };
       }
-      if (this.cellObjectBlocks(target)) return { ok: false, reason: "blocked" };
-      if (this.placementBlocks(fx, fy)) return { ok: false, reason: "blocked" };
-      if (this.containerBlocks(fx, fy)) return { ok: false, reason: "blocked" };
+      if (this.cellObjectBlocks(target)) {
+        return { ok: false, reason: "blocked" };
+      }
+      if (this.placementBlocks(fx, fy)) {
+        return { ok: false, reason: "blocked" };
+      }
+      if (this.containerBlocks(fx, fy)) {
+        return { ok: false, reason: "blocked" };
+      }
     }
     const occupant = this.getEntityOverlapping(x, y, id);
     if (occupant) return { ok: false, reason: "occupied" };
     return { ok: true };
+  }
+
+  // Movement legality for a footprint actor: every fine cell of the
+  // FINE_PER_MACRO² footprint centered on (x,y) must be present, walkable,
+  // within the height step, and clear of objects/containers; no other
+  // actor's footprint may overlap the destination. A diagonal may sweep
+  // around one blocked corner, but at least one of its two cardinal sweep
+  // lanes must fit the full footprint so an actor cannot cross a wall seam.
+  canMoveEntity(id: string, x: number, y: number) {
+    const entity = this.getEntity(id);
+    if (!entity) return { ok: false, reason: "actor not found" };
+    const current = this.getActiveCell(entity.x, entity.y);
+    const destination = this.validateEntityOccupancy(id, x, y, current);
+    if (!destination.ok) return destination;
+
+    const dx = x - entity.x;
+    const dy = y - entity.y;
+    if (Math.abs(dx) === 1 && Math.abs(dy) === 1) {
+      const horizontalSweep = this.validateEntityOccupancy(
+        id,
+        entity.x + dx,
+        entity.y,
+        current,
+      );
+      const verticalSweep = this.validateEntityOccupancy(
+        id,
+        entity.x,
+        entity.y + dy,
+        current,
+      );
+      if (!horizontalSweep.ok && !verticalSweep.ok) {
+        return { ok: false, reason: "blocked" };
+      }
+    }
+    return destination;
+  }
+
+  private inspectCornerAssistDestination(
+    id: string,
+    center: [number, number],
+  ): {
+    structuralBlockers: [number, number][];
+    hasOtherCollision: boolean;
+  } {
+    const entity = this.getEntity(id);
+    if (!entity) {
+      return { structuralBlockers: [], hasOtherCollision: true };
+    }
+    const current = this.getActiveCell(entity.x, entity.y);
+    const structuralBlockers: [number, number][] = [];
+    let hasOtherCollision = false;
+
+    for (const [fx, fy] of this.actorFootprintCells(center)) {
+      const target = this.getActiveCell(fx, fy);
+      if (!target) {
+        // Do not let corner assistance drift along an authored map boundary.
+        hasOtherCollision = true;
+        continue;
+      }
+
+      const object = target.object_id
+        ? this.objectById.get(target.object_id)
+        : undefined;
+      const cellCollision =
+        !target.walkable || this.cellObjectBlocks(target);
+      const stableStructure =
+        target.blocks_los &&
+        (!target.object_id || isStableMemoryStructureObject(object));
+      if (cellCollision && stableStructure) {
+        structuralBlockers.push([fx, fy]);
+        continue;
+      }
+      if (
+        cellCollision ||
+        getJamEngineVisualHeight(target) -
+          getJamEngineVisualHeight(current) >
+          1
+      ) {
+        // Props, pits, cliffs, and height transitions are deliberate blockers,
+        // not wall corners that movement may steer around.
+        hasOtherCollision = true;
+        continue;
+      }
+      if (
+        this.placementBlocks(fx, fy) ||
+        this.containerBlocks(fx, fy)
+      ) {
+        hasOtherCollision = true;
+      }
+    }
+
+    // A wall can be encountered before occupancy is reported by the ordinary
+    // validator. Explicitly reject that mixed case so an assist never moves
+    // while also bumping, talking to, or attacking an actor.
+    if (this.getEntityOverlapping(center[0], center[1], id)) {
+      hasOtherCollision = true;
+    }
+
+    return { structuralBlockers, hasOtherCollision };
+  }
+
+  getCornerAlignmentStep(
+    id: string,
+    dx: number,
+    dy: number,
+  ): [number, number] | undefined {
+    if (
+      this.spatialRatio <= 1 ||
+      (dx === 0 && dy === 0) ||
+      Math.abs(dx) > 1 ||
+      Math.abs(dy) > 1
+    ) {
+      return undefined;
+    }
+    const entity = this.getEntity(id);
+    if (!entity) return undefined;
+
+    const requestedCenter: [number, number] = [
+      entity.x + dx,
+      entity.y + dy,
+    ];
+    const collision = this.inspectCornerAssistDestination(
+      id,
+      requestedCenter,
+    );
+    if (
+      collision.hasOtherCollision ||
+      collision.structuralBlockers.length === 0
+    ) {
+      return undefined;
+    }
+
+    if (dx !== 0 && dy !== 0) {
+      // An angled input that catches a wall corner may continue along either
+      // requested axis, but never invents a direction outside the input.
+      const candidates: Array<{
+        step: [number, number];
+        clearance: number;
+        order: number;
+      }> = ([[dx, 0], [0, dy]] as [number, number][]).flatMap(
+        (step, order) => {
+          const candidate: [number, number] = [
+            entity.x + step[0],
+            entity.y + step[1],
+          ];
+          if (!this.canMoveEntity(id, candidate[0], candidate[1]).ok) {
+            return [];
+          }
+          const clearance = Math.min(
+            ...collision.structuralBlockers.map(([bx, by]) =>
+              Math.max(
+                Math.abs(bx - candidate[0]),
+                Math.abs(by - candidate[1]),
+              ),
+            ),
+          );
+          return [{ step, clearance, order }];
+        },
+      );
+      candidates.sort(
+        (a, b) => b.clearance - a.clearance || a.order - b.order,
+      );
+      return candidates[0]?.step;
+    }
+
+    // A cardinal catch only qualifies when every structural contact is on the
+    // same extreme lateral edge of Steve's footprint. Center/full-face wall
+    // contact deliberately remains a hard stop.
+    const perpendicular: [number, number] = [-dy, dx];
+    const edge = this.spatialHalfExtent;
+    const lateralOffsets = collision.structuralBlockers.map(
+      ([bx, by]) =>
+        (bx - requestedCenter[0]) * perpendicular[0] +
+        (by - requestedCenter[1]) * perpendicular[1],
+    );
+    const side = Math.sign(lateralOffsets[0] || 0);
+    if (
+      side === 0 ||
+      !lateralOffsets.every((offset) => offset === side * edge)
+    ) {
+      return undefined;
+    }
+
+    const alignmentStep: [number, number] = [
+      -perpendicular[0] * side,
+      -perpendicular[1] * side,
+    ];
+    const alignedCenter: [number, number] = [
+      entity.x + alignmentStep[0],
+      entity.y + alignmentStep[1],
+    ];
+    if (!this.canMoveEntity(id, alignedCenter[0], alignedCenter[1]).ok) {
+      return undefined;
+    }
+
+    // Prove the next held forward step clears the corner before spending this
+    // tick aligning. This prevents sideways drift along a full wall.
+    const clearedCenter: [number, number] = [
+      alignedCenter[0] + dx,
+      alignedCenter[1] + dy,
+    ];
+    if (!this.canMoveEntity(id, clearedCenter[0], clearedCenter[1]).ok) {
+      return undefined;
+    }
+    return alignmentStep;
   }
 
   getDoorwayAlignmentStep(
@@ -945,11 +1341,21 @@ export class V1GridWorld implements InteractiveGridWorld {
     )
       return player;
 
-    for (const partyId of this.save.party_members || []) {
-      if (partyId === excludeId) continue;
-      const partyMember = this.getEntity(partyId);
-      if (partyMember && this.footprintsOverlap([partyMember.x, partyMember.y], [x, y]))
-        return partyMember;
+    // Exploration followers are presentation-driven and continuously catch up
+    // behind the player. Treating their last saved cells as solid here can
+    // trap the player inside an unseen follower footprint: turning still works
+    // but every translation reports "occupied". Combat is the only mode where
+    // party actors deliberately hold authoritative grid space.
+    if (this.save.in_combat) {
+      for (const partyId of this.save.party_members || []) {
+        if (partyId === excludeId) continue;
+        const partyMember = this.getEntity(partyId);
+        if (
+          partyMember &&
+          this.footprintsOverlap([partyMember.x, partyMember.y], [x, y])
+        )
+          return partyMember;
+      }
     }
 
     for (let index = 0; index < (this.activeMap.entity_placements || []).length; index += 1) {
@@ -2209,14 +2615,36 @@ export class V1GridWorld implements InteractiveGridWorld {
     return { previousTurnId, activeTurnId: PLAYER_ENTITY_ID };
   }
 
-  canResolveEnemyTurn(actorId = this.save.active_turn_id || ""): ValidationResult {
-    if (!this.save.in_combat) return { ok: false, reason: "not in combat" };
+  canResolveEnemyTurn(
+    actorId = this.save.active_turn_id || "",
+    independentMovement = false,
+  ): ValidationResult {
+    if (!this.save.in_combat && !independentMovement) {
+      return { ok: false, reason: "not in combat" };
+    }
     if (!actorId) return { ok: false, reason: "no active turn" };
     if (actorId === PLAYER_ENTITY_ID || (this.save.party_members || []).includes(actorId)) {
       return { ok: false, reason: "not enemy turn" };
     }
     const actor = this.getCombatActor(actorId);
-    return actor?.kind === "entity" ? { ok: true } : { ok: false, reason: "missing enemy" };
+    if (!actor || actor.kind !== "entity") {
+      return { ok: false, reason: "missing enemy" };
+    }
+    if (!this.save.in_combat && independentMovement) {
+      if (!actor.entityDef?.independent_movement?.enabled) {
+        return { ok: false, reason: "independent movement disabled" };
+      }
+      if (
+        !resolveV1IndependentPursuitTarget(
+          this.save,
+          actor.id,
+          this.activeMap.id,
+        )
+      ) {
+        return { ok: false, reason: "enemy has no active pursuit evidence" };
+      }
+    }
+    return { ok: true };
   }
 
   resolveEnemyTurn(
@@ -2224,16 +2652,77 @@ export class V1GridWorld implements InteractiveGridWorld {
     advanceTurn = true,
     movementSteps = this.spatialRatio,
     allowAttack = true,
+    independentMovement = false,
   ): EnemyTurnOutcome {
+    const outsideCombatIndependentMove =
+      independentMovement && !this.save.in_combat;
+    const shouldAdvanceTurn = advanceTurn && !outsideCombatIndependentMove;
     const nextTurn = () =>
-      advanceTurn ? this.advanceCombatTurn().activeTurnId : this.save.active_turn_id ?? null;
+      shouldAdvanceTurn
+        ? this.advanceCombatTurn().activeTurnId
+        : this.save.active_turn_id ?? null;
     const actor = this.getCombatActor(actorId);
     if (!actor || actor.kind !== "entity") {
       return { kind: "skip", actorId, nextTurnId: nextTurn(), reason: "missing enemy" };
     }
 
-    const opponents = this.getOpponentsFor(actor);
-    if (opponents.length === 0) {
+    let target: CombatActorRuntime | undefined;
+    let pursuitCell: [number, number] | undefined;
+    let tracksLiveTarget = true;
+    if (outsideCombatIndependentMove) {
+      target = this.getCombatActor(PLAYER_ENTITY_ID);
+      const pursuit = resolveV1IndependentPursuitTarget(
+        this.save,
+        actor.id,
+        this.activeMap.id,
+      );
+      if (!target || !pursuit) {
+        return {
+          kind: "skip",
+          actorId: actor.id,
+          actorName: actor.name,
+          nextTurnId: nextTurn(),
+          reason: target ? "no pursuit evidence" : "no target",
+        };
+      }
+      tracksLiveTarget = pursuit.tracksLiveTarget;
+      pursuitCell = cloneCell(pursuit.cell);
+      if (
+        !tracksLiveTarget &&
+        this.areAdjacentMacro(actor.cell, pursuitCell)
+      ) {
+        pursuitCell = this.advanceIndependentLocalSearch(actor, pursuit);
+        if (!pursuitCell) {
+          return {
+            kind: "skip",
+            actorId: actor.id,
+            actorName: actor.name,
+            targetId: target.id,
+            nextTurnId: nextTurn(),
+            reason: "search_complete",
+          };
+        }
+      }
+    } else {
+      const opponents = this.getOpponentsFor(actor);
+      if (opponents.length === 0) {
+        return {
+          kind: "skip",
+          actorId: actor.id,
+          actorName: actor.name,
+          nextTurnId: nextTurn(),
+          reason: "no target",
+        };
+      }
+      opponents.sort(
+        (a, b) =>
+          this.manhattan(actor.cell, a.cell) -
+          this.manhattan(actor.cell, b.cell),
+      );
+      target = opponents[0];
+      pursuitCell = cloneCell(target.cell);
+    }
+    if (!target || !pursuitCell) {
       return {
         kind: "skip",
         actorId: actor.id,
@@ -2242,10 +2731,8 @@ export class V1GridWorld implements InteractiveGridWorld {
         reason: "no target",
       };
     }
-
-    opponents.sort((a, b) => this.manhattan(actor.cell, a.cell) - this.manhattan(actor.cell, b.cell));
-    const target = opponents[0];
-    const adjacent = this.areAdjacentMacro(actor.cell, target.cell);
+    const adjacent =
+      tracksLiveTarget && this.areAdjacentMacro(actor.cell, target.cell);
     const behavior = resolveAlderamonticoBehavior(
       this.save,
       actor.id,
@@ -2272,7 +2759,7 @@ export class V1GridWorld implements InteractiveGridWorld {
       },
       {
         tick: this.tick,
-        threat: { actor_id: target.id, cell: target.cell, adjacent },
+        threat: { actor_id: target.id, cell: pursuitCell, adjacent },
         lethal_hazard:
           stimulusCell && (stimulusKind === "fire" || stimulusKind === "danger_gas")
             ? { kind: stimulusKind, cell: stimulusCell }
@@ -2306,7 +2793,10 @@ export class V1GridWorld implements InteractiveGridWorld {
       const fleeOrigin = cloneCell(actor.cell);
       let fleeStep: [number, number] | undefined;
       for (let stepIndex = 0; stepIndex < Math.max(1, movementSteps); stepIndex += 1) {
-        const next = this.findFleeStep(actor.id, decision.source_cell || target.cell);
+        const next = this.findFleeStep(
+          actor.id,
+          decision.source_cell || pursuitCell,
+        );
         if (!next) break;
         this.moveEntity(actor.id, next[0], next[1]);
         fleeStep = next;
@@ -2365,8 +2855,10 @@ export class V1GridWorld implements InteractiveGridWorld {
     for (let stepIndex = 0; stepIndex < Math.max(1, movementSteps); stepIndex += 1) {
       const mover = this.getCombatActor(actor.id);
       if (!mover) break;
-      if (this.areAdjacentMacro(mover.cell, target.cell)) break;
-      const step = this.findStepToward(mover, target.cell);
+      if (this.areAdjacentMacro(mover.cell, pursuitCell)) break;
+      const step = outsideCombatIndependentMove
+        ? this.findIndependentStepToward(mover, pursuitCell)
+        : this.findStepToward(mover, pursuitCell);
       if (!step) break;
       this.moveEntity(actor.id, step[0], step[1]);
       lastStep = step;
@@ -2663,24 +3155,66 @@ export class V1GridWorld implements InteractiveGridWorld {
     return opponents;
   }
 
-  private findBoundedPathStep(
+  private findBoundedPath(
     actorId: string,
     startCell: [number, number],
     isGoal: (cell: [number, number]) => boolean,
     targetCell: [number, number],
     maxMacroDistance = 9,
-  ): [number, number] | undefined {
+    preferredFacing: [number, number] = [0, 1],
+  ): [number, number][] | undefined {
     const maxDepth = this.scaleMacroDistanceToFine(maxMacroDistance);
-    const maxExpansions = Math.max(300, maxDepth * maxDepth);
-    const queue: { cell: [number, number]; firstStep?: [number, number]; depth: number }[] = [
-      { cell: startCell, depth: 0 },
+    const maxExpansions = Math.min(12000, Math.max(600, maxDepth * maxDepth * 2));
+    type ChaseNode = {
+      cell: [number, number];
+      parent?: ChaseNode;
+      depth: number;
+      score: number;
+      order: number;
+    };
+    const heuristic = (cell: [number, number]) =>
+      Math.max(
+        0,
+        Math.max(
+          Math.abs(cell[0] - targetCell[0]),
+          Math.abs(cell[1] - targetCell[1]),
+        ) - this.spatialRatio,
+      );
+    let insertionOrder = 0;
+    const open: ChaseNode[] = [
+      {
+        cell: startCell,
+        depth: 0,
+        score: heuristic(startCell),
+        order: insertionOrder++,
+      },
     ];
-    const visited = new Set([coordKey(startCell[0], startCell[1])]);
-    let head = 0;
+    const bestDepth = new Map([[coordKey(startCell[0], startCell[1]), 0]]);
     let expansions = 0;
-    while (head < queue.length && expansions++ < maxExpansions) {
-      const current = queue[head++]!;
-      if (current.depth > 0 && isGoal(current.cell)) return current.firstStep;
+    while (open.length > 0 && expansions++ < maxExpansions) {
+      let bestIndex = 0;
+      for (let index = 1; index < open.length; index += 1) {
+        const candidate = open[index]!;
+        const best = open[bestIndex]!;
+        if (
+          candidate.score < best.score ||
+          (candidate.score === best.score &&
+            (candidate.depth < best.depth ||
+              (candidate.depth === best.depth && candidate.order < best.order)))
+        ) {
+          bestIndex = index;
+        }
+      }
+      const current = open.splice(bestIndex, 1)[0]!;
+      if (current.depth > 0 && isGoal(current.cell)) {
+        const path: [number, number][] = [];
+        let cursor: ChaseNode | undefined = current;
+        while (cursor.parent) {
+          path.push(cloneCell(cursor.cell));
+          cursor = cursor.parent;
+        }
+        return path.reverse();
+      }
       if (current.depth >= maxDepth) continue;
       const moves: [number, number][] = [
         [0, -1],
@@ -2688,48 +3222,127 @@ export class V1GridWorld implements InteractiveGridWorld {
         [0, 1],
         [-1, 0],
       ].sort(
-        (a, b) =>
-          Math.abs(current.cell[0] + a[0] - targetCell[0]) +
-          Math.abs(current.cell[1] + a[1] - targetCell[1]) -
-          (Math.abs(current.cell[0] + b[0] - targetCell[0]) +
-            Math.abs(current.cell[1] + b[1] - targetCell[1])),
+        (a, b) => {
+          const aCell: [number, number] = [current.cell[0] + a[0], current.cell[1] + a[1]];
+          const bCell: [number, number] = [current.cell[0] + b[0], current.cell[1] + b[1]];
+          return (
+            heuristic(aCell) -
+              heuristic(bCell) ||
+            Number(b[0] === preferredFacing[0] && b[1] === preferredFacing[1]) -
+              Number(a[0] === preferredFacing[0] && a[1] === preferredFacing[1])
+          );
+        },
       ) as [number, number][];
       for (const [mx, my] of moves) {
         const next: [number, number] = [current.cell[0] + mx, current.cell[1] + my];
         const key = coordKey(next[0], next[1]);
-        if (visited.has(key)) continue;
-        visited.add(key);
+        const nextDepth = current.depth + 1;
+        if ((bestDepth.get(key) ?? Number.POSITIVE_INFINITY) <= nextDepth) continue;
         if (!this.canMoveEntity(actorId, next[0], next[1]).ok) continue;
-        queue.push({
+        bestDepth.set(key, nextDepth);
+        open.push({
           cell: next,
-          firstStep: current.firstStep || next,
-          depth: current.depth + 1,
+          parent: current,
+          depth: nextDepth,
+          score: nextDepth + heuristic(next),
+          order: insertionOrder++,
         });
       }
     }
     return undefined;
   }
 
-  private findStepToward(actor: CombatActorRuntime, targetCell: [number, number]): [number, number] | undefined {
-    const dx = Math.sign(targetCell[0] - actor.cell[0]);
-    const dy = Math.sign(targetCell[1] - actor.cell[1]);
-    const directOrder: [number, number][] =
-      Math.abs(targetCell[0] - actor.cell[0]) >= Math.abs(targetCell[1] - actor.cell[1])
-        ? [[dx, 0], [0, dy]]
-        : [[0, dy], [dx, 0]];
-    // Open pursuit lanes are overwhelmingly common and need no graph search.
-    // Try the distance-reducing cardinal steps first; only invoke bounded BFS
-    // when terrain or another footprint blocks both direct approaches.
-    for (const [mx, my] of directOrder) {
-      if (mx === 0 && my === 0) continue;
-      const next: [number, number] = [actor.cell[0] + mx, actor.cell[1] + my];
-      if (this.canMoveEntity(actor.id, next[0], next[1]).ok) return next;
+  private findBoundedPathStep(
+    actorId: string,
+    startCell: [number, number],
+    isGoal: (cell: [number, number]) => boolean,
+    targetCell: [number, number],
+    maxMacroDistance = 9,
+    preferredFacing: [number, number] = [0, 1],
+  ): [number, number] | undefined {
+    return this.findBoundedPath(
+      actorId,
+      startCell,
+      isGoal,
+      targetCell,
+      maxMacroDistance,
+      preferredFacing,
+    )?.[0];
+  }
+
+  private findIndependentStepToward(
+    actor: CombatActorRuntime,
+    targetCell: [number, number],
+  ): [number, number] | undefined {
+    let packageCache = independentChaseRouteCache.get(this.options.gamePackage);
+    if (!packageCache) {
+      packageCache = new Map();
+      independentChaseRouteCache.set(this.options.gamePackage, packageCache);
     }
+    const routeKey = `${this.activeMap.id}:${actor.id}`;
+    const cached = packageCache.get(routeKey);
+    const cachedTargetMatches =
+      cached?.mapId === this.activeMap.id &&
+      cached.target[0] === targetCell[0] &&
+      cached.target[1] === targetCell[1];
+    const cachedOriginMatches =
+      cached?.expectedFrom[0] === actor.cell[0] &&
+      cached.expectedFrom[1] === actor.cell[1];
+    const cachedStep = cached?.remaining[0];
+    if (
+      cachedTargetMatches &&
+      cachedOriginMatches &&
+      cachedStep &&
+      this.manhattan(actor.cell, cachedStep) === 1 &&
+      this.canMoveEntity(actor.id, cachedStep[0], cachedStep[1]).ok
+    ) {
+      cached.expectedFrom = cloneCell(cachedStep);
+      cached.remaining = cached.remaining.slice(1);
+      return cloneCell(cachedStep);
+    }
+    packageCache.delete(routeKey);
+
+    const targetDistance = this.manhattan(actor.cell, targetCell);
+    const searchMacroDistance = Math.min(
+      60,
+      Math.max(12, Math.ceil(targetDistance / this.spatialRatio) + 8),
+    );
+    const path = this.findBoundedPath(
+      actor.id,
+      actor.cell,
+      (cell) => this.areAdjacentMacro(cell, targetCell),
+      targetCell,
+      searchMacroDistance,
+      actor.facing,
+    );
+    const nextStep = path?.[0];
+    if (!nextStep) return undefined;
+    packageCache.set(routeKey, {
+      mapId: this.activeMap.id,
+      target: cloneCell(targetCell),
+      expectedFrom: cloneCell(nextStep),
+      remaining: (path || []).slice(1).map(cloneCell),
+    });
+    return cloneCell(nextStep);
+  }
+
+  private findStepToward(actor: CombatActorRuntime, targetCell: [number, number]): [number, number] | undefined {
+    // A greedy step can repeatedly enter the wrong branch of an L-corner and
+    // only notice after reaching the wall. Resolve the route before taking the
+    // first step so pursuit remains stable through authored Backrooms
+    // corridors, dead ends, and repeated 90-degree turns.
+    const targetDistance = this.manhattan(actor.cell, targetCell);
+    const searchMacroDistance = Math.min(
+      60,
+      Math.max(12, Math.ceil(targetDistance / this.spatialRatio) + 8),
+    );
     return this.findBoundedPathStep(
       actor.id,
       actor.cell,
       (cell) => this.areAdjacentMacro(cell, targetCell),
       targetCell,
+      searchMacroDistance,
+      actor.facing,
     );
   }
 
@@ -2858,12 +3471,23 @@ export class V1GridWorld implements InteractiveGridWorld {
 
   private isHostileCombatAlert(actorId: string): boolean {
     const state = this.save.entity_states?.[actorId];
-    return state?.alertness === "combat" && Number(state.alert_score || 0) >= 0.45;
+    // Perception owns the score thresholds and publishes the semantic state.
+    // Requiring a second arbitrary score here rejected valid direct sightings
+    // (Level Zero's ordinary sight commonly resolves near 0.05).
+    return state?.alertness === "combat";
   }
 
   private markHostileCombatAlert(actor: CombatActorRuntime, stimulusCell: [number, number]): void {
     if (actor.kind !== "entity" || actor.entityDef?.is_npc) return;
     const currentState = this.save.entity_states?.[actor.id] || {};
+    const memoryTicks = Math.max(
+      1,
+      actor.entityDef?.sensory_profile?.memory_ticks ?? 90,
+    );
+    const searchTicks = Math.max(
+      1,
+      actor.entityDef?.sensory_profile?.search_ticks ?? 90,
+    );
     this.save = {
       ...this.save,
       entity_states: {
@@ -2874,12 +3498,23 @@ export class V1GridWorld implements InteractiveGridWorld {
           facing: currentState.facing || actor.facing,
           alertness: "combat",
           alert_score: Math.max(1, Number(currentState.alert_score || 0)),
+          perception_tracks_live_target: true,
+          target_actor_id: PLAYER_ENTITY_ID,
           last_stimulus: {
             kind: "visible_player",
             cell: cloneCell(stimulusCell),
             tick: this.tick,
           },
+          last_seen_position: cloneCell(stimulusCell),
+          last_seen_tick: this.tick,
+          last_evidence_tick: this.tick,
+          last_known_position: cloneCell(stimulusCell),
           investigation_target_cell: cloneCell(stimulusCell),
+          perception_search_expires_at_tick: this.tick + searchTicks,
+          perception_memory_expires_at_tick: this.tick + memoryTicks,
+          independent_search_target: undefined,
+          independent_search_evidence_key: undefined,
+          independent_search_complete_evidence_key: undefined,
         },
       },
     };
@@ -3385,6 +4020,93 @@ export class V1GridWorld implements InteractiveGridWorld {
       }
     }
     return { target: cloneCell(origin), step: step + 1 };
+  }
+
+  private isStructurallyOpenSearchCell(cell: [number, number]): boolean {
+    for (
+      let offsetX = -this.spatialHalfExtent;
+      offsetX <= this.spatialHalfExtent;
+      offsetX += 1
+    ) {
+      for (
+        let offsetY = -this.spatialHalfExtent;
+        offsetY <= this.spatialHalfExtent;
+        offsetY += 1
+      ) {
+        const x = cell[0] + offsetX;
+        const y = cell[1] + offsetY;
+        const activeCell = this.getActiveCell(x, y);
+        if (
+          !activeCell?.walkable ||
+          this.cellObjectBlocks(activeCell) ||
+          this.placementBlocks(x, y) ||
+          this.containerBlocks(x, y)
+        ) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  private advanceIndependentLocalSearch(
+    actor: CombatActorRuntime,
+    pursuit: V1IndependentPursuitTarget,
+  ): [number, number] | undefined {
+    const currentState = this.save.entity_states?.[actor.id] || {};
+    const continuing =
+      currentState.independent_search_evidence_key === pursuit.evidenceKey;
+    let step = continuing
+      ? Math.max(0, Math.floor(currentState.independent_search_step || 0))
+      : 0;
+    const distance = this.scaleMacroDistanceToFine(2);
+    const offsets: [number, number][] = [
+      [distance, 0],
+      [0, distance],
+      [-distance, 0],
+      [0, -distance],
+      [distance, distance],
+      [-distance, distance],
+      [-distance, -distance],
+      [distance, -distance],
+    ];
+    let target: [number, number] | undefined;
+    while (step < offsets.length && !target) {
+      const offset = offsets[step]!;
+      step += 1;
+      const candidate: [number, number] = [
+        pursuit.origin[0] + offset[0],
+        pursuit.origin[1] + offset[1],
+      ];
+      if (this.isStructurallyOpenSearchCell(candidate)) {
+        target = candidate;
+      }
+    }
+
+    const nextState = target
+      ? {
+          ...currentState,
+          independent_search_origin: cloneCell(pursuit.origin),
+          independent_search_target: cloneCell(target),
+          independent_search_step: step,
+          independent_search_evidence_key: pursuit.evidenceKey,
+          independent_search_complete_evidence_key: undefined,
+        }
+      : {
+          ...currentState,
+          independent_search_target: undefined,
+          independent_search_step: step,
+          independent_search_evidence_key: pursuit.evidenceKey,
+          independent_search_complete_evidence_key: pursuit.evidenceKey,
+        };
+    this.save = {
+      ...this.save,
+      entity_states: {
+        ...(this.save.entity_states || {}),
+        [actor.id]: nextState,
+      },
+    };
+    return target;
   }
 
   private findFleeStep(actorId: string, danger: [number, number]): [number, number] | undefined {
@@ -5092,7 +5814,16 @@ export class V1GridWorld implements InteractiveGridWorld {
       const key = placementOriginKey(authored);
       if (removed.has(key) || carried.has(key)) continue;
       const moved = delta?.moved_objects?.[key];
-      const placement = moved ? { ...authored, cell: moved.cell, facing: moved.facing } : authored;
+      const placement = moved
+        ? {
+            ...authored,
+            cell: moved.cell,
+            facing: moved.facing,
+            height_offset: moved.height_offset,
+            stack_index: moved.stack_index,
+            stack_root_key: moved.stack_root_key,
+          }
+        : authored;
       out.push({ key, placement, object: this.objectById.get(authored.object_id) });
     }
     this.currentPlacementCache = {
@@ -5104,9 +5835,18 @@ export class V1GridWorld implements InteractiveGridWorld {
     return out;
   }
 
-  private placementBlocks(x: number, y: number, excludeKey?: string): boolean {
+  private placementBlocks(
+    x: number,
+    y: number,
+    excludeKey?: string | ReadonlySet<string>,
+  ): boolean {
     return this.currentPlacements().some(({ key, placement, object }) => {
-      if (excludeKey && key === excludeKey) return false;
+      if (
+        (typeof excludeKey === "string" && key === excludeKey) ||
+        (excludeKey instanceof Set && excludeKey.has(key))
+      ) {
+        return false;
+      }
       if (isBuildingDoorPlacement(placement) && isDoorPlacementOpen(this.getMapDelta(), placement)) {
         return false;
       }
@@ -5138,8 +5878,25 @@ export class V1GridWorld implements InteractiveGridWorld {
       12,
       Math.max(3, Math.ceil(3 + affordance.mass_kg / 5)),
     );
+    const stackRootKey = placement.stack_root_key || key;
+    const stackKeys = this.currentPlacements()
+      .filter(({ key: candidateKey, placement: candidate }) => {
+        const candidateRoot = candidate.stack_root_key || candidateKey;
+        return (
+          candidateRoot === stackRootKey &&
+          candidate.cell[0] === placement.cell[0] &&
+          candidate.cell[1] === placement.cell[1]
+        );
+      })
+      .sort(
+        (left, right) =>
+          (left.placement.stack_index || 0) -
+          (right.placement.stack_index || 0),
+      )
+      .map(({ key: candidateKey }) => candidateKey);
     return {
       key,
+      stackKeys,
       objectId: placement.object_id,
       displayName: object?.display_name,
       cell: [placement.cell[0], placement.cell[1]],
@@ -5157,7 +5914,12 @@ export class V1GridWorld implements InteractiveGridWorld {
 
   // ── Kernel grid manipulation (K3): push ──
   getPushableObjectAt(x: number, y: number): PushableObjectRef | undefined {
-    for (const { key, placement, object } of this.currentPlacements()) {
+    const placements = this.currentPlacements().slice().sort(
+      (left, right) =>
+        (left.placement.stack_index || 0) -
+        (right.placement.stack_index || 0),
+    );
+    for (const { key, placement, object } of placements) {
       if (!placementHasCollision(placement, object) || !isPushableObject(object)) continue;
       if (this.placementFootprint(placement, object).some(([px, py]) => px === x && py === y)) {
         return this.pushRefForPlacement(key, placement, object);
@@ -5179,6 +5941,9 @@ export class V1GridWorld implements InteractiveGridWorld {
 
   canPushObjectTo(ref: PushableObjectRef, dx: number, dy: number, actorIds: string[] = [PLAYER_ENTITY_ID]) {
     if (ref.requiresCooperation && actorIds.length < 2) return { ok: false, reason: "requires cooperation" };
+    const stackKeys = new Set<string>(
+      ref.stackKeys?.length ? ref.stackKeys : [ref.key],
+    );
     // The object occupies a footprint (its whole macro tile): every
     // newly-entered fine cell of the shifted footprint must be open.
     for (const [ox, oy] of this.actorFootprintCells([ref.cell[0] + dx, ref.cell[1] + dy])) {
@@ -5187,7 +5952,7 @@ export class V1GridWorld implements InteractiveGridWorld {
       if (!target || !target.walkable) return { ok: false, reason: "no space" };
       if (this.cellObjectBlocks(target)) return { ok: false, reason: "no space" };
       if (this.containerBlocks(ox, oy)) return { ok: false, reason: "no space" };
-      if (this.placementBlocks(ox, oy, ref.key)) return { ok: false, reason: "no space" };
+      if (this.placementBlocks(ox, oy, stackKeys)) return { ok: false, reason: "no space" };
       if (this.getEntityAt(ox, oy)) return { ok: false, reason: "occupied" };
     }
     return { ok: true };
@@ -5204,7 +5969,23 @@ export class V1GridWorld implements InteractiveGridWorld {
       recordSimulationCondition(
         {
           ...delta,
-          moved_objects: { ...(delta.moved_objects || {}), [ref.key]: { cell: to, facing: ref.facing } },
+          moved_objects: Object.fromEntries(
+            Object.entries(delta.moved_objects || {}).concat(
+              (ref.stackKeys?.length ? ref.stackKeys : [ref.key]).map(
+                (key) => {
+                  const previous = delta.moved_objects?.[key];
+                  return [
+                    key,
+                    {
+                      ...previous,
+                      cell: to,
+                      facing: previous?.facing || ref.facing,
+                    },
+                  ];
+                },
+              ),
+            ),
+          ),
         },
         {
           target_kind: "object",
@@ -5235,6 +6016,7 @@ export class V1GridWorld implements InteractiveGridWorld {
 
   canCarryObject(ref: PushableObjectRef, actorIds: string[] = [PLAYER_ENTITY_ID]) {
     if (ref.requiresCooperation && actorIds.length < 2) return { ok: false, reason: "requires cooperation" };
+    if ((ref.stackKeys?.length || 1) > 1) return { ok: false, reason: "stack is too bulky" };
     if ((ref.massKg || 0) > 180 || ref.pushDifficulty === undefined) return { ok: false, reason: "too heavy" };
     return { ok: true };
   }
@@ -5480,6 +6262,7 @@ export const dispatchV1MoveEntity = (options: V1MoveDispatchOptions) => {
   const before = world.events.getLog().length;
   let resolvedDelta: [number, number] = [options.dx, options.dy];
   let doorwayAssisted = false;
+  let cornerAssisted = false;
   let result = engine.dispatch(
     {
       type: "move_entity",
@@ -5506,6 +6289,28 @@ export const dispatchV1MoveEntity = (options: V1MoveDispatchOptions) => {
       }
     }
   }
+  if (!result.ok && result.reason === "blocked" && options.allowCornerAssist) {
+    const assist = world.getCornerAlignmentStep(
+      actorId,
+      options.dx,
+      options.dy,
+    );
+    if (assist) {
+      const assistedResult = engine.dispatch(
+        {
+          type: "move_entity",
+          actorId,
+          params: { dx: assist[0], dy: assist[1] },
+        },
+        world,
+      );
+      if (assistedResult.ok) {
+        result = assistedResult;
+        resolvedDelta = assist;
+        cornerAssisted = true;
+      }
+    }
+  }
   if (result.ok) {
     const stealthMovement = isActorUsingStealthStance(options.save, actorId);
     const speedMultiplier = resolveMovementHearingSettings(
@@ -5524,7 +6329,7 @@ export const dispatchV1MoveEntity = (options: V1MoveDispatchOptions) => {
     );
   }
   const dispatchResult = buildV1DispatchResult(options, world, before, result);
-  if (doorwayAssisted && actorId === PLAYER_ENTITY_ID) {
+  if ((doorwayAssisted || cornerAssisted) && actorId === PLAYER_ENTITY_ID) {
     dispatchResult.save = {
       ...dispatchResult.save,
       player: {
@@ -5552,7 +6357,12 @@ export const dispatchV1MoveEntity = (options: V1MoveDispatchOptions) => {
             },
           };
   }
-  return { ...dispatchResult, doorwayAssisted, resolvedDelta };
+  return {
+    ...dispatchResult,
+    doorwayAssisted,
+    cornerAssisted,
+    resolvedDelta,
+  };
 };
 
 // Pass a turn in place. Carries no movement, but spends the supplied action cost
@@ -6362,6 +7172,7 @@ export const dispatchV1EnemyTurn = (options: V1CombatTurnDispatchOptions) => {
         advanceTurn: options.advanceTurn !== false,
         movementSteps: options.movementSteps,
         allowAttack: options.allowAttack !== false,
+        independentMovement: options.independentMovement === true,
       },
     },
     world,
@@ -6390,6 +7201,7 @@ export const dispatchV1EnemyPulse = (options: V1EnemyPulseDispatchOptions) => {
           advanceTurn: false,
           movementSteps: options.movementSteps,
           allowAttack: options.allowAttack !== false,
+          independentMovement: options.independentMovement === true,
         },
       },
       world,

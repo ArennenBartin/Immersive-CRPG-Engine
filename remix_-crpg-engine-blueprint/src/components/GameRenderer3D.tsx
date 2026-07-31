@@ -49,7 +49,6 @@ import {
   POPUP_LIFETIME_MS,
   HIT_FLASH_MS,
 } from "../store/fxStore";
-import { THREAT_RADIUS } from "../utils/combat";
 import {
   getObjectMaterialNormalMap,
   getObjectMaterialNormalScale,
@@ -74,23 +73,37 @@ import {
   type RendererGridSpace,
 } from "../utils/renderSpace";
 import {
+  PLAYER_COLLISION_HEIGHT,
   resolvePlayerLocomotionClip,
   resolvePlayerModelObject,
 } from "../data/playerModelAssets";
+import {
+  BACKROOMS_LEVEL_ZERO_FLOOR_OBJECT_ID,
+  BACKROOMS_LEVEL_ZERO_LIGHT_OBJECT_ID,
+  BACKROOMS_LEVEL_ZERO_TEXTURES,
+  BACKROOMS_LEVEL_ZERO_WALL_OBJECT_ID,
+} from "../schema/presets";
 import {
   buildAuthoritativeFogPresentationPlan,
   computeFogVisibleCells,
   fogCellKey,
   isStableMemoryStructureObject,
+  resolveImmersiveVisibilityPresentationPolicy,
   resolvePlayerStructureOcclusionPolicy,
   shouldRenderDarkAdjacentEntity,
   type AuthoritativeFogPresentationCell,
   type FogRenderState,
+  type ImmersiveViewPresentation,
 } from "../utils/fogOfWar";
 import {
   resolveActorSpriteBrightness,
   resolveAuthoritativeLightRenderMetrics,
-  resolveAuthoritativeGroundLightPresentationStrength,
+  resolveAuthoritativePointLightIntensity,
+  PRESENTATION_ROOM_LIGHT_RADIUS,
+  PRESENTATION_ROOM_POINT_LIGHT_INTENSITY,
+  selectLocalPresentationRoomLights,
+  resolvePlayerCarriedLightWorldPosition,
+  resolvePresentationRoomLightContribution,
   hasAuthoritativePresentLight,
   MEMORY_FOG_COLOR,
   resolveMemoryFogColor,
@@ -104,6 +117,22 @@ import {
 } from "../utils/screenGlareSources";
 import { WorldOverlays3D } from "./WorldOverlays3D";
 import { isAnimatedSprite } from "../utils/tileRendering";
+import {
+  IMMERSIVE_ARCHITECTURE_FORWARD_BONUS,
+  IMMERSIVE_CEILING_HEIGHT,
+  IMMERSIVE_DETAIL_FORWARD_BONUS,
+  IMMERSIVE_WALL_HEIGHT_SCALE,
+  isWithinImmersiveDirectionalWindow,
+  isWithinDistantArchitectureBand,
+  isImmersiveCeilingView,
+  resolveImmersiveDirectionalWindowOuterRadius,
+  resolveImmersiveWallHeight,
+  resolveRuntimeObjectPlacementYOffset,
+} from "../utils/immersiveArchitecture";
+import {
+  resolveThirdPersonCameraBodyDistance,
+  resolveThirdPersonPlayerCameraOpacity,
+} from "../utils/thirdPersonControls";
 
 type DecodedGifAtlas = {
   sourceWidth: number;
@@ -606,6 +635,8 @@ interface ReferenceGameRendererProps {
   showGrid?: boolean;
   renderCenter?: [number, number];
   renderRadius?: number;
+  architectureRadius?: number;
+  renderForward?: [number, number];
   fxCellTransform?: (cell: readonly [number, number]) => [number, number];
   rawPointerCoordinates?: boolean;
   isCellVisible?: (cell: readonly [number, number]) => boolean;
@@ -614,19 +645,18 @@ interface ReferenceGameRendererProps {
   ) => boolean;
   getCellFogState?: (cell: readonly [number, number]) => FogRenderState;
   getCellIllumination?: (cell: readonly [number, number]) => number;
+  getCellLightColor?: (cell: readonly [number, number]) => string | undefined;
   getStructureIllumination?: (cell: readonly [number, number]) => number;
   suppressPlacementLights?: boolean;
+  presentationLightBudget?: number;
+  presentationShadowsEnabled?: boolean;
 }
 
-export type RendererViewPresentation =
-  | "isometric"
-  | "first_person"
-  | "third_person";
+export type RendererViewPresentation = ImmersiveViewPresentation;
 
-// Camera presentation never changes authoritative visibility. First person
-// alone lifts unseen silhouettes into near-camera haze and hides the player;
-// locked third person keeps the same black/memory language and x-ray player
-// readability as isometric play.
+// Camera presentation never changes authoritative simulation visibility.
+// Third-person Backrooms play only bypasses the presentation mask so physical
+// actors, items, geometry, and lights do not pop in and out with perception.
 const ViewPresentationContext =
   React.createContext<RendererViewPresentation>("isometric");
 
@@ -671,6 +701,8 @@ export interface GameRenderer3DProps {
   showGrid?: boolean;
   renderCenter?: [number, number];
   renderRadius?: number;
+  architectureRadius?: number;
+  renderForward?: [number, number];
   lintProblems?: { cell?: [number, number] | null; severity: string }[];
   brushSize?: number;
   fitSignal?: number;
@@ -685,6 +717,8 @@ export interface GameRenderer3DProps {
   showMemoryDebug?: boolean;
   performanceMode?: boolean;
   authoritativePointLightBudget?: number;
+  presentationPointLightBudget?: number;
+  presentationShadowsEnabled?: boolean;
   viewPresentation?: RendererViewPresentation;
   /** @deprecated Use viewPresentation. Retained for preview call sites. */
   firstPersonView?: boolean;
@@ -1009,20 +1043,26 @@ const PLAYER_XRAY_FRAGMENT_SHADER = `
   }
 `;
 
-const actorSpriteTint = (illumination: number | undefined) => {
+const actorSpriteTint = (
+  illumination: number | undefined,
+  lightColor?: string,
+) => {
   const brightness = resolveActorSpriteBrightness(illumination ?? 1);
-  const channel = Math.round(brightness * 255)
-    .toString(16)
-    .padStart(2, "0");
-  return `#${channel}${channel}${channel}`;
+  const light = Math.max(0, Math.min(1, illumination ?? 1));
+  const sourceTint = new THREE.Color(lightColor || "#ffffff");
+  const tintStrength = Math.sqrt(light) * 0.28;
+  return new THREE.Color("#ffffff")
+    .lerp(sourceTint, tintStrength)
+    .multiplyScalar(brightness);
 };
 
 const actorFallbackTint = (
   baseColor: string,
   illumination: number | undefined,
+  lightColor?: string,
 ) =>
   `#${new THREE.Color(baseColor)
-    .multiplyScalar(resolveActorSpriteBrightness(illumination ?? 1))
+    .multiply(actorSpriteTint(illumination, lightColor))
     .getHexString()}`;
 
 const EntityNode = memo(function EntityNode({
@@ -1033,10 +1073,10 @@ const EntityNode = memo(function EntityNode({
   hp,
   maxHp,
   fxKey,
-  engaged,
   showHpWhenFull,
   actorId,
   illumination,
+  lightColor,
   darkSilhouette = false,
 }: {
   placement: any;
@@ -1047,19 +1087,28 @@ const EntityNode = memo(function EntityNode({
   maxHp?: number;
   // Key into the fx store's hit flashes (entity state key).
   fxKey?: string;
-  // Hostile within threat range of the player — keeps its HP bar visible
-  // even at full health so a fight reads at a glance.
-  engaged?: boolean;
-  // Force the HP bar even at full health (party members during combat).
+  // Health is presentation for player-controlled party members only. Hostile
+  // health bars are deliberately omitted in the Backrooms horror view.
   showHpWhenFull?: boolean;
   actorId?: string;
   illumination?: number;
+  lightColor?: string;
   // Immediate-proximity read in darkness. It deliberately carries no combat
   // rings, health, hit feedback, or other current-perception information.
   darkSilhouette?: boolean;
 }) {
   const { texture, spriteDef, sourceWidth, sourceHeight, ready } =
     useSpriteTexture(entityDef.sprite_id, gamePackage);
+  const modelObject = useMemo(
+    () =>
+      entityDef.model_object_id
+        ? gamePackage.object_library.find(
+            (object: ObjectData) => object.id === entityDef.model_object_id,
+          )
+        : undefined,
+    [entityDef.model_object_id, gamePackage.object_library],
+  );
+  const [modelReady, setModelReady] = useState(false);
   const hitFlashAt = useFxStore((state) =>
     fxKey ? state.hitFlashes[fxKey] : undefined,
   );
@@ -1078,11 +1127,14 @@ const EntityNode = memo(function EntityNode({
     !darkSilhouette &&
     hp !== undefined &&
     maxHp !== undefined &&
-    (showHpWhenFull || (!entityDef.is_npc && (hp < maxHp || engaged)));
+    Boolean(showHpWhenFull);
   const hpPercent = showHp ? Math.max(0, hp! / maxHp!) : 1;
 
   const { renderWidth, renderHeight } =
     getCharacterSpriteRenderSize(spriteDef, sourceWidth, sourceHeight);
+  const actorHeight = modelObject?.bounds?.[1] || renderHeight;
+  const facing = placement.facing || [0, 1];
+  const modelYaw = Math.atan2(facing[0], facing[1]);
 
   useEffect(
     () => () => {
@@ -1102,68 +1154,88 @@ const EntityNode = memo(function EntityNode({
         }
       }}
     >
-      {texture && ready ? (
-        <Billboard position={[0, renderHeight * 0.5, 0]}>
-          <mesh renderOrder={ACTOR_SPRITE_RENDER_ORDER}>
-            <planeGeometry args={[renderWidth, renderHeight]} />
-            <meshBasicMaterial
-              map={texture}
-              color={
-                darkSilhouette
-                  ? DARK_ADJACENT_ENTITY_TINT
-                  : actorSpriteTint(illumination)
-              }
-              transparent
-              opacity={darkSilhouette ? DARK_ADJACENT_ENTITY_OPACITY : 1}
-              alphaTest={0.1}
-              depthTest
-              depthWrite={false}
-              fog={false}
-              side={THREE.DoubleSide}
-              toneMapped={false}
-            />
-          </mesh>
-        </Billboard>
-      ) : (
-        <>
-          <mesh position={[0, 0.4, 0]} renderOrder={ACTOR_SPRITE_RENDER_ORDER}>
-            <boxGeometry args={[0.6, 0.8, 0.6]} />
-            <meshBasicMaterial
-              color={
-                darkSilhouette
-                  ? DARK_ADJACENT_ENTITY_TINT
-                  : actorFallbackTint(
-                      entityDef.is_npc ? "#A3BE8C" : "#BF616A",
-                      illumination,
-                    )
-              }
-              transparent
-              opacity={darkSilhouette ? DARK_ADJACENT_ENTITY_OPACITY : 1}
-              depthTest
-              depthWrite={false}
-              toneMapped={false}
-            />
-          </mesh>
-          <mesh position={[0, 1.2, 0]} renderOrder={ACTOR_SPRITE_RENDER_ORDER}>
-            <sphereGeometry args={[0.15, 8, 8]} />
-            <meshBasicMaterial
-              color={
-                darkSilhouette
-                  ? DARK_ADJACENT_ENTITY_TINT
-                  : actorFallbackTint(
-                      entityDef.is_npc ? "#A3BE8C" : "#BF616A",
-                      illumination,
-                    )
-              }
-              transparent
-              opacity={darkSilhouette ? DARK_ADJACENT_ENTITY_OPACITY : 1}
-              depthTest
-              depthWrite={false}
-              toneMapped={false}
-            />
-          </mesh>
-        </>
-      )}
+      <group rotation={[0, modelYaw, 0]}>
+        {modelObject && !darkSilhouette && (
+          <AssetModelRenderer
+            object={modelObject}
+            showPlaceholder={false}
+            appearance="player_default"
+            illumination={illumination}
+            onReadyChange={setModelReady}
+          />
+        )}
+        {(!modelObject || !modelReady || darkSilhouette) &&
+          (texture && ready ? (
+            <Billboard position={[0, renderHeight * 0.5, 0]}>
+              <mesh renderOrder={ACTOR_SPRITE_RENDER_ORDER}>
+                <planeGeometry args={[renderWidth, renderHeight]} />
+                <meshBasicMaterial
+                  map={texture}
+                  color={
+                    darkSilhouette
+                      ? DARK_ADJACENT_ENTITY_TINT
+                      : actorSpriteTint(illumination, lightColor)
+                  }
+                  transparent
+                  opacity={darkSilhouette ? DARK_ADJACENT_ENTITY_OPACITY : 1}
+                  alphaTest={0.1}
+                  depthTest
+                  depthWrite={false}
+                  fog={false}
+                  side={THREE.DoubleSide}
+                  toneMapped={false}
+                />
+              </mesh>
+            </Billboard>
+          ) : (
+            <>
+              <mesh
+                position={[0, 0.4, 0]}
+                renderOrder={ACTOR_SPRITE_RENDER_ORDER}
+              >
+                <boxGeometry args={[0.6, 0.8, 0.6]} />
+                <meshBasicMaterial
+                  color={
+                    darkSilhouette
+                      ? DARK_ADJACENT_ENTITY_TINT
+                      : actorFallbackTint(
+                          entityDef.is_npc ? "#A3BE8C" : "#BF616A",
+                          illumination,
+                          lightColor,
+                        )
+                  }
+                  transparent
+                  opacity={darkSilhouette ? DARK_ADJACENT_ENTITY_OPACITY : 1}
+                  depthTest
+                  depthWrite={false}
+                  toneMapped={false}
+                />
+              </mesh>
+              <mesh
+                position={[0, 1.2, 0]}
+                renderOrder={ACTOR_SPRITE_RENDER_ORDER}
+              >
+                <sphereGeometry args={[0.15, 8, 8]} />
+                <meshBasicMaterial
+                  color={
+                    darkSilhouette
+                      ? DARK_ADJACENT_ENTITY_TINT
+                      : actorFallbackTint(
+                          entityDef.is_npc ? "#A3BE8C" : "#BF616A",
+                          illumination,
+                          lightColor,
+                        )
+                  }
+                  transparent
+                  opacity={darkSilhouette ? DARK_ADJACENT_ENTITY_OPACITY : 1}
+                  depthTest
+                  depthWrite={false}
+                  toneMapped={false}
+                />
+              </mesh>
+            </>
+          ))}
+      </group>
 
       {/* Hit flash — brief red wash over the sprite when this entity takes
           damage. Opacity is animated per-frame from the fx store timestamp. */}
@@ -1177,7 +1249,7 @@ const EntityNode = memo(function EntityNode({
 
       {/* Health Bar */}
       {showHp && (
-        <Billboard position={[0, renderHeight + 0.18, 0]}>
+        <Billboard position={[0, actorHeight + 0.18, 0]}>
           <mesh position={[0, 0, -0.01]} renderOrder={ACTOR_UI_RENDER_ORDER}>
             <planeGeometry args={[0.66, 0.1]} />
             <meshBasicMaterial
@@ -2287,6 +2359,23 @@ const shouldRenderCellAsStructure = (
 const isWallObject = (object: ObjectData | null | undefined) =>
   Boolean(object?.tags?.includes("wall"));
 
+const isWallStructureCell = (
+  cell: CellData,
+  object: ObjectData | null | undefined,
+) =>
+  !isOverheadCell(cell) &&
+  (isWallObject(object) ||
+    (cell.walkable === false && cell.blocks_los === true));
+
+const getRenderedCellHeight = (
+  cell: CellData,
+  object: ObjectData | null | undefined,
+) =>
+  resolveImmersiveWallHeight(
+    Math.max(0, (cell.visual_height || 0) * 0.5),
+    isWallStructureCell(cell, object),
+  );
+
 const isRoofObject = (object: ObjectData | null | undefined) =>
   Boolean(object?.tags?.includes("roof"));
 
@@ -2379,6 +2468,56 @@ type RuntimeMaterialProps = {
   textureScale: number;
   textureStrength: number;
   textureImageUrl?: string;
+};
+
+const BACKROOMS_CEILING_MATERIAL: RuntimeMaterialProps = {
+  id: "backrooms_level_zero_ceiling",
+  name: "Level Zero Stained Acoustic Ceiling",
+  color: "#b8aa68",
+  roughness: 0.98,
+  metalness: 0,
+  emissive: "#5f4b16",
+  emissiveIntensity: 0.012,
+  opacity: 1,
+  transparent: false,
+  textureKind: "none",
+  textureScale: 1,
+  textureStrength: 1,
+  textureImageUrl: BACKROOMS_LEVEL_ZERO_TEXTURES.ceiling,
+};
+
+const resolveRuntimeObjectMaterial = (
+  object: ObjectData,
+  materialRef?: string,
+) => {
+  const material = resolveObjectMaterial(object, materialRef);
+  if (object.id !== BACKROOMS_LEVEL_ZERO_LIGHT_OBJECT_ID) return material;
+
+  // Existing authored runs deliberately retain their object library instead of
+  // being overwritten by QA preset updates. Apply the fixture's presentation
+  // floor at render time as well, so stale runs do not keep the old pitch-black
+  // backer and highly metallic housing.
+  if (materialRef === "mat_backrooms_level_zero_ceiling_tile") {
+    return {
+      ...material,
+      // This is intentionally authoritative for the bundled fixture. Retained
+      // runs may contain an earlier, nearly-black emissive value, so merely
+      // raising their intensity still leaves a void around the tubes.
+      emissive: "#8a7848",
+      emissiveIntensity: Math.max(0.18, material.emissiveIntensity),
+    };
+  }
+  if (materialRef === "mat_backrooms_level_zero_fixture_metal") {
+    return {
+      ...material,
+      color: "#777263",
+      emissive: "#625d4c",
+      emissiveIntensity: Math.max(0.22, material.emissiveIntensity),
+      roughness: Math.max(0.72, material.roughness),
+      metalness: Math.min(0.14, material.metalness),
+    };
+  }
+  return material;
 };
 
 const getCellMaterialProps = (
@@ -2528,6 +2667,7 @@ function InstancedCellGroup({
           depthTest
           depthWrite
           side={THREE.DoubleSide}
+          shadowSide={group.kind === "box" ? THREE.BackSide : undefined}
           fog={fogMaterial.sceneFog}
           toneMapped={false}
         />
@@ -2546,6 +2686,7 @@ function InstancedCellGroup({
           transparent={group.material.transparent}
           depthWrite={!group.material.transparent}
           side={THREE.DoubleSide}
+          shadowSide={group.kind === "box" ? THREE.BackSide : undefined}
         />
       )}
     </instancedMesh>
@@ -2751,10 +2892,16 @@ function StaticStructureCellRenderer({
   const groupRef = useRef<THREE.Group>(null);
   const viewPresentation = useContext(ViewPresentationContext);
   const firstPersonView = viewPresentation === "first_person";
-  const height = Math.max(0, (cell.visual_height || 0) * 0.5);
+  const height = getRenderedCellHeight(cell, object);
   const kind = height > 0 ? "box" : "plane";
   const material = getCellMaterialProps(object, cell.walkable);
   const fastTile = isFastTileObject(object);
+  // Model-backed walls need their authored geometry stretched from the floor
+  // origin. Fallback boxes already receive the taller resolved height below.
+  const wallModelScaleY =
+    !fastTile && object && isWallStructureCell(cell, object)
+      ? IMMERSIVE_WALL_HEIGHT_SCALE
+      : 1;
   const materialOpacity = material.opacity * opacity;
   const materialTransparent = material.transparent || opacity < 0.999;
   const fogMaterial = resolveStaticFogMaterialPolicy(
@@ -2858,6 +3005,7 @@ function StaticStructureCellRenderer({
       ref={groupRef}
       position={[cell.x, cell.y || 0, cell.z]}
       rotation={[0, rotationY, 0]}
+      scale={[1, wallModelScaleY, 1]}
       renderOrder={0}
     >
       {!fastTile && object ? (
@@ -2878,6 +3026,7 @@ function StaticStructureCellRenderer({
               depthTest
               depthWrite
               side={THREE.DoubleSide}
+              shadowSide={THREE.BackSide}
               fog={fogMaterial.sceneFog}
               toneMapped={false}
             />
@@ -2896,6 +3045,7 @@ function StaticStructureCellRenderer({
               transparent={materialTransparent}
               depthWrite={!materialTransparent}
               side={THREE.DoubleSide}
+              shadowSide={THREE.BackSide}
             />
           )}
         </mesh>
@@ -2945,6 +3095,7 @@ type RuntimeObjectInstance = {
   key: string;
   position: [number, number, number];
   rotationY: number;
+  scaleY?: number;
 };
 
 type RuntimeInstanceGroup = {
@@ -3054,6 +3205,9 @@ const groupFogAwareRuntimeInstances = <
       key: `cell_${key}_${item.cell.x}_${item.cell.y || 0}_${item.cell.z}_${index}`,
       position: getPosition(item),
       rotationY: item.rotationY,
+      scaleY: isWallStructureCell(item.cell, item.object)
+        ? IMMERSIVE_WALL_HEIGHT_SCALE
+        : 1,
     });
   });
 
@@ -3117,7 +3271,7 @@ function CellVisualLayers({
       object: ObjectData | null | undefined,
       prefix: string,
     ) => {
-      const height = Math.max(0, (cell.visual_height || 0) * 0.5);
+      const height = getRenderedCellHeight(cell, object);
       const kind = height > 0 ? "box" : "plane";
       const materialKey = object?.id || (cell.walkable ? "walkable" : "blocked");
       const fogState = getCellFogState?.([cell.x, cell.z]) || "visible";
@@ -3373,6 +3527,313 @@ function CellGridLines({
   );
 }
 
+function ImmersiveCeilingLayer({ cells }: { cells: CellData[] }) {
+  const meshRef = useRef<THREE.InstancedMesh>(null);
+  const viewPresentation = useContext(ViewPresentationContext);
+  const usesBackroomsLevelZeroTheme = useMemo(
+    () =>
+      cells.some(
+        (cell) =>
+          cell.object_id === BACKROOMS_LEVEL_ZERO_FLOOR_OBJECT_ID ||
+          cell.object_id === BACKROOMS_LEVEL_ZERO_WALL_OBJECT_ID,
+      ),
+    [cells],
+  );
+  const ceilingTexture = usesBackroomsLevelZeroTheme
+    ? getObjectMaterialTexture(BACKROOMS_CEILING_MATERIAL)
+    : null;
+  const ceilingCells = useMemo(
+    () =>
+      isImmersiveCeilingView(viewPresentation)
+        ? cells.filter(
+            (cell) =>
+              cell.active !== false &&
+              (cell.walkable === true ||
+                (usesBackroomsLevelZeroTheme &&
+                  cell.object_id ===
+                    BACKROOMS_LEVEL_ZERO_WALL_OBJECT_ID)) &&
+              !isOverheadCell(cell),
+          )
+        : [],
+    [cells, usesBackroomsLevelZeroTheme, viewPresentation],
+  );
+
+  useLayoutEffect(() => {
+    if (!meshRef.current) return;
+
+    const dummy = new THREE.Object3D();
+    ceilingCells.forEach((cell, index) => {
+      dummy.position.set(
+        cell.x,
+        (cell.y || 0) + IMMERSIVE_CEILING_HEIGHT,
+        cell.z,
+      );
+      // PlaneGeometry faces +Z. This points its visible front face downward,
+      // while a chase camera above the roof sees through the culled back face.
+      dummy.rotation.set(Math.PI / 2, 0, 0);
+      dummy.scale.set(1.01, 1.01, 1);
+      dummy.updateMatrix();
+      meshRef.current!.setMatrixAt(index, dummy.matrix);
+    });
+
+    meshRef.current.count = ceilingCells.length;
+    meshRef.current.instanceMatrix.needsUpdate = true;
+    meshRef.current.computeBoundingSphere();
+  }, [ceilingCells]);
+
+  if (ceilingCells.length === 0) return null;
+
+  return (
+    <instancedMesh
+      ref={meshRef}
+      args={[undefined, undefined, ceilingCells.length]}
+      raycast={() => null}
+      frustumCulled={false}
+      receiveShadow
+    >
+      <planeGeometry args={[1, 1]} />
+      <meshStandardMaterial
+        color={
+          usesBackroomsLevelZeroTheme
+            ? BACKROOMS_CEILING_MATERIAL.color
+            : "#333743"
+        }
+        emissive={
+          usesBackroomsLevelZeroTheme
+            ? BACKROOMS_CEILING_MATERIAL.emissive
+            : "#11131a"
+        }
+        emissiveIntensity={
+          usesBackroomsLevelZeroTheme
+            ? BACKROOMS_CEILING_MATERIAL.emissiveIntensity
+            : 0.14
+        }
+        roughness={
+          usesBackroomsLevelZeroTheme
+            ? BACKROOMS_CEILING_MATERIAL.roughness
+            : 0.96
+        }
+        metalness={
+          usesBackroomsLevelZeroTheme
+            ? BACKROOMS_CEILING_MATERIAL.metalness
+            : 0.02
+        }
+        map={ceilingTexture ?? undefined}
+        side={THREE.FrontSide}
+        depthTest
+        depthWrite
+        fog
+      />
+    </instancedMesh>
+  );
+}
+
+type DistantArchitectureInstance = {
+  position: [number, number, number];
+  rotation: [number, number, number];
+  scale: [number, number, number];
+  color: THREE.Color;
+};
+
+function DistantArchitectureMesh({
+  kind,
+  instances,
+}: {
+  kind: "floor" | "wall" | "ceiling";
+  instances: DistantArchitectureInstance[];
+}) {
+  const meshRef = useRef<THREE.InstancedMesh>(null);
+
+  useLayoutEffect(() => {
+    if (!meshRef.current) return;
+    const dummy = new THREE.Object3D();
+    instances.forEach((instance, index) => {
+      dummy.position.fromArray(instance.position);
+      dummy.rotation.fromArray(instance.rotation);
+      dummy.scale.fromArray(instance.scale);
+      dummy.updateMatrix();
+      meshRef.current!.setMatrixAt(index, dummy.matrix);
+      meshRef.current!.setColorAt(index, instance.color);
+    });
+    meshRef.current.count = instances.length;
+    meshRef.current.instanceMatrix.needsUpdate = true;
+    if (meshRef.current.instanceColor) {
+      meshRef.current.instanceColor.needsUpdate = true;
+    }
+    meshRef.current.computeBoundingSphere();
+  }, [instances]);
+
+  if (instances.length === 0) return null;
+
+  return (
+    <instancedMesh
+      ref={meshRef}
+      args={[undefined as any, undefined as any, instances.length]}
+      raycast={() => null}
+      frustumCulled
+      renderOrder={-8}
+    >
+      {kind === "wall" ? (
+        <boxGeometry args={[1, 1, 1]} />
+      ) : (
+        <planeGeometry args={[1.01, 1.01]} />
+      )}
+      <meshBasicMaterial
+        vertexColors
+        side={kind === "floor" ? THREE.FrontSide : THREE.DoubleSide}
+        depthTest
+        depthWrite
+        fog={false}
+        toneMapped
+      />
+    </instancedMesh>
+  );
+}
+
+// The far field uses the authored map's real cell topology but deliberately
+// drops textures, normal maps, shadows, physical lights, and per-cell React
+// nodes. Three instanced basic-material draws can therefore show substantially
+// more Backrooms architecture than the full-detail scene at a fraction of the
+// GPU and reconciliation cost.
+function DistantArchitectureLayer({
+  cells,
+  objectById,
+  presentationLightCells = [],
+}: {
+  cells: CellData[];
+  objectById: Map<string, ObjectData>;
+  presentationLightCells?: readonly (readonly [number, number])[];
+}) {
+  const instances = useMemo(() => {
+    const floors: DistantArchitectureInstance[] = [];
+    const walls: DistantArchitectureInstance[] = [];
+    const ceilings: DistantArchitectureInstance[] = [];
+    const neutral = new THREE.Color("#202838");
+    const ceilingColor = new THREE.Color("#181c27");
+
+    cells.forEach((cell) => {
+      if (cell.active === false || isOverheadCell(cell)) return;
+      const object = cell.object_id ? objectById.get(cell.object_id) : undefined;
+      const material = getCellMaterialProps(object, cell.walkable);
+      const fixtureLight = resolvePresentationRoomLightContribution(
+        [cell.x, cell.z],
+        presentationLightCells,
+      );
+      const baseColor = new THREE.Color(material.color)
+        .multiplyScalar(0.34 + fixtureLight * 0.42)
+        .lerp(neutral, 0.18 - fixtureLight * 0.08)
+        .lerp(new THREE.Color("#a77d35"), fixtureLight * 0.12);
+
+      if (shouldRenderCellAsStructure(cell, object)) {
+        const authoredHeight = Math.max(0, object?.bounds?.[1] || 0);
+        const fallbackHeight = isWallStructureCell(cell, object)
+          ? resolveImmersiveWallHeight(authoredHeight || 1.9, true)
+          : authoredHeight;
+        const height = Math.max(
+          0.08,
+          getRenderedCellHeight(cell, object),
+          fallbackHeight,
+        );
+        walls.push({
+          position: [cell.x, (cell.y || 0) + height / 2, cell.z],
+          rotation: [0, 0, 0],
+          scale: [1, height, 1],
+          color: baseColor,
+        });
+        return;
+      }
+
+      floors.push({
+        position: [cell.x, (cell.y || 0) - 0.012, cell.z],
+        rotation: [-Math.PI / 2, 0, 0],
+        scale: [1, 1, 1],
+        color: baseColor,
+      });
+      if (cell.walkable) {
+        ceilings.push({
+          position: [
+            cell.x,
+            (cell.y || 0) + IMMERSIVE_CEILING_HEIGHT + 0.018,
+            cell.z,
+          ],
+          rotation: [Math.PI / 2, 0, 0],
+          scale: [1, 1, 1],
+          color: ceilingColor,
+        });
+      }
+    });
+
+    return { floors, walls, ceilings };
+  }, [cells, objectById, presentationLightCells]);
+
+  return (
+    <>
+      <DistantArchitectureMesh kind="floor" instances={instances.floors} />
+      <DistantArchitectureMesh kind="wall" instances={instances.walls} />
+      <DistantArchitectureMesh kind="ceiling" instances={instances.ceilings} />
+    </>
+  );
+}
+
+// Maps are finite and streamed in a circular window, but the Backrooms image
+// must never reveal the renderer's black clear color. This cheap enclosed
+// horizon follows the chunk center behind real near/far geometry. It is not
+// distance fog and it does not hide actors, authored cells, or light sources.
+function BackroomsVoidShield({
+  center,
+  radius,
+}: {
+  center: [number, number];
+  radius: number;
+}) {
+  const height = IMMERSIVE_CEILING_HEIGHT + 0.08;
+  return (
+    <group position={[center[0], 0, center[1]]} renderOrder={-12}>
+      <mesh
+        position={[0, -0.055, 0]}
+        rotation={[-Math.PI / 2, 0, 0]}
+        raycast={() => null}
+      >
+        <circleGeometry args={[radius, 64]} />
+        <meshBasicMaterial
+          color="#202634"
+          side={THREE.FrontSide}
+          depthTest
+          depthWrite
+          fog={false}
+          toneMapped={false}
+        />
+      </mesh>
+      <mesh
+        position={[0, IMMERSIVE_CEILING_HEIGHT + 0.055, 0]}
+        rotation={[Math.PI / 2, 0, 0]}
+        raycast={() => null}
+      >
+        <circleGeometry args={[radius, 64]} />
+        <meshBasicMaterial
+          color="#12151d"
+          side={THREE.FrontSide}
+          depthTest
+          depthWrite
+          fog={false}
+          toneMapped={false}
+        />
+      </mesh>
+      <mesh position={[0, height / 2 - 0.025, 0]} raycast={() => null}>
+        <cylinderGeometry args={[radius, radius, height, 64, 1, true]} />
+        <meshBasicMaterial
+          color="#171c28"
+          side={THREE.BackSide}
+          depthTest
+          depthWrite
+          fog={false}
+          toneMapped={false}
+        />
+      </mesh>
+    </group>
+  );
+}
+
 function CellHighlights({
   targetPattern,
   rangeCells,
@@ -3546,7 +4007,10 @@ function InstancedRuntimeGeometryGroup({
 }) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
   const viewPresentation = useContext(ViewPresentationContext);
-  const material = resolveObjectMaterial(object, geometryGroup.materialRef);
+  const material = resolveRuntimeObjectMaterial(
+    object,
+    geometryGroup.materialRef,
+  );
   const fogMaterial = fogState
     ? resolveStaticFogMaterialPolicy(fogState, fogVariantFor(viewPresentation))
     : null;
@@ -3600,7 +4064,7 @@ function InstancedRuntimeGeometryGroup({
         instance.position[2],
       );
       dummy.rotation.set(0, instance.rotationY, 0);
-      dummy.scale.set(1, 1, 1);
+      dummy.scale.set(1, instance.scaleY ?? 1, 1);
       dummy.updateMatrix();
       dummy.matrix.multiply(localMatrix);
       meshRef.current!.setMatrixAt(index, dummy.matrix);
@@ -3758,7 +4222,16 @@ function getPlacementRenderInfo(
   const rotY = Math.atan2(facing[0], facing[1]);
   const openRotation = isDoorPlacementOpen(mapDelta, placement) ? Math.PI / 2 : 0;
   const minY = objectExtents.minY;
-  const yOffset = baseHeight + surfaceOffset - minY + 0.01;
+  // Ordinary props are grounded by their lowest authored point. Ceiling
+  // fixtures deliberately author their parts at ceiling height, so preserve
+  // that vertical coordinate instead of normalizing the housing to the floor.
+  const yOffset = resolveRuntimeObjectPlacementYOffset({
+    baseHeight,
+    surfaceOffset,
+    minY,
+    heightOffset: placement.height_offset || 0,
+    ceilingAnchored: object.tags?.includes("light_ceiling") === true,
+  });
 
   return {
     key: `cobj_${placement.object_id}_${index}`,
@@ -3779,17 +4252,20 @@ type PlacementLightConfig = {
   intensity: number;
   distance: number;
   height: number;
+  presentationOnly: boolean;
 };
 
 type PlacementLight = PlacementLightConfig & {
   key: string;
   position: [number, number, number];
+  rotationY: number;
   castsShadow: boolean;
 };
 
 const MAX_PLACEMENT_LIGHTS = 28;
-const MAX_SHADOW_CASTING_PLACEMENT_LIGHTS = 4;
+const MAX_SHADOW_CASTING_PLACEMENT_LIGHTS = 1;
 let lightPoolTextureCache: THREE.CanvasTexture | null = null;
+let ceilingLightHaloTextureCache: THREE.CanvasTexture | null = null;
 let lightGlareTextureCache: THREE.CanvasTexture | null = null;
 let lightStreakTextureCache: THREE.CanvasTexture | null = null;
 
@@ -3836,6 +4312,32 @@ const getLightPoolTexture = () => {
   lightPoolTextureCache.minFilter = THREE.LinearMipmapLinearFilter;
   lightPoolTextureCache.generateMipmaps = true;
   return lightPoolTextureCache;
+};
+
+const getCeilingLightHaloTexture = () => {
+  if (ceilingLightHaloTextureCache) return ceilingLightHaloTextureCache;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = 256;
+  canvas.height = 128;
+  const ctx = canvas.getContext("2d");
+  if (ctx) {
+    const gradient = ctx.createRadialGradient(128, 64, 4, 128, 64, 124);
+    gradient.addColorStop(0, "rgba(255,255,255,0.82)");
+    gradient.addColorStop(0.18, "rgba(255,250,226,0.62)");
+    gradient.addColorStop(0.48, "rgba(255,232,174,0.24)");
+    gradient.addColorStop(0.78, "rgba(255,224,150,0.07)");
+    gradient.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+
+  ceilingLightHaloTextureCache = new THREE.CanvasTexture(canvas);
+  ceilingLightHaloTextureCache.colorSpace = THREE.SRGBColorSpace;
+  ceilingLightHaloTextureCache.magFilter = THREE.LinearFilter;
+  ceilingLightHaloTextureCache.minFilter = THREE.LinearMipmapLinearFilter;
+  ceilingLightHaloTextureCache.generateMipmaps = true;
+  return ceilingLightHaloTextureCache;
 };
 
 const getLightGlareTexture = () => {
@@ -3907,21 +4409,34 @@ const getPlacementLightConfig = (
 ): PlacementLightConfig | null => {
   const tags = new Set(object.tags || []);
   const profile = object.light_source;
+  const presentationOnly = tags.has("presentation_room_light");
   const legacyLight =
     tags.has("light_source") ||
     tags.has("light") ||
     /lamp|lantern|torch|brazier|candle/.test(`${object.id} ${object.display_name}`.toLowerCase());
-  if (!profile && !legacyLight) return null;
+  if (!profile && !legacyLight && !presentationOnly) return null;
 
-  let color = profile?.color || "#FFB05D";
+  let color = profile?.color ||
+    (tags.has("light_warm_fluorescent") ? "#ffe9a8" : "#FFB05D");
   if (tags.has("light_cyan")) color = "#69E6FF";
   else if (tags.has("light_violet")) color = "#9A6CFF";
 
   const config: PlacementLightConfig = {
     color,
-    intensity: profile ? Math.max(0, profile.intensity) * 4 : 2.15,
-    distance: profile ? Math.max(0.5, profile.radius) : 6,
-    height: 1.2,
+    intensity: profile
+      ? Math.max(0, profile.intensity) * 4
+      : presentationOnly
+        ? PRESENTATION_ROOM_POINT_LIGHT_INTENSITY
+        : 2.15,
+    distance: profile
+      ? Math.max(0.5, profile.radius)
+      : presentationOnly
+        ? PRESENTATION_ROOM_LIGHT_RADIUS
+        : 6,
+    height: tags.has("light_ceiling")
+      ? Math.min(2.55, Math.max(1.2, object.bounds[1] - 0.16))
+      : 1.2,
+    presentationOnly,
   };
 
   // Explicit profiles own their literal radius. Legacy size tags only fill in
@@ -4093,7 +4608,7 @@ function PlayerCarriedLight() {
         rotation={[-Math.PI / 2, 0, 0]}
         raycast={() => null}
       >
-        <circleGeometry args={[5.2, 48]} />
+        <circleGeometry args={[5.2, 24]} />
         <meshBasicMaterial
           ref={poolMaterialRef}
           map={poolTexture}
@@ -4108,19 +4623,125 @@ function PlayerCarriedLight() {
   );
 }
 
+function PresentationRoomSpotLight({
+  light,
+}: {
+  light: PlacementLight;
+}) {
+  const lightRef = useRef<THREE.SpotLight>(null);
+  const target = useMemo(() => new THREE.Object3D(), []);
+  const haloTexture = useMemo(() => getCeilingLightHaloTexture(), []);
+  const lastShadowUpdateRef = useRef(Number.NEGATIVE_INFINITY);
+
+  useLayoutEffect(() => {
+    target.position.set(
+      light.position[0],
+      Math.max(0.02, light.position[1] - light.height),
+      light.position[2],
+    );
+    if (!light.castsShadow) return;
+    const shadow = lightRef.current?.shadow;
+    if (!shadow) return;
+    shadow.autoUpdate = false;
+    shadow.needsUpdate = true;
+  }, [
+    light.position[0],
+    light.position[1],
+    light.position[2],
+    light.height,
+    target,
+  ]);
+
+  // Animated characters need fresh contact shadows, but a fluorescent fixture
+  // does not justify re-rendering its shadow map at the full camera cadence.
+  useFrame(({ clock }) => {
+    if (!light.castsShadow) return;
+    const shadow = lightRef.current?.shadow;
+    if (!shadow) return;
+    if (clock.elapsedTime - lastShadowUpdateRef.current < 1 / 20) return;
+    lastShadowUpdateRef.current = clock.elapsedTime;
+    shadow.needsUpdate = true;
+  });
+
+  return (
+    <>
+      <primitive object={target} />
+      <spotLight
+        ref={lightRef}
+        position={light.position}
+        target={target}
+        color={light.color}
+        intensity={light.intensity}
+        distance={light.distance * 1.2}
+        decay={2}
+        angle={1.48}
+        penumbra={0.48}
+        castShadow={light.castsShadow}
+        shadow-bias={-0.0002}
+        shadow-normalBias={0.08}
+        shadow-mapSize-width={256}
+        shadow-mapSize-height={256}
+        shadow-camera-near={0.4}
+        shadow-camera-far={Math.max(1, light.distance * 1.2)}
+      />
+      {/* A depth-tested, source-local halo joins the emissive panel to the
+          ceiling illumination on every quality preset. It is deliberately a
+          tiny geometry pass rather than a full-screen bloom effect. */}
+      <group
+        position={[
+          light.position[0],
+          // The fixture backer ends at Y 2.84 and the ceiling begins at 2.85.
+          // Keep the halo in that gap rather than intersecting the opaque
+          // backer and turning its holder into a hard black cutout.
+          light.position[1] + 0.294,
+          light.position[2],
+        ]}
+        rotation={[0, light.rotationY, 0]}
+      >
+        <mesh
+          rotation={[Math.PI / 2, 0, 0]}
+          renderOrder={5}
+          raycast={() => null}
+        >
+          <planeGeometry args={[4.4, 2.35]} />
+          <meshBasicMaterial
+            map={haloTexture}
+            color={light.color}
+            transparent
+            opacity={0.12}
+            depthTest
+            depthWrite={false}
+            blending={THREE.AdditiveBlending}
+            side={THREE.DoubleSide}
+          />
+        </mesh>
+      </group>
+    </>
+  );
+}
+
 function CustomObjectPlacementLayer({
   placements,
   objectById,
   highestCellByCoord,
   mapDelta,
   renderLights = true,
+  lightOrigin,
+  lightForward,
+  maxPresentationLights = 5,
+  presentationShadowsEnabled = false,
 }: {
   placements: ObjectPlacementData[];
   objectById: Map<string, ObjectData>;
   highestCellByCoord: Map<string, CellData>;
   mapDelta?: MapDelta;
   renderLights?: boolean;
+  lightOrigin?: [number, number] | null;
+  lightForward?: [number, number] | null;
+  maxPresentationLights?: number;
+  presentationShadowsEnabled?: boolean;
 }) {
+  const presentationShadowKeyRef = useRef<string | null>(null);
   const { singles, instanceGroups, lights } = useMemo(() => {
     const objectCounts = placements.reduce((counts, placement) => {
       counts.set(placement.object_id, (counts.get(placement.object_id) || 0) + 1);
@@ -4150,8 +4771,9 @@ function CustomObjectPlacementLayer({
       if (!info) return;
 
       const lightConfig = getPlacementLightConfig(info.object);
-      if (lightConfig && nextLights.length < MAX_PLACEMENT_LIGHTS) {
+      if (lightConfig) {
         const castsShadow =
+          !lightConfig.presentationOnly &&
           lightConfig.distance >= 9 &&
           shadowCastingLightCount < MAX_SHADOW_CASTING_PLACEMENT_LIGHTS;
         if (castsShadow) shadowCastingLightCount += 1;
@@ -4162,6 +4784,7 @@ function CustomObjectPlacementLayer({
             info.position[1] + lightConfig.height,
             info.position[2],
           ],
+          rotationY: info.rotationY,
           castsShadow,
           ...lightConfig,
         });
@@ -4193,50 +4816,108 @@ function CustomObjectPlacementLayer({
       });
     });
 
+    const selectedPresentationLights = selectLocalPresentationRoomLights(
+      nextLights.filter((light) => light.presentationOnly),
+      lightOrigin,
+      maxPresentationLights,
+      { forward: lightForward },
+    );
+    // Keep the current nearby fixture as the shadow anchor while it remains
+    // in the selected set. Crossing a nearest-light bisector therefore changes
+    // only the selection order, not the shadow map allocation or direction.
+    const retainedShadowKey =
+      presentationShadowsEnabled &&
+      selectedPresentationLights.some(
+        (light) => light.key === presentationShadowKeyRef.current,
+      )
+        ? presentationShadowKeyRef.current
+        : presentationShadowsEnabled
+          ? selectedPresentationLights[0]?.key || null
+          : null;
+    presentationShadowKeyRef.current = retainedShadowKey;
+    const presentationLights = selectedPresentationLights.map((light) => ({
+      ...light,
+      castsShadow: light.key === retainedShadowKey,
+    }));
+    const hasPresentationShadow = presentationLights.some(
+      (light) => light.castsShadow,
+    );
+    const ordinaryLights = nextLights
+      .filter((light) => !light.presentationOnly)
+      .slice(
+        0,
+        Math.max(0, MAX_PLACEMENT_LIGHTS - presentationLights.length),
+      )
+      .map((light) =>
+        hasPresentationShadow ? { ...light, castsShadow: false } : light,
+      );
+
     return {
       singles: nextSingles.filter(Boolean) as NonNullable<
         ReturnType<typeof getPlacementRenderInfo>
       >[],
       instanceGroups: Array.from(groupedInstances.values()),
-      lights: nextLights,
+      lights: [...presentationLights, ...ordinaryLights],
     };
-  }, [placements, objectById, highestCellByCoord, mapDelta]);
+  }, [
+    placements,
+    objectById,
+    highestCellByCoord,
+    mapDelta,
+    lightOrigin?.[0],
+    lightOrigin?.[1],
+    lightForward?.[0],
+    lightForward?.[1],
+    maxPresentationLights,
+    presentationShadowsEnabled,
+  ]);
+  const renderedLights = renderLights
+    ? lights
+    : lights.filter((light) => light.presentationOnly);
 
   return (
     <>
-      {renderLights && lights.map((light) => (
+      {renderedLights.map((light) => (
         <React.Fragment key={light.key}>
-          <pointLight
-            position={light.position}
-            color={light.color}
-            intensity={light.intensity}
-            distance={light.distance}
-            decay={1}
-            castShadow={light.castsShadow}
-            shadow-bias={-0.001}
-            shadow-mapSize-width={128}
-            shadow-mapSize-height={128}
-          />
-          <LightGlareCore light={light} />
-          <mesh
-            position={[
-              light.position[0],
-              Math.max(0.018, light.position[1] - light.height + 0.018),
-              light.position[2],
-            ]}
-            rotation={[-Math.PI / 2, 0, 0]}
-            raycast={() => null}
-          >
-            <circleGeometry args={[light.distance, 48]} />
-            <meshBasicMaterial
-              map={getLightPoolTexture()}
+          {light.presentationOnly ? (
+            <PresentationRoomSpotLight light={light} />
+          ) : (
+            <pointLight
+              position={light.position}
               color={light.color}
-              transparent
-              opacity={light.castsShadow ? 0.4 : 0.32}
-              depthWrite={false}
-              blending={THREE.AdditiveBlending}
+              intensity={light.intensity}
+              distance={light.distance}
+              decay={light.presentationOnly ? 2 : 1}
+              castShadow={light.castsShadow}
+              shadow-bias={-0.001}
+              shadow-mapSize-width={128}
+              shadow-mapSize-height={128}
             />
-          </mesh>
+          )}
+          {!light.presentationOnly && (
+            <>
+              <LightGlareCore light={light} />
+              <mesh
+                position={[
+                  light.position[0],
+                  Math.max(0.018, light.position[1] - light.height + 0.018),
+                  light.position[2],
+                ]}
+                rotation={[-Math.PI / 2, 0, 0]}
+                raycast={() => null}
+              >
+                <circleGeometry args={[light.distance, 24]} />
+                <meshBasicMaterial
+                  map={getLightPoolTexture()}
+                  color={light.color}
+                  transparent
+                  opacity={light.castsShadow ? 0.4 : 0.32}
+                  depthWrite={false}
+                  blending={THREE.AdditiveBlending}
+                />
+              </mesh>
+            </>
+          )}
         </React.Fragment>
       ))}
       {instanceGroups.map((group) => (
@@ -4395,6 +5076,107 @@ function MemoryStructurePlacementLayer({
   );
 }
 
+const PLAYER_NEAR_CAMERA_FADE_DAMPING = 14;
+
+function ThirdPersonNearCameraPlayerGroup({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  const groupRef = useRef<THREE.Group>(null);
+  const viewPresentation = useContext(ViewPresentationContext);
+  const opacityRef = useRef(1);
+
+  const restoreMaterials = useCallback(() => {
+    groupRef.current?.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (!mesh.isMesh || !mesh.material) return;
+      const materials = Array.isArray(mesh.material)
+        ? mesh.material
+        : [mesh.material];
+      materials.forEach((material) => {
+        const baseOpacity = material.userData.crpgNearCameraBaseOpacity;
+        if (typeof baseOpacity !== "number") return;
+        const baseTransparent = Boolean(
+          material.userData.crpgNearCameraBaseTransparent,
+        );
+        const baseDepthWrite = Boolean(
+          material.userData.crpgNearCameraBaseDepthWrite,
+        );
+        const programChanged =
+          material.transparent !== baseTransparent ||
+          material.depthWrite !== baseDepthWrite;
+        material.opacity = baseOpacity;
+        material.transparent = baseTransparent;
+        material.depthWrite = baseDepthWrite;
+        material.needsUpdate = programChanged;
+      });
+    });
+  }, []);
+
+  useFrame(({ camera }, delta) => {
+    if (!groupRef.current) return;
+    const targetOpacity =
+      viewPresentation === "third_person" && playerStateRef.ready
+        ? resolveThirdPersonPlayerCameraOpacity(
+            resolveThirdPersonCameraBodyDistance(
+              [camera.position.x, camera.position.y, camera.position.z],
+              [playerStateRef.px, playerStateRef.py, playerStateRef.pz],
+              PLAYER_COLLISION_HEIGHT,
+            ),
+          )
+        : 1;
+    opacityRef.current = THREE.MathUtils.damp(
+      opacityRef.current,
+      targetOpacity,
+      PLAYER_NEAR_CAMERA_FADE_DAMPING,
+      Math.min(delta, 0.1),
+    );
+    const opacity = opacityRef.current;
+
+    groupRef.current.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (!mesh.isMesh || !mesh.material) return;
+      const materials = Array.isArray(mesh.material)
+        ? mesh.material
+        : [mesh.material];
+      materials.forEach((material) => {
+        if (
+          typeof material.userData.crpgNearCameraBaseOpacity !== "number"
+        ) {
+          material.userData.crpgNearCameraBaseOpacity = material.opacity;
+          material.userData.crpgNearCameraBaseTransparent =
+            material.transparent;
+          material.userData.crpgNearCameraBaseDepthWrite =
+            material.depthWrite;
+        }
+        const baseOpacity = material.userData
+          .crpgNearCameraBaseOpacity as number;
+        const baseTransparent = Boolean(
+          material.userData.crpgNearCameraBaseTransparent,
+        );
+        const baseDepthWrite = Boolean(
+          material.userData.crpgNearCameraBaseDepthWrite,
+        );
+        const faded = opacity < 0.999;
+        const nextTransparent = baseTransparent || faded;
+        const nextDepthWrite = baseDepthWrite && !faded;
+        const programChanged =
+          material.transparent !== nextTransparent ||
+          material.depthWrite !== nextDepthWrite;
+        material.opacity = baseOpacity * opacity;
+        material.transparent = nextTransparent;
+        material.depthWrite = nextDepthWrite;
+        material.needsUpdate = programChanged;
+      });
+    });
+  });
+
+  useEffect(() => restoreMaterials, [restoreMaterials]);
+
+  return <group ref={groupRef}>{children}</group>;
+}
+
 const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
   map,
   playerPos,
@@ -4421,20 +5203,29 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
   showGrid,
   renderCenter,
   renderRadius = DEFAULT_RENDER_RADIUS,
+  architectureRadius = renderRadius,
+  renderForward,
   fxCellTransform,
   rawPointerCoordinates = false,
   isCellVisible,
   isCellDarkAdjacentToPlayer,
   getCellFogState,
   getCellIllumination,
+  getCellLightColor,
   getStructureIllumination,
   suppressPlacementLights = false,
+  presentationLightBudget = 4,
+  presentationShadowsEnabled = false,
 }: ReferenceGameRendererProps) {
   const gamePackage = useEngineStore((state) => state.gamePackage);
   const viewPresentation = useContext(ViewPresentationContext);
   const firstPersonView = viewPresentation === "first_person";
+  // The cyan depth-only readability pass is useful in isometric play, where
+  // architecture can intentionally sit between the fixed camera and Steve.
+  // Immersive cameras solve that relationship through collision instead; the
+  // x-ray silhouette would otherwise fill the lens during wall contact.
   const playerStructureOcclusion =
-    resolvePlayerStructureOcclusionPolicy(firstPersonView);
+    resolvePlayerStructureOcclusionPolicy(viewPresentation !== "isometric");
   const playerModelObject = useMemo(
     () => resolvePlayerModelObject(gamePackage),
     [gamePackage],
@@ -4484,6 +5275,19 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
   }, [renderCenter?.[0], renderCenter?.[1]]);
   const [chunkedRenderCenter, setChunkedRenderCenter] =
     useState<[number, number] | null>(snappedRenderCenter);
+  const presentationLightOrigin = useMemo<[number, number] | null>(() => {
+    const origin = renderCenter || playerPos || chunkedRenderCenter;
+    return origin
+      ? [Math.round(origin[0]), Math.round(origin[1])]
+      : null;
+  }, [
+    renderCenter?.[0],
+    renderCenter?.[1],
+    playerPos?.[0],
+    playerPos?.[1],
+    chunkedRenderCenter?.[0],
+    chunkedRenderCenter?.[1],
+  ]);
   const sampledMemoryOrigin = useMemo<[number, number]>(
     () => [Math.round(playerPos[0]), Math.round(playerPos[1])],
     [Math.round(playerPos[0]), Math.round(playerPos[1])],
@@ -4527,6 +5331,15 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
   ) => {
     if (!chunkedRenderCenter) return true;
     const radius = renderRadius + padding;
+    if (viewPresentation === "third_person" && renderForward) {
+      return isWithinImmersiveDirectionalWindow({
+        cell: [x, z],
+        center: chunkedRenderCenter,
+        forward: renderForward,
+        radius,
+        forwardBonus: IMMERSIVE_DETAIL_FORWARD_BONUS,
+      });
+    }
     const dx = x - chunkedRenderCenter[0];
     const dz = z - chunkedRenderCenter[1];
     return dx * dx + dz * dz <= radius * radius;
@@ -4543,8 +5356,69 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
       chunkedRenderCenter?.[0],
       chunkedRenderCenter?.[1],
       renderRadius,
+      viewPresentation,
+      renderForward?.[0],
+      renderForward?.[1],
     ],
   );
+  const immersiveArchitectureEnabled =
+    isImmersiveCeilingView(viewPresentation);
+  const architectureCenter = useMemo<[number, number]>(
+    () =>
+      chunkedRenderCenter ||
+      renderCenter ||
+      playerPos ||
+      [map.width / 2, map.height / 2],
+    [
+      chunkedRenderCenter?.[0],
+      chunkedRenderCenter?.[1],
+      renderCenter?.[0],
+      renderCenter?.[1],
+      playerPos?.[0],
+      playerPos?.[1],
+      map.width,
+      map.height,
+    ],
+  );
+  const resolvedArchitectureRadius = Math.max(
+    renderRadius + 4,
+    architectureRadius,
+  );
+  const distantArchitectureCells = useMemo(() => {
+    if (!immersiveArchitectureEnabled) return [];
+    const detailRadius = renderRadius + 2;
+    return map.cells.filter((cell) => {
+      return (
+        cell.active !== false &&
+        isWithinDistantArchitectureBand({
+          cell: [cell.x, cell.z],
+          center: architectureCenter,
+          detailRadius,
+          architectureRadius: resolvedArchitectureRadius,
+          forward:
+            viewPresentation === "third_person" ? renderForward : undefined,
+          detailForwardBonus:
+            viewPresentation === "third_person"
+              ? IMMERSIVE_DETAIL_FORWARD_BONUS
+              : 0,
+          architectureForwardBonus:
+            viewPresentation === "third_person"
+              ? IMMERSIVE_ARCHITECTURE_FORWARD_BONUS
+              : 0,
+        })
+      );
+    });
+  }, [
+    immersiveArchitectureEnabled,
+    map.cells,
+    architectureCenter[0],
+    architectureCenter[1],
+    renderRadius,
+    resolvedArchitectureRadius,
+    viewPresentation,
+    renderForward?.[0],
+    renderForward?.[1],
+  ]);
 
   const objectById = useMemo(
     () =>
@@ -4605,6 +5479,19 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
         : map.custom_object_placements || [],
     [map.custom_object_placements, extraPlacements],
   );
+  const presentationArchitectureLightCells = useMemo<
+    readonly [number, number][]
+  >(
+    () =>
+      allRenderPlacements.flatMap((placement) =>
+        objectById
+          .get(placement.object_id)
+          ?.tags?.includes("presentation_room_light")
+          ? [[placement.cell[0], placement.cell[1]] as [number, number]]
+          : [],
+      ),
+    [allRenderPlacements, objectById],
+  );
   const renderPlacements = useMemo(
     () =>
       allRenderPlacements.filter((placement) => {
@@ -4626,6 +5513,9 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
       chunkedRenderCenter?.[0],
       chunkedRenderCenter?.[1],
       renderRadius,
+      viewPresentation,
+      renderForward?.[0],
+      renderForward?.[1],
       getCellFogState,
     ],
   );
@@ -4661,6 +5551,9 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
     chunkedRenderCenter?.[0],
     chunkedRenderCenter?.[1],
     renderRadius,
+    viewPresentation,
+    renderForward?.[0],
+    renderForward?.[1],
   ]);
   const renderWorldItems = useMemo(
     () =>
@@ -4674,6 +5567,9 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
       chunkedRenderCenter?.[0],
       chunkedRenderCenter?.[1],
       renderRadius,
+      viewPresentation,
+      renderForward?.[0],
+      renderForward?.[1],
     ],
   );
 
@@ -4686,6 +5582,12 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
           highestCellByCoord={placementSurfaceByCoord}
           mapDelta={mapDelta}
           renderLights={!suppressPlacementLights}
+          lightOrigin={presentationLightOrigin}
+          lightForward={
+            viewPresentation === "third_person" ? renderForward : undefined
+          }
+          maxPresentationLights={presentationLightBudget}
+          presentationShadowsEnabled={presentationShadowsEnabled}
         />
         <MemoryStructurePlacementLayer
           placements={memoryStructurePlacements}
@@ -4728,7 +5630,27 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
         })}
       </group>
     );
-  }, [editLayerY, renderPlacements, memoryStructurePlacements, map.triggers, objectById, highestCellByCoord, placementSurfaceByCoord, mapDelta, suppressPlacementLights, getCellFogState, sampledMemoryOrigin[0], sampledMemoryOrigin[1]]);
+  }, [
+    editLayerY,
+    renderPlacements,
+    memoryStructurePlacements,
+    map.triggers,
+    objectById,
+    highestCellByCoord,
+    placementSurfaceByCoord,
+    mapDelta,
+    suppressPlacementLights,
+    presentationLightBudget,
+    presentationLightOrigin?.[0],
+    presentationLightOrigin?.[1],
+    renderForward?.[0],
+    renderForward?.[1],
+    viewPresentation,
+    presentationShadowsEnabled,
+    getCellFogState,
+    sampledMemoryOrigin[0],
+    sampledMemoryOrigin[1],
+  ]);
 
   const {
     texture: playerSpriteTex,
@@ -4840,6 +5762,29 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
         </mesh>
       )}
 
+      {immersiveArchitectureEnabled && (
+        <>
+          <BackroomsVoidShield
+            center={architectureCenter}
+            radius={
+              (viewPresentation === "third_person"
+                ? resolveImmersiveDirectionalWindowOuterRadius({
+                    radius: resolvedArchitectureRadius,
+                    forwardBonus:
+                      IMMERSIVE_ARCHITECTURE_FORWARD_BONUS,
+                  })
+                : resolvedArchitectureRadius) +
+              3
+            }
+          />
+          <DistantArchitectureLayer
+            cells={distantArchitectureCells}
+            objectById={objectById}
+            presentationLightCells={presentationArchitectureLightCells}
+          />
+        </>
+      )}
+
       {/* Render Cells */}
       <CellVisualLayers
         cells={renderCells}
@@ -4849,6 +5794,7 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
         getCellFogState={getCellFogState}
         getStructureIllumination={getStructureIllumination}
       />
+      <ImmersiveCeilingLayer cells={renderCells} />
       {(showGrid ?? editLayerY !== undefined) && (
         <CellGridLines cells={renderCells} material={materials.gridLine} />
       )}
@@ -4936,17 +5882,14 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
         );
         const yOffset = getStandingSurfaceY(cell, objectById);
 
-        const engaged =
-          !entityDef.is_npc &&
-          !!playerPos &&
-          Math.abs(currentCellCoord[0] - playerPos[0]) +
-            Math.abs(currentCellCoord[1] - playerPos[1]) <=
-            THREAT_RADIUS;
-
         return (
           <EntityNode
             key={`entity_${placement.entity_id}_${i}`}
-            placement={{ ...placement, cell: currentCellCoord }}
+            placement={{
+              ...placement,
+              cell: currentCellCoord,
+              facing: entityState?.facing || placement.facing,
+            }}
             entityDef={entityDef}
             yOffset={yOffset}
             gamePackage={gamePackage}
@@ -4954,11 +5897,15 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
             maxHp={entityDef.max_hp}
             fxKey={key}
             actorId={placement.entity_id}
-            engaged={engaged}
             illumination={
               darkSilhouette
                 ? 0
                 : getCellIllumination?.(currentCellCoord)
+            }
+            lightColor={
+              darkSilhouette
+                ? undefined
+                : getCellLightColor?.(currentCellCoord)
             }
             darkSilhouette={darkSilhouette}
           />
@@ -5002,6 +5949,11 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
             illumination={
               darkSilhouette ? 0 : getCellIllumination?.(follower.cell)
             }
+            lightColor={
+              darkSilhouette
+                ? undefined
+                : getCellLightColor?.(follower.cell)
+            }
             darkSilhouette={darkSilhouette}
           />
         );
@@ -5017,6 +5969,7 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
           );
           const pY = getStandingSurfaceY(playerCell, objectById);
           const playerIllumination = getCellIllumination?.(playerPos) ?? 1;
+          const playerLightColor = getCellLightColor?.(playerPos);
 
           const { renderWidth, renderHeight } =
             getCharacterSpriteRenderSize(
@@ -5049,27 +6002,29 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
                       }
                       visualYawRef={playerVisualYawRef}
                     >
-                      <AssetModelRenderer
-                        object={playerModelObject}
-                        showPlaceholder={false}
-                        appearance="player_default"
-                        illumination={playerIllumination}
-                        animationClipName={resolvePlayerLocomotionClip(
-                          playerMoving,
-                        )}
-                        onReadyChange={setPlayerModelReady}
-                      />
-                      {playerModelReady &&
-                        playerStructureOcclusion.renderXrayPass && (
-                          <AssetModelRenderer
-                            object={playerModelObject}
-                            showPlaceholder={false}
-                            appearance="player_xray"
-                            animationClipName={resolvePlayerLocomotionClip(
-                              playerMoving,
-                            )}
-                          />
-                        )}
+                      <ThirdPersonNearCameraPlayerGroup>
+                        <AssetModelRenderer
+                          object={playerModelObject}
+                          showPlaceholder={false}
+                          appearance="player_default"
+                          illumination={playerIllumination}
+                          animationClipName={resolvePlayerLocomotionClip(
+                            playerMoving,
+                          )}
+                          onReadyChange={setPlayerModelReady}
+                        />
+                        {playerModelReady &&
+                          playerStructureOcclusion.renderXrayPass && (
+                            <AssetModelRenderer
+                              object={playerModelObject}
+                              showPlaceholder={false}
+                              appearance="player_xray"
+                              animationClipName={resolvePlayerLocomotionClip(
+                                playerMoving,
+                              )}
+                            />
+                          )}
+                      </ThirdPersonNearCameraPlayerGroup>
                     </PlayerVisualYawGroup>
                   )}
                   {(!playerModelObject || !playerModelReady) &&
@@ -5087,7 +6042,10 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
                         <planeGeometry args={[renderWidth, renderHeight]} />
                         <meshBasicMaterial
                           map={playerSpriteTex}
-                          color={actorSpriteTint(playerIllumination)}
+                          color={actorSpriteTint(
+                            playerIllumination,
+                            playerLightColor,
+                          )}
                           transparent={true}
                           alphaTest={0.1}
                           depthTest
@@ -5132,7 +6090,11 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
                       >
                         <cylinderGeometry args={[0, 0.3, 0.8, 4]} />
                         <meshBasicMaterial
-                          color={actorFallbackTint("#5E81AC", playerIllumination)}
+                          color={actorFallbackTint(
+                            "#5E81AC",
+                            playerIllumination,
+                            playerLightColor,
+                          )}
                           transparent
                           opacity={1}
                           depthTest
@@ -5251,235 +6213,26 @@ const convertRuntimeMapToWorld = (
   };
 };
 
-// Real point lights are retained as a restrained vertical-surface treatment.
-// Ground illumination is rendered from every authoritative cell below, so
-// source-count caps can no longer make the picture disagree with Senses.
+// Authoritative sources become real scene lights. The renderer keeps a strict
+// nearby-source budget, but each selected light now shapes every standard
+// material it reaches: floors, walls, props, ceilings, and model-backed actors.
 const MAX_AUTHORITATIVE_POINT_LIGHTS = 8;
-
-type AuthoritativeGroundLightCell = {
-  key: string;
-  x: number;
-  y: number;
-  z: number;
-  size: number;
-  presentationColor: THREE.Color;
-  presentationOpacity: number;
-};
-
-const AUTHORITATIVE_GROUND_LIGHT_VERTEX_SHADER = `
-  attribute float instanceOpacity;
-  varying vec3 vLightColor;
-  varying float vLightOpacity;
-  void main() {
-    vLightColor = instanceColor;
-    vLightOpacity = instanceOpacity;
-    gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0);
-  }
-`;
-
-const AUTHORITATIVE_GROUND_LIGHT_FRAGMENT_SHADER = `
-  varying vec3 vLightColor;
-  varying float vLightOpacity;
-  void main() {
-    if (vLightOpacity <= 0.001) discard;
-    gl_FragColor = vec4(vLightColor, clamp(vLightOpacity, 0.0, 1.0));
-  }
-`;
-
-function AuthoritativeGroundLightField({
-  visibility,
-  map,
-  gridSpace,
-  fineRatio,
-  renderCenter,
-  renderRadius,
-}: {
-  visibility: ImmersiveViewerVisibilitySnapshot;
-  map: MapData;
-  gridSpace: RendererGridSpace;
-  fineRatio: number;
-  renderCenter?: [number, number];
-  renderRadius?: number;
-}) {
-  const meshRef = useRef<THREE.InstancedMesh>(null);
-  const cellTemplates = useMemo(() => {
-    const logicalGround = new Map<
-      string,
-      { cell: [number, number]; y: number }
-    >();
-    map.cells.forEach((cell) => {
-      const key = fogCellKey(cell.x, cell.z);
-      const current = logicalGround.get(key);
-      const y = cell.y || 0;
-      if (!current || y < current.y) {
-        logicalGround.set(key, { cell: [cell.x, cell.z], y });
-      }
-    });
-    const size = logicalCellWorldSize(gridSpace, fineRatio);
-    return new Map(
-      [...logicalGround.entries()].map(([key, value]) => {
-        const world = logicalCellToWorld(value.cell, gridSpace, fineRatio);
-        return [
-          key,
-          {
-            x: world[0],
-            // Floor tile models rise a few hundredths above the authored cell
-            // base. Keep the authoritative light wash just above that stable
-            // surface (but below actors and tactical annotations) so it
-            // is not swallowed inside the floor geometry.
-            y: value.y + 0.052,
-            z: world[1],
-            size,
-          },
-        ] as const;
-      }),
-    );
-  }, [map.cells, gridSpace, fineRatio]);
-  // Allocate the instanced color attribute before the first WebGL program is
-  // compiled. Adding it later with setColorAt would leave the initial shader
-  // unaware of USE_INSTANCING_COLOR and render the field as black.
-  const instanceColorAttribute = useMemo(
-    () =>
-      new THREE.InstancedBufferAttribute(
-        new Float32Array(cellTemplates.size * 3).fill(1),
-        3,
-      ),
-    [cellTemplates.size],
-  );
-  const instanceOpacityAttribute = useMemo(
-    () =>
-      new THREE.InstancedBufferAttribute(
-        new Float32Array(cellTemplates.size),
-        1,
-      ),
-    [cellTemplates.size],
-  );
-  const cells = useMemo<AuthoritativeGroundLightCell[]>(() => {
-    const visible = new Set(
-      visibility.terrain_visible.map((cell) =>
-        fogCellKey(cell[0], cell[1]),
-      ),
-    );
-    const sourceById = new Map(
-      visibility.illumination.sources.map((source) => [source.id, source]),
-    );
-    return visibility.illumination.cells.flatMap((entry) => {
-      const key = fogCellKey(entry.cell[0], entry.cell[1]);
-      if (!visible.has(key)) return [];
-      const template = cellTemplates.get(key);
-      if (!template) return [];
-      if (renderCenter && renderRadius !== undefined) {
-        const dx = entry.cell[0] - renderCenter[0];
-        const dz = entry.cell[1] - renderCenter[1];
-        const paddedRadius = renderRadius + fineRatio;
-        if (dx * dx + dz * dz > paddedRadius * paddedRadius) return [];
-      }
-
-      const absoluteLight = Math.max(0, Math.min(1, entry.value));
-      const presentationStrength =
-        resolveAuthoritativeGroundLightPresentationStrength(absoluteLight);
-      // The memory cutoff chooses the structural base, but weak mechanical
-      // light still needs to feather over that base. Skip only values whose
-      // alpha would be genuinely imperceptible; do not make light pop on at
-      // the visible/remembered classification boundary.
-      if (presentationStrength <= 0.001) return [];
-      // Color follows the mechanically strongest source. Averaging every
-      // overlapping source allowed complementary amber and violet lights to
-      // cancel into a broad white/gray floor even though no white light was
-      // authored there.
-      const dominantSourceId =
-        entry.strongest_source_id || entry.contributions[0]?.source_id;
-      const dominantSource = dominantSourceId
-        ? sourceById.get(dominantSourceId)
-        : undefined;
-      const sourceTint = new THREE.Color(
-        dominantSource?.color ||
-          (dominantSourceId ? "#facc15" : "#b8c1e8"),
-      );
-      // The exact mechanical value still owns the footprint. Presentation
-      // deliberately compresses its weakest tail so the light dissolves into
-      // the black fog field instead of leaving a uniformly readable floor.
-      const presentationColor = sourceTint
-        .lerp(new THREE.Color("#fff4db"), 0.05)
-        .multiplyScalar(0.94);
-
-      return [
-        {
-          key,
-          ...template,
-          presentationColor,
-          presentationOpacity: presentationStrength * 0.94,
-        },
-      ];
-    });
-  }, [
-    visibility.terrain_visible,
-    visibility.illumination,
-    cellTemplates,
-    fineRatio,
-    renderCenter?.[0],
-    renderCenter?.[1],
-    renderRadius,
-  ]);
-
-  useLayoutEffect(() => {
-    const mesh = meshRef.current;
-    if (!mesh) return;
-    const dummy = new THREE.Object3D();
-    cells.forEach((cell, index) => {
-      dummy.position.set(cell.x, cell.y, cell.z);
-      dummy.rotation.set(-Math.PI / 2, 0, 0);
-      dummy.scale.set(cell.size * 1.01, cell.size * 1.01, 1);
-      dummy.updateMatrix();
-      mesh.setMatrixAt(index, dummy.matrix);
-      mesh.setColorAt(index, cell.presentationColor);
-      instanceOpacityAttribute.setX(index, cell.presentationOpacity);
-    });
-    mesh.count = cells.length;
-    mesh.instanceMatrix.needsUpdate = true;
-    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-    instanceOpacityAttribute.needsUpdate = true;
-    mesh.computeBoundingSphere();
-  }, [cells, instanceOpacityAttribute]);
-
-  if (cells.length === 0) return null;
-  return (
-    <instancedMesh
-      ref={meshRef}
-      args={[undefined as any, undefined as any, cellTemplates.size]}
-      instanceColor={instanceColorAttribute}
-      frustumCulled
-      raycast={() => null}
-      renderOrder={8}
-    >
-      <planeGeometry args={[1, 1]}>
-        <primitive
-          attach="attributes-instanceOpacity"
-          object={instanceOpacityAttribute}
-        />
-      </planeGeometry>
-      <shaderMaterial
-        vertexShader={AUTHORITATIVE_GROUND_LIGHT_VERTEX_SHADER}
-        fragmentShader={AUTHORITATIVE_GROUND_LIGHT_FRAGMENT_SHADER}
-        transparent
-        depthTest
-        depthWrite={false}
-        blending={THREE.NormalBlending}
-        toneMapped={false}
-      />
-    </instancedMesh>
-  );
-}
 
 function AuthoritativePointLight({
   source,
   gridSpace,
   fineRatio,
+  playerFacing,
+  playerVisualYawRef,
 }: {
   source: ImmersiveResolvedLightSource;
   gridSpace: RendererGridSpace;
   fineRatio: number;
+  playerFacing?: [number, number];
+  playerVisualYawRef?: React.MutableRefObject<number>;
 }) {
+  const groupRef = useRef<THREE.Group>(null);
+  const playerCarried = source.carrier_actor_id === "player";
   const fallback = useMemo(
     () => logicalCellToWorld(source.cell, gridSpace, fineRatio),
     [source.cell[0], source.cell[1], gridSpace, fineRatio],
@@ -5488,61 +6241,93 @@ function AuthoritativePointLight({
     source.radius,
     logicalCellWorldSize(gridSpace, fineRatio),
   );
-  const height = source.carrier_actor_id ? 1.25 : 0.95;
-  // The point light is only a restrained vertical-form accent. The exact
-  // ground brightness comes from the authoritative per-cell field above;
-  // letting this cosmetic light dominate would flatten that distance curve
-  // and make the picture disagree with Senses.
-  const intensity = Math.max(0.01, source.intensity * 0.1);
+  const height = source.carrier_actor_id
+    ? 1.35
+    : source.stimulus_tags.includes("ceiling_light")
+      ? 2.55
+    : source.source_kind === "fire_field"
+      ? 0.42
+      : source.source_kind === "dropped_item"
+        ? 0.3
+        : source.source_kind === "environment_field"
+          ? 2.12
+          : 1.62;
+  const intensity = resolveAuthoritativePointLightIntensity(source.intensity);
+  const contactOpacity = 0.035 + Math.min(0.035, source.intensity * 0.035);
+
+  useFrame(() => {
+    if (!playerCarried || !groupRef.current) return;
+    const yaw =
+      playerVisualYawRef?.current ??
+      Math.atan2(playerFacing?.[0] || 0, playerFacing?.[1] || 1);
+    const origin: [number, number, number] = playerStateRef.ready
+      ? [playerStateRef.px, playerStateRef.py, playerStateRef.pz]
+      : [fallback[0], 0, fallback[1]];
+    groupRef.current.position.fromArray(
+      resolvePlayerCarriedLightWorldPosition(origin, yaw),
+    );
+  });
 
   return (
-    <group position={[fallback[0], 0, fallback[1]]}>
+    <group
+      ref={groupRef}
+      position={playerCarried ? undefined : [fallback[0], 0, fallback[1]]}
+    >
       <pointLight
-        position={[0, height, 0]}
+        position={[0, playerCarried ? 0 : height, 0]}
         color={source.color || "#facc15"}
         intensity={intensity}
         distance={lightMetrics.pointDistance}
         decay={lightMetrics.decay}
         castShadow={false}
       />
-      <mesh
-        position={[0, 0.017, 0]}
-        rotation={[-Math.PI / 2, 0, 0]}
-        raycast={() => null}
-        renderOrder={7}
-      >
-        <circleGeometry args={[lightMetrics.poolRadius, 48]} />
-        <meshBasicMaterial
-          map={getLightPoolTexture()}
-          color={source.color || "#facc15"}
-          transparent
-          opacity={0.12}
-          depthTest
-          depthWrite={false}
-          blending={THREE.AdditiveBlending}
-          toneMapped={false}
-        />
-      </mesh>
+      {/* A small contact bloom anchors the emitter. It is intentionally local
+          and translucent; the physical light above now owns the surrounding
+          ground, walls, objects, ceiling, and model-backed characters. */}
+      {!playerCarried && (
+        <mesh
+          position={[0, 0.026, 0]}
+          rotation={[-Math.PI / 2, 0, 0]}
+          raycast={() => null}
+          renderOrder={7}
+        >
+          <circleGeometry args={[lightMetrics.poolRadius, 20]} />
+          <meshBasicMaterial
+            map={getLightPoolTexture()}
+            color={source.color || "#facc15"}
+            transparent
+            opacity={contactOpacity}
+            depthTest
+            depthWrite={false}
+            blending={THREE.AdditiveBlending}
+            toneMapped={false}
+          />
+        </mesh>
+      )}
     </group>
   );
 }
 
 const AuthoritativeLightLayer = memo(function AuthoritativeLightLayer({
   visibility,
-  map,
   gridSpace,
   fineRatio,
   renderCenter,
   renderRadius,
   maxLights = MAX_AUTHORITATIVE_POINT_LIGHTS,
+  cullToVisibleCells = true,
+  playerFacing,
+  playerVisualYawRef,
 }: {
   visibility: ImmersiveViewerVisibilitySnapshot;
-  map: MapData;
   gridSpace: RendererGridSpace;
   fineRatio: number;
   renderCenter?: [number, number];
   renderRadius?: number;
   maxLights?: number;
+  cullToVisibleCells?: boolean;
+  playerFacing?: [number, number];
+  playerVisualYawRef?: React.MutableRefObject<number>;
 }) {
   const windowCenterX = renderCenter
     ? gridSpace === "fine"
@@ -5570,15 +6355,21 @@ const AuthoritativeLightLayer = memo(function AuthoritativeLightLayer({
       ),
     );
     const renderableSourceIds = new Set<string>();
-    visibility.illumination.cells.forEach((cell) => {
-      if (!visibleCellKeys.has(fogCellKey(cell.cell[0], cell.cell[1]))) return;
-      cell.source_ids.forEach((sourceId) => renderableSourceIds.add(sourceId));
-    });
-    visibility.illumination.sources.forEach((source) => {
-      if (visibleCellKeys.has(fogCellKey(source.cell[0], source.cell[1]))) {
-        renderableSourceIds.add(source.id);
-      }
-    });
+    if (cullToVisibleCells) {
+      visibility.illumination.cells.forEach((cell) => {
+        if (!visibleCellKeys.has(fogCellKey(cell.cell[0], cell.cell[1]))) return;
+        cell.source_ids.forEach((sourceId) => renderableSourceIds.add(sourceId));
+      });
+      visibility.illumination.sources.forEach((source) => {
+        if (visibleCellKeys.has(fogCellKey(source.cell[0], source.cell[1]))) {
+          renderableSourceIds.add(source.id);
+        }
+      });
+    } else {
+      visibility.illumination.sources.forEach((source) =>
+        renderableSourceIds.add(source.id),
+      );
+    }
     const priority = (source: ImmersiveResolvedLightSource) => {
       if (source.carrier_actor_id) return 0;
       if (source.source_kind === "dropped_item") return 1;
@@ -5610,24 +6401,19 @@ const AuthoritativeLightLayer = memo(function AuthoritativeLightLayer({
     stableRenderCenter?.[1],
     renderRadius,
     maxLights,
+    cullToVisibleCells,
   ]);
 
   return (
     <group>
-      <AuthoritativeGroundLightField
-        visibility={visibility}
-        map={map}
-        gridSpace={gridSpace}
-        fineRatio={fineRatio}
-        renderCenter={stableRenderCenter}
-        renderRadius={renderRadius}
-      />
       {sources.map((source) => (
         <AuthoritativePointLight
           key={source.id}
           source={source}
           gridSpace={gridSpace}
           fineRatio={fineRatio}
+          playerFacing={playerFacing}
+          playerVisualYawRef={playerVisualYawRef}
         />
       ))}
     </group>
@@ -5668,6 +6454,8 @@ export const GameRenderer3D = memo(function GameRenderer3D({
   showGrid,
   renderCenter,
   renderRadius,
+  architectureRadius,
+  renderForward,
   fogOfWar,
   fogRadius,
   initialExplored,
@@ -5679,6 +6467,8 @@ export const GameRenderer3D = memo(function GameRenderer3D({
   showMemoryDebug,
   performanceMode = false,
   authoritativePointLightBudget = MAX_AUTHORITATIVE_POINT_LIGHTS,
+  presentationPointLightBudget = 4,
+  presentationShadowsEnabled = false,
   viewPresentation,
   firstPersonView = false,
 }: GameRenderer3DProps) {
@@ -5686,6 +6476,19 @@ export const GameRenderer3D = memo(function GameRenderer3D({
     viewPresentation ?? (firstPersonView ? "first_person" : "isometric");
   const resolvedFirstPersonView =
     resolvedViewPresentation === "first_person";
+  const backroomsLevelZeroMap = useMemo(
+    () =>
+      map.cells.some(
+        (cell) =>
+          cell.object_id === BACKROOMS_LEVEL_ZERO_FLOOR_OBJECT_ID,
+      ),
+    [map.cells],
+  );
+  const visibilityPresentationPolicy =
+    resolveImmersiveVisibilityPresentationPolicy(
+      resolvedViewPresentation,
+      Boolean(fogOfWar),
+    );
   const objectLibrary = useEngineStore((state) => state.gamePackage.object_library);
   // Footsteps and trace layers replace the save's MapDelta on every fine step,
   // but they do not alter terrain, doors, or object placements. Keep a narrow
@@ -5706,7 +6509,13 @@ export const GameRenderer3D = memo(function GameRenderer3D({
     mapDelta?.carried_objects,
   ]);
   const fogVisibility = useMemo(() => {
-    if (authoritativeVisibility || !fogOfWar || !playerPos) return null;
+    if (
+      authoritativeVisibility ||
+      !visibilityPresentationPolicy.fogMaskEnabled ||
+      !playerPos
+    ) {
+      return null;
+    }
     return computeFogVisibleCells({
       map,
       playerPos,
@@ -5718,7 +6527,7 @@ export const GameRenderer3D = memo(function GameRenderer3D({
       resolution: fogResolution ?? "macro",
     });
   }, [
-    fogOfWar,
+    visibilityPresentationPolicy.fogMaskEnabled,
     playerPos?.[0],
     playerPos?.[1],
     map,
@@ -5733,6 +6542,21 @@ export const GameRenderer3D = memo(function GameRenderer3D({
   const visualWorld = useMemo(
     () => convertRuntimeMapToWorld(map, visualPlacementDelta, gridSpace, fineRatio),
     [map, visualPlacementDelta, gridSpace, fineRatio],
+  );
+  const presentationRoomLightCells = useMemo<readonly [number, number][]>(
+    () => {
+      const presentationObjectIds = new Set(
+        objectLibrary
+          .filter((object) =>
+            object.tags.includes("presentation_room_light"))
+          .map((object) => object.id),
+      );
+      return visualWorld.map.custom_object_placements.flatMap((placement) =>
+        presentationObjectIds.has(placement.object_id)
+          ? [[placement.cell[0], placement.cell[1]] as [number, number]]
+          : []);
+    },
+    [objectLibrary, visualWorld.map.custom_object_placements],
   );
   const transformCell = useMemo(
     () => (cell: readonly unknown[]) =>
@@ -5791,6 +6615,10 @@ export const GameRenderer3D = memo(function GameRenderer3D({
     renderRadius === undefined
       ? undefined
       : renderRadius * logicalCellWorldSize(gridSpace, fineRatio);
+  const visualArchitectureRadius =
+    architectureRadius === undefined
+      ? visualRadius
+      : architectureRadius * logicalCellWorldSize(gridSpace, fineRatio);
   // Fog presentation and authoritative light culling are intentionally
   // macro-cadenced in fine-grid Play. Preserve one center identity inside the
   // current macro tile so React can leave those large instanced trees alone
@@ -5864,7 +6692,7 @@ export const GameRenderer3D = memo(function GameRenderer3D({
       cells: map.cells,
       gridSpace,
       fineRatio,
-      fogEnabled: Boolean(fogOfWar),
+      fogEnabled: visibilityPresentationPolicy.fogMaskEnabled,
       terrainVisible: authoritativeFogSets.presentationVisible,
       discovered: authoritativeFogSets.discovered,
       memoryLineOfSight: authoritativeFogSets.memoryLineOfSight,
@@ -5874,11 +6702,17 @@ export const GameRenderer3D = memo(function GameRenderer3D({
     map.cells,
     gridSpace,
     fineRatio,
-    fogOfWar,
+    visibilityPresentationPolicy.fogMaskEnabled,
   ]);
   const getVisualCellFogState = useMemo(() => {
+    if (!visibilityPresentationPolicy.gatePhysicalContent) {
+      return undefined;
+    }
     if (!authoritativeFogPlan) {
-      if (authoritativeVisibilityExpected && fogOfWar) {
+      if (
+        authoritativeVisibilityExpected &&
+        visibilityPresentationPolicy.fogMaskEnabled
+      ) {
         return () => "unseen" as FogRenderState;
       }
       return undefined;
@@ -5895,13 +6729,14 @@ export const GameRenderer3D = memo(function GameRenderer3D({
       );
       return (
         stateByWorldCell.get(fogCellKey(fogCell[0], fogCell[1])) ||
-        (fogOfWar ? "unseen" : "visible")
+        (visibilityPresentationPolicy.fogMaskEnabled ? "unseen" : "visible")
       );
     };
   }, [
     authoritativeFogPlan,
     authoritativeVisibilityExpected,
-    fogOfWar,
+    visibilityPresentationPolicy.fogMaskEnabled,
+    visibilityPresentationPolicy.gatePhysicalContent,
     gridSpace,
     fineRatio,
   ]);
@@ -5927,7 +6762,12 @@ export const GameRenderer3D = memo(function GameRenderer3D({
       return fogVisibility.has(fogCellKey(macro[0], macro[1]));
     };
   }, [authoritativeFogSets, authoritativeVisibilityExpected, fogVisibility, fogResolution, gridSpace, fineRatio]);
+  const isPhysicalCellVisible =
+    visibilityPresentationPolicy.gatePhysicalContent
+      ? isVisualCellVisible
+      : undefined;
   const isVisualCellDarkAdjacentToPlayer = useMemo(() => {
+    if (!visibilityPresentationPolicy.gatePhysicalContent) return undefined;
     if (!authoritativeFogSets || !playerPos) return undefined;
     return (cell: readonly [number, number]) => {
       const logical = worldPointToLogicalCell(
@@ -5949,16 +6789,26 @@ export const GameRenderer3D = memo(function GameRenderer3D({
         lineOfSight: authoritativeFogSets.memoryLineOfSight,
       });
     };
-  }, [authoritativeFogSets, playerPos, gridSpace, fineRatio]);
+  }, [
+    visibilityPresentationPolicy.gatePhysicalContent,
+    authoritativeFogSets,
+    playerPos,
+    gridSpace,
+    fineRatio,
+  ]);
   const getVisualCellIllumination = useMemo(() => {
-    if (!authoritativeVisibility) return undefined;
+    if (!authoritativeVisibility && !presentationRoomLightCells.length) {
+      return undefined;
+    }
     const illuminationByCell = new Map(
-      authoritativeVisibility.illumination.cells.map((entry) => [
+      (authoritativeVisibility?.illumination.cells || []).map((entry) => [
         fogCellKey(entry.cell[0], entry.cell[1]),
         entry.value,
       ]),
     );
-    const ambient = authoritativeVisibility.illumination.ambient_light;
+    const ambient =
+      authoritativeVisibility?.illumination.ambient_light ??
+      Number(map.ambient_light || 0);
     return (cell: readonly [number, number]) => {
       const logical = worldPointToLogicalCell(
         cell[0],
@@ -5966,9 +6816,70 @@ export const GameRenderer3D = memo(function GameRenderer3D({
         gridSpace,
         fineRatio,
       );
-      return illuminationByCell.get(fogCellKey(logical[0], logical[1])) ?? ambient;
+      const authoritative =
+        illuminationByCell.get(fogCellKey(logical[0], logical[1])) ?? ambient;
+      return Math.max(
+        authoritative,
+        resolvePresentationRoomLightContribution(
+          [cell[0], cell[1]],
+          presentationRoomLightCells,
+        ),
+      );
     };
-  }, [authoritativeVisibility, gridSpace, fineRatio]);
+  }, [
+    authoritativeVisibility,
+    presentationRoomLightCells,
+    map.ambient_light,
+    gridSpace,
+    fineRatio,
+  ]);
+  const getVisualCellLightColor = useMemo(() => {
+    if (!authoritativeVisibility && !presentationRoomLightCells.length) {
+      return undefined;
+    }
+    const sourceById = new Map(
+      (authoritativeVisibility?.illumination.sources || []).map((source) => [
+        source.id,
+        source,
+      ]),
+    );
+    const colorByCell = new Map(
+      (authoritativeVisibility?.illumination.cells || []).flatMap((entry) => {
+        const sourceId =
+          entry.strongest_source_id || entry.contributions[0]?.source_id;
+        if (!sourceId) return [];
+        const source = sourceById.get(sourceId);
+        return [
+          [
+            fogCellKey(entry.cell[0], entry.cell[1]),
+            source?.color || "#facc15",
+          ] as const,
+        ];
+      }),
+    );
+    return (cell: readonly [number, number]) => {
+      if (
+        resolvePresentationRoomLightContribution(
+          [cell[0], cell[1]],
+          presentationRoomLightCells,
+        ) > 0
+      ) {
+        return "#ffe9a8";
+      }
+      const logical = worldPointToLogicalCell(
+        cell[0],
+        cell[1],
+        gridSpace,
+        fineRatio,
+      );
+      return colorByCell.get(fogCellKey(logical[0], logical[1]));
+    };
+  }, [
+    authoritativeVisibility,
+    presentationRoomLightCells,
+    gridSpace,
+    fineRatio,
+  ]);
   const getVisualStructureIllumination = useMemo(() => {
     if (!authoritativeVisibility) return undefined;
     const illuminationByCell = new Map(
@@ -5999,7 +6910,6 @@ export const GameRenderer3D = memo(function GameRenderer3D({
       );
     };
   }, [authoritativeVisibility, gridSpace, fineRatio]);
-
   return (
     <ViewPresentationContext.Provider value={resolvedViewPresentation}>
       <group>
@@ -6029,24 +6939,38 @@ export const GameRenderer3D = memo(function GameRenderer3D({
         showGrid={showGrid}
         renderCenter={transformPoint(renderCenter)}
         renderRadius={visualRadius}
+        architectureRadius={visualArchitectureRadius}
+        renderForward={renderForward}
         fxCellTransform={transformCell}
         rawPointerCoordinates={gridSpace === "fine"}
-        isCellVisible={isVisualCellVisible}
+        isCellVisible={isPhysicalCellVisible}
         isCellDarkAdjacentToPlayer={isVisualCellDarkAdjacentToPlayer}
         getCellFogState={getVisualCellFogState}
         getCellIllumination={getVisualCellIllumination}
-        getStructureIllumination={getVisualStructureIllumination}
+        getCellLightColor={getVisualCellLightColor}
+        getStructureIllumination={
+          resolvedViewPresentation === "third_person" &&
+          backroomsLevelZeroMap
+            ? undefined
+            : getVisualStructureIllumination
+        }
         suppressPlacementLights={Boolean(authoritativeVisibility)}
+        presentationLightBudget={presentationPointLightBudget}
+        presentationShadowsEnabled={presentationShadowsEnabled}
       />
       {authoritativeVisibility && (
         <AuthoritativeLightLayer
           visibility={authoritativeVisibility}
-          map={map}
           gridSpace={gridSpace}
           fineRatio={fineRatio}
           renderCenter={stableOverlayRenderCenter}
           renderRadius={renderRadius}
           maxLights={authoritativePointLightBudget}
+          cullToVisibleCells={
+            visibilityPresentationPolicy.cullLightsToVisibleCells
+          }
+          playerFacing={playerFacing}
+          playerVisualYawRef={playerVisualYawRef}
         />
       )}
       <WorldOverlays3D
@@ -6068,7 +6992,7 @@ export const GameRenderer3D = memo(function GameRenderer3D({
         worldDeniedCells={worldDeniedCells}
         renderCenter={stableOverlayRenderCenter}
         renderRadius={renderRadius}
-        fogOfWar={fogOfWar}
+        fogOfWar={visibilityPresentationPolicy.fogMaskEnabled}
         fogRadius={fogRadius}
         fogResolution={fogResolution}
         initialExplored={initialExplored}
@@ -6147,6 +7071,8 @@ if (import.meta.hot) {
 
     lightPoolTextureCache?.dispose();
     lightPoolTextureCache = null;
+    ceilingLightHaloTextureCache?.dispose();
+    ceilingLightHaloTextureCache = null;
     lightGlareTextureCache?.dispose();
     lightGlareTextureCache = null;
     lightStreakTextureCache?.dispose();

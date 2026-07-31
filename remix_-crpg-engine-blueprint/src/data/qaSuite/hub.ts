@@ -1,8 +1,12 @@
 // ── QA hub ───────────────────────────────────────────────────────────────────
-// The compass rose of the suite: nine physical doorways plus curator teleport
+// The compass rose of the suite: ten physical doorways plus curator teleport
 // access to the perception and persistence labs, the grand-tour quest, the
 // feature matrix, a save terminal, and the gated completion terminal.
 
+import {
+  BACKROOMS_LEVEL_ZERO_MAP_ID,
+  BACKROOMS_LEVEL_ZERO_SPAWN_ID,
+} from "./backroomsWing";
 import {
   type CellOverrides,
   type QaWing,
@@ -29,7 +33,7 @@ const hubCells = (() => {
     [
       [-4, -8], [0, -8], [4, -8], // N: gas, flood, viscosity
       [8, -4], [8, 0], [8, 4], // E: emotion, fire, combat
-      [0, 8], // S: story
+      [0, 8], [4, 8], // S: story, Backrooms Level Zero
       [-8, 0], [-8, 4], // W: world, movement
     ],
     DOORWAY,
@@ -117,6 +121,11 @@ const hubMap = {
     exit([0, 8], "qa_story_lab"),
     exit([-8, 0], "qa_world_lab"),
     exit([-8, 4], "qa_move_lab"),
+    exit(
+      [4, 8],
+      BACKROOMS_LEVEL_ZERO_MAP_ID,
+      BACKROOMS_LEVEL_ZERO_SPAWN_ID,
+    ),
   ],
 };
 
@@ -131,7 +140,7 @@ export const hubWing: QaWing = {
     say(
       "qa_dlg_suite_intro",
       "QA Curator",
-      "Engine QA Suite online. Eleven labs, one hub. The chemistry wing is north and east — flood a chamber, race two liquids, burn a gallery, vent a vault. Perception and Persistence / Succession are available from my teleport menu. When all four releases have fired, the completion terminal behind me unlocks.",
+      "Engine QA Suite online. Eleven labs, one Level Zero environment, one hub. The chemistry wing is north and east — flood a chamber, race two liquids, burn a gallery, vent a vault. Perception and Persistence / Succession are available from my teleport menu. When all four releases have fired, the completion terminal behind me unlocks.",
       [{ text: "Begin." }],
     ),
     dlg("qa_dlg_hub_curator", "QA Curator", [
@@ -179,7 +188,7 @@ export const hubWing: QaWing = {
     say(
       "qa_dlg_hub_west_signs",
       "West Doors",
-      "Center: WORLD SYSTEMS. South: MOVEMENT LAB. The south door leads to the STORY LAB.",
+      "Center: WORLD SYSTEMS. South: MOVEMENT LAB. The south-center door leads to STORY; the southeast door enters BACKROOMS LEVEL ZERO.",
     ),
   ],
   cutscenes: [
@@ -229,7 +238,7 @@ export const hubWing: QaWing = {
       id: "qa_doc_feature_matrix",
       display_name: "QA Feature Matrix",
       content:
-        "FLOOD CHAMBER: button-released tank, height-aware ooze, basin pooling, dry walkways, dormant settling. VISCOSITY RACE: water (flow 3) vs honey (flow 1) from one valve. BURN GALLERY: oil-trail ignition, grass/crate spread, wet-moat firebreak, scorch residue, douse/foam counters. MIASMA VAULT: gas diffusion around baffles, Toxic exposure, full dissipation. STORY LAB: gated dialogue (switch/quest/item/faction/hour), switch_change trigger, branch control flow, shop pricing, party, factions, rep-gated annex. COMBAT LAB: enemy archetypes, macro-authored AoE on the fine grid, cover/high ground, overwatch, shove-through-fire knockback, stealth lane. EMOTION LAB: attend readings, console/yell verbs, paralyzed/flee/defend behaviors, fire-to-fear crosstalk, grid lens. WORLD LAB: survival drain, workstation processes, keyed caches, fine-cell pushables through water, schedules, barks. MOVEMENT LAB: one-tile corridors, stairs vs cliff, LOS/fog walls, macro-entry plates, portal, doors. PERCEPTION LAB: zero ambient light, carried/placed/thrown lamp stimuli, fixed lamp fallback, sight/hearing/light-glass channels, smoke obscurance, wall occlusion, memory/search, silent artifact control. PERSISTENCE LAB: authored/campaign/expedition state separation, lasting shortcut and artifact, temporary hazard and encounter reset, deterministic Intercessor death handoff, and campaign history. HUB: save terminal, keyed cache, completion terminal (unlocks after all four chemistry releases).",
+        "FLOOD CHAMBER: button-released tank, height-aware ooze, basin pooling, dry walkways, dormant settling. VISCOSITY RACE: water (flow 3) vs honey (flow 1) from one valve. BURN GALLERY: oil-trail ignition, grass/crate spread, wet-moat firebreak, scorch residue, douse/foam counters. MIASMA VAULT: gas diffusion around baffles, Toxic exposure, full dissipation. STORY LAB: gated dialogue (switch/quest/item/faction/hour), switch_change trigger, branch control flow, shop pricing, party, factions, rep-gated annex. COMBAT LAB: enemy archetypes, macro-authored AoE on the fine grid, cover/high ground, overwatch, shove-through-fire knockback, stealth lane. EMOTION LAB: attend readings, console/yell verbs, paralyzed/flee/defend behaviors, fire-to-fear crosstalk, grid lens. WORLD LAB: survival drain, workstation processes, keyed caches, fine-cell pushables through water, schedules, barks. MOVEMENT LAB: one-tile corridors, stairs vs cliff, LOS/fog walls, macro-entry plates, portal, doors. PERCEPTION LAB: zero ambient light, carried/placed/thrown lamp stimuli, fixed lamp fallback, sight/hearing/light-glass channels, smoke obscurance, wall occlusion, memory/search, silent artifact control. PERSISTENCE LAB: authored/campaign/expedition state separation, lasting shortcut and artifact, temporary hazard and encounter reset, deterministic Intercessor death handoff, and campaign history. BACKROOMS LEVEL ZERO: connected fluorescent rooms, repeated three-cell corridors, misleading loops, right-angle turns, and stable environment-only light anchors. HUB: save terminal, keyed cache, completion terminal (unlocks after all four chemistry releases).",
     },
   ],
   quests: [

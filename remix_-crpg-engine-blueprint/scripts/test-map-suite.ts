@@ -30,10 +30,26 @@ import {
   TEST_SUITE_START_MAP_ID,
   TEST_SUITE_START_SPAWN_ID,
 } from "../src/data/testingMapSuite";
+import { withQaRoomCeilingArchitecture } from "../src/data/qaSuite/shared";
 import {
   PHASE_11_HUB_MAP_ID,
   PHASE_11_HUB_SPAWN_ID,
 } from "../src/data/qaSuite/integratedArchitectureScenario";
+import {
+  BACKROOMS_LEVEL_ZERO_FLOOR_OBJECT_ID,
+  BACKROOMS_LEVEL_ZERO_LIGHT_OBJECT_ID,
+  BACKROOMS_LEVEL_ZERO_WALL_OBJECT_ID,
+  INSTITUTIONAL_CEILING_LIGHT_OBJECT_ID,
+} from "../src/schema/presets";
+import {
+  BACKROOMS_LEVEL_ZERO_MAP_ID,
+  BACKROOMS_LEVEL_ZERO_SPAWN_ID,
+} from "../src/data/qaSuite/backroomsWing";
+import {
+  BACKROOMS_PARASITE_ENTITY_ID,
+  BACKROOMS_PARASITE_MODEL_OBJECT_ID,
+} from "../src/data/backroomsEntityAssets";
+import { placementHasCollision } from "../src/utils/objectFootprint";
 import {
   FINE_PER_MACRO,
   advanceChemistryForSave,
@@ -132,6 +148,85 @@ console.log("suite: reference integrity");
       hydratedQaPackage.metadata.version === "stale-qa-version" &&
       hydratedQaPackage.maps[0]?.display_name === "Hand-edited QA sentinel",
   );
+  const preParasiteWorkspace = {
+    ...editedQaPackage,
+    object_library: editedQaPackage.object_library.filter(
+      (object) => object.id !== BACKROOMS_PARASITE_MODEL_OBJECT_ID,
+    ),
+    entities: editedQaPackage.entities.filter(
+      (entity) => entity.id !== BACKROOMS_PARASITE_ENTITY_ID,
+    ),
+    maps: editedQaPackage.maps.map((map) =>
+      map.id === BACKROOMS_LEVEL_ZERO_MAP_ID
+        ? {
+            ...map,
+            entity_placements: map.entity_placements.filter(
+              (placement) =>
+                placement.entity_id !== BACKROOMS_PARASITE_ENTITY_ID,
+            ),
+          }
+        : map,
+    ),
+  };
+  const backfilledParasiteWorkspace =
+    refreshBundledEnginePackage(preParasiteWorkspace);
+  ok(
+    "hydration appends the built-in parasite without overwriting authored QA edits",
+    backfilledParasiteWorkspace.metadata.version === "stale-qa-version" &&
+      backfilledParasiteWorkspace.maps[0]?.display_name ===
+        "Hand-edited QA sentinel" &&
+      backfilledParasiteWorkspace.object_library.some(
+        (object) => object.id === BACKROOMS_PARASITE_MODEL_OBJECT_ID,
+      ) &&
+      backfilledParasiteWorkspace.entities.some(
+        (entity) =>
+          entity.id === BACKROOMS_PARASITE_ENTITY_ID &&
+          entity.independent_movement?.enabled === true &&
+          entity.sensory_profile?.id === "backrooms_predator",
+      ) &&
+      backfilledParasiteWorkspace.maps
+        .find((map) => map.id === BACKROOMS_LEVEL_ZERO_MAP_ID)
+        ?.entity_placements.some(
+          (placement) =>
+            placement.entity_id === BACKROOMS_PARASITE_ENTITY_ID,
+        ) === true,
+  );
+  const staleHunterPackage = {
+    ...editedQaPackage,
+    entities: editedQaPackage.entities.map((entity) =>
+      entity.id === BACKROOMS_PARASITE_ENTITY_ID
+        ? {
+            ...entity,
+            independent_movement: {
+              ...entity.independent_movement!,
+              interval_ms: 650,
+            },
+            sensory_profile: {
+              ...entity.sensory_profile!,
+              channels: entity.sensory_profile!.channels.map((channel) =>
+                channel.stimulus_kinds.includes("visible_player")
+                  ? { ...channel, range: 8 }
+                  : channel,
+              ),
+            },
+          }
+        : entity,
+    ),
+  };
+  const refreshedHunterWorkspace =
+    refreshBundledEnginePackage(staleHunterPackage);
+  const refreshedHunter = refreshedHunterWorkspace.entities.find(
+    (entity) => entity.id === BACKROOMS_PARASITE_ENTITY_ID,
+  );
+  ok(
+    "hydration upgrades an older named Parasite profile to the current real-time hunter",
+    refreshedHunter?.independent_movement?.interval_ms === 180 &&
+      refreshedHunter.sensory_profile?.channels.some(
+        (channel) =>
+          channel.stimulus_kinds.includes("visible_player") &&
+          channel.range >= 100,
+      ) === true,
+  );
 
   const customPackage = {
     ...defaultPackage,
@@ -160,11 +255,318 @@ console.log("suite: reference integrity");
 
   ok("suite start map exists", mapById.has(authored.metadata.start_map_id));
   ok(
-    "suite contains exactly the hub plus eleven labs",
-    authored.maps.length === 12 &&
-      qaMaps.length === 12 &&
+    "suite contains exactly the hub, eleven labs, and Level Zero",
+    authored.maps.length === 13 &&
+      qaMaps.length === 13 &&
       authored.maps.every((map) => expectedMapIds.has(map.id)),
     `maps: ${authored.maps.map((m) => m.id).join(", ")}`,
+  );
+  const qaCeilingFixtureIds = new Set([
+    INSTITUTIONAL_CEILING_LIGHT_OBJECT_ID,
+    BACKROOMS_LEVEL_ZERO_LIGHT_OBJECT_ID,
+  ]);
+  const qaCeilingFixtures = authored.object_library.filter((object) =>
+    qaCeilingFixtureIds.has(object.id),
+  );
+  const qaMapsMissingCeilingLights = authored.maps
+    .filter((map) => {
+      const fixtures = map.custom_object_placements.filter((placement) =>
+        qaCeilingFixtureIds.has(placement.object_id),
+      );
+      return (
+        fixtures.length === 0 ||
+        fixtures.some(
+          (placement) =>
+            placement.collision_mode !== "none",
+        )
+      );
+    })
+    .map((map) => map.id);
+  ok(
+    "every fluorescent fixture in every QA room is explicitly collision-free",
+    qaMapsMissingCeilingLights.length === 0 &&
+      qaCeilingFixtures.length === qaCeilingFixtureIds.size &&
+      qaCeilingFixtures.every(
+        (fixture) =>
+          fixture.tags.includes("presentation_room_light") &&
+          fixture.tags.includes("light_ceiling") &&
+          fixture.collision?.profile === "none",
+      ),
+    qaMapsMissingCeilingLights.join(", "),
+  );
+  ok(
+    "presentation lights remain non-blocking even in stale placement data",
+    qaCeilingFixtures.length === qaCeilingFixtureIds.size &&
+      qaCeilingFixtures.every(
+        (fixture) =>
+          placementHasCollision(
+            { collision_mode: "inherit" },
+            {
+              ...fixture,
+              collision: { profile: "single", footprint: [[0, 0]] },
+            },
+          ) === false,
+      ),
+  );
+  const staleFixtureMap = {
+    ...authored.maps[0],
+    custom_object_placements: authored.maps[0].custom_object_placements.map(
+      (placement) =>
+        qaCeilingFixtureIds.has(placement.object_id)
+          ? { ...placement, collision_mode: "inherit" as const }
+          : placement,
+    ),
+  };
+  const normalizedFixtureMap =
+    withQaRoomCeilingArchitecture(staleFixtureMap);
+  ok(
+    "QA architecture upgrades normalize every stale ceiling fixture",
+    normalizedFixtureMap.custom_object_placements
+      .filter(
+        (placement) => qaCeilingFixtureIds.has(placement.object_id),
+      )
+      .every((placement) => placement.collision_mode === "none"),
+  );
+  const phase11Hub = defaultPackage.maps.find(
+    (map) => map.id === PHASE_11_HUB_MAP_ID,
+  );
+  ok(
+    "the Phase 11 QA hub shares the ceiling-light architecture",
+    phase11Hub?.custom_object_placements.some(
+      (placement) =>
+        qaCeilingFixtureIds.has(placement.object_id) &&
+        placement.collision_mode === "none",
+    ) === true,
+  );
+
+  const backroomsMap = mapById.get(BACKROOMS_LEVEL_ZERO_MAP_ID);
+  const backroomsFloor = authored.object_library.find(
+    (object) => object.id === BACKROOMS_LEVEL_ZERO_FLOOR_OBJECT_ID,
+  );
+  const backroomsWall = authored.object_library.find(
+    (object) => object.id === BACKROOMS_LEVEL_ZERO_WALL_OBJECT_ID,
+  );
+  const backroomsLight = authored.object_library.find(
+    (object) => object.id === BACKROOMS_LEVEL_ZERO_LIGHT_OBJECT_ID,
+  );
+  const backroomsParasite = authored.entities.find(
+    (entity) => entity.id === BACKROOMS_PARASITE_ENTITY_ID,
+  );
+  const backroomsParasiteModel = authored.object_library.find(
+    (object) => object.id === BACKROOMS_PARASITE_MODEL_OBJECT_ID,
+  );
+  const backroomsParasitePlacements =
+    backroomsMap?.entity_placements.filter(
+      (placement) =>
+        placement.entity_id === BACKROOMS_PARASITE_ENTITY_ID,
+    ) || [];
+  const backroomsLightDiffuser = backroomsLight?.material_settings?.find(
+    (material) => material.id === "mat_backrooms_level_zero_diffuser",
+  );
+  const backroomsLightBacker = backroomsLight?.material_settings?.find(
+    (material) =>
+      material.id === "mat_backrooms_level_zero_ceiling_tile",
+  );
+  const backroomsLightHousing = backroomsLight?.material_settings?.find(
+    (material) =>
+      material.id === "mat_backrooms_level_zero_fixture_metal",
+  );
+  const backroomsLightTubes = backroomsLight?.material_settings?.find(
+    (material) =>
+      material.id === "mat_backrooms_level_zero_fluorescent_tube",
+  );
+  const backroomsWalkableCells =
+    backroomsMap?.cells.filter(
+      (cell) => cell.active !== false && cell.walkable,
+    ) || [];
+  const backroomsWallCells =
+    backroomsMap?.cells.filter(
+      (cell) => cell.object_id === BACKROOMS_LEVEL_ZERO_WALL_OBJECT_ID,
+    ) || [];
+  const backroomsLights =
+    backroomsMap?.custom_object_placements.filter(
+      (placement) =>
+        placement.object_id === BACKROOMS_LEVEL_ZERO_LIGHT_OBJECT_ID,
+    ) || [];
+  const backroomsCellKey = (cell: readonly [number, number]) =>
+    `${cell[0]}:${cell[1]}`;
+  const walkableBackroomsKeys = new Set(
+    backroomsWalkableCells.map((cell) => backroomsCellKey([cell.x, cell.z])),
+  );
+  const backroomsSpawn = backroomsMap?.spawns.find(
+    (spawn) => spawn.id === BACKROOMS_LEVEL_ZERO_SPAWN_ID,
+  );
+  const reachableBackroomsKeys = new Set<string>();
+  const connectivityQueue: [number, number][] = backroomsSpawn
+    ? [[backroomsSpawn.cell[0], backroomsSpawn.cell[1]]]
+    : [];
+  for (let index = 0; index < connectivityQueue.length; index += 1) {
+    const current = connectivityQueue[index];
+    const currentKey = backroomsCellKey(current);
+    if (
+      reachableBackroomsKeys.has(currentKey) ||
+      !walkableBackroomsKeys.has(currentKey)
+    ) {
+      continue;
+    }
+    reachableBackroomsKeys.add(currentKey);
+    (
+      [
+        [current[0] + 1, current[1]],
+        [current[0] - 1, current[1]],
+        [current[0], current[1] + 1],
+        [current[0], current[1] - 1],
+      ] as [number, number][]
+    ).forEach((neighbor) => {
+      if (
+        walkableBackroomsKeys.has(backroomsCellKey(neighbor)) &&
+        !reachableBackroomsKeys.has(backroomsCellKey(neighbor))
+      ) {
+        connectivityQueue.push(neighbor);
+      }
+    });
+  }
+
+  ok(
+    "Level Zero reuses its authored carpet and wallpaper objects across the map",
+    backroomsFloor?.tags.includes("backrooms") === true &&
+      backroomsFloor.tags.includes("floor") &&
+      backroomsFloor.collision?.profile === "none" &&
+      backroomsWall?.tags.includes("backrooms") === true &&
+      backroomsWall.tags.includes("wall") &&
+      backroomsWall.collision?.profile !== "none" &&
+      backroomsWalkableCells.every(
+        (cell) => cell.object_id === BACKROOMS_LEVEL_ZERO_FLOOR_OBJECT_ID,
+      ) &&
+      backroomsWallCells.every((cell) => !cell.walkable && cell.blocks_los),
+  );
+  ok(
+    "Level Zero fluorescent fixtures are environmental and collision-free",
+    backroomsLight?.tags.includes("presentation_room_light") === true &&
+      backroomsLight.tags.includes("light_ceiling") &&
+      backroomsLight.collision?.profile === "none" &&
+      backroomsLights.every(
+        (placement) =>
+          placement.collision_mode === "none" &&
+          placementHasCollision(placement, backroomsLight) === false,
+      ),
+  );
+  ok(
+    "Level Zero fixture emission preserves diffuser and tube detail instead of clipping white",
+    (backroomsLightDiffuser?.emissive_intensity ?? 0) > 0 &&
+      (backroomsLightDiffuser?.emissive_intensity ?? Number.POSITIVE_INFINITY) <=
+        0.5 &&
+      (backroomsLightTubes?.emissive_intensity ?? 0) >
+        (backroomsLightDiffuser?.emissive_intensity ?? 0) &&
+      (backroomsLightTubes?.emissive_intensity ??
+        Number.POSITIVE_INFINITY) <= 1,
+  );
+  ok(
+    "Level Zero fixture backer and housing retain shaded detail inside the halo",
+    (backroomsLightBacker?.emissive_intensity ?? 0) > 0 &&
+      (backroomsLightBacker?.emissive_intensity ??
+        Number.POSITIVE_INFINITY) <= 0.25 &&
+      (backroomsLightHousing?.emissive_intensity ?? 0) > 0 &&
+      (backroomsLightHousing?.emissive_intensity ??
+        Number.POSITIVE_INFINITY) <= 0.25 &&
+      (backroomsLightHousing?.metalness ?? Number.POSITIVE_INFINITY) <=
+        0.2,
+  );
+  ok(
+    "Level Zero contains one standard model-backed parasite and no loose loot",
+    backroomsMap?.entity_placements.length === 1 &&
+      backroomsParasitePlacements.length === 1 &&
+      Boolean(
+        backroomsParasitePlacements[0] &&
+          walkableBackroomsKeys.has(
+            backroomsCellKey(
+              backroomsParasitePlacements[0].cell as [number, number],
+            ),
+          ),
+      ) &&
+      backroomsParasite?.is_npc === false &&
+      backroomsParasite?.independent_movement?.enabled === true &&
+      backroomsParasite?.independent_movement?.interval_ms === 180 &&
+      backroomsParasite?.independent_movement?.steps_per_pulse === 2 &&
+      (backroomsParasite?.independent_movement?.activation_radius ?? 0) >= 48 &&
+      Number(
+        authored.settings?.movement_hearing?.normal_movement_loudness || 0,
+      ) >= 6.5 &&
+      Number(
+        authored.settings?.movement_hearing?.stealth_noise_multiplier ??
+          Number.POSITIVE_INFINITY,
+      ) <= 0.1 &&
+      (backroomsParasite?.sensory_profile?.memory_ticks ?? 0) >= 240 &&
+      (backroomsParasite?.sensory_profile?.search_ticks ?? 0) >= 180 &&
+      backroomsParasite?.sensory_profile?.channels.some(
+        (channel) =>
+          channel.stimulus_kinds.includes("visible_player") &&
+          channel.range >= 100 &&
+          channel.requires_los &&
+          channel.requires_view_cone &&
+          channel.tracks_live_target &&
+          !channel.requires_illumination,
+      ) === true &&
+      backroomsParasite?.sensory_profile?.channels.some(
+        (channel) =>
+          channel.stimulus_kinds.includes("sound") &&
+          channel.range >= 20 &&
+          !channel.requires_los &&
+          channel.barrier_response === "reduced" &&
+          !channel.tracks_live_target,
+      ) === true &&
+      backroomsParasite?.model_object_id ===
+        BACKROOMS_PARASITE_MODEL_OBJECT_ID &&
+      backroomsParasiteModel?.model_kind === "asset" &&
+      backroomsParasiteModel.asset?.data_url ===
+        "/models/entities/parasite1.glb" &&
+      backroomsParasiteModel.asset.animation_clips === undefined &&
+      backroomsMap.item_placements.length === 0 &&
+      backroomsMap.container_placements.length === 0,
+  );
+  const backroomsReturnExit = backroomsMap?.exits.find(
+    (mapExit) =>
+      mapExit.target_map_id === TEST_SUITE_START_MAP_ID &&
+      mapExit.target_spawn_id === TEST_SUITE_START_SPAWN_ID,
+  );
+  ok(
+    "Level Zero has a walkable spawn, return exit, and reciprocal hub entrance",
+    Boolean(backroomsSpawn) &&
+      walkableBackroomsKeys.has(
+        backroomsCellKey([
+          backroomsSpawn?.cell[0] ?? Number.NaN,
+          backroomsSpawn?.cell[1] ?? Number.NaN,
+        ]),
+      ) &&
+      Boolean(backroomsReturnExit) &&
+      walkableBackroomsKeys.has(
+        backroomsCellKey([
+          backroomsReturnExit?.cell[0] ?? Number.NaN,
+          backroomsReturnExit?.cell[1] ?? Number.NaN,
+        ]),
+      ) &&
+      mapById
+        .get(TEST_SUITE_START_MAP_ID)
+        ?.exits.some(
+          (mapExit) =>
+            mapExit.target_map_id === BACKROOMS_LEVEL_ZERO_MAP_ID &&
+            mapExit.target_spawn_id === BACKROOMS_LEVEL_ZERO_SPAWN_ID,
+        ) === true,
+  );
+  ok(
+    "every Level Zero walkable cell is connected to its spawn",
+    backroomsWalkableCells.length > 0 &&
+      reachableBackroomsKeys.size === backroomsWalkableCells.length,
+    `reachable=${reachableBackroomsKeys.size}/${backroomsWalkableCells.length}`,
+  );
+  ok(
+    "Level Zero has sufficient labyrinth and fluorescent-fixture scale",
+    (backroomsMap?.width || 0) >= 33 &&
+      (backroomsMap?.height || 0) >= 33 &&
+      backroomsWalkableCells.length >= 800 &&
+      backroomsWallCells.length >= 250 &&
+      backroomsLights.length >= 25,
+    `size=${backroomsMap?.width}x${backroomsMap?.height}, walkable=${backroomsWalkableCells.length}, walls=${backroomsWallCells.length}, fixtures=${backroomsLights.length}`,
   );
 
   const perceptionMap = mapById.get("qa_perception_lab");

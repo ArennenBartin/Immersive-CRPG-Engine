@@ -16,6 +16,8 @@ import {
   dispatchV1DropItem,
   dispatchV1OpenDoor,
   dispatchV1PushObject,
+  dispatchV1PullObject,
+  dispatchV1CarryObject,
   dispatchV1SetSwitch,
   dispatchV1SetQuest,
   dispatchV1GiveItem,
@@ -53,6 +55,7 @@ import {
   dispatchV1AdvanceCombatTurn,
   dispatchV1EmitSound,
   dispatchV1EnemyPulse,
+  resolveV1IndependentPursuitTarget,
   getV1NearbyHostiles,
   getV1ControlledCombatant,
   getV1SkillTargetCells,
@@ -86,6 +89,7 @@ import {
   areAdjacentMacro,
   expandGamePackageToFine,
   expandMapToFine,
+  getRuntimeMapGrid,
   isLargeAuthoredMap,
   materializeLargeMapWindow,
   footprintContainsCell,
@@ -120,8 +124,6 @@ import {
   buildConditionContext,
   getAvailableShopStock,
   getVisibleDialogueOptions,
-  getClockPhaseId,
-  CLOCK_PHASE_LABELS,
   findEligibleSwitchChangeTriggers,
   isTriggerEligible,
   isMapExitEligible,
@@ -180,6 +182,7 @@ import {
   getInitialThirdPersonCameraPosition,
   ISO_CAMERA_BASE_AZIMUTH,
   IsometricCameraRig,
+  markThirdPersonManualLookActivity,
   PLAY_CAMERA_PROFILES,
   PlayAtmosphereRig,
   requestThirdPersonLookReset,
@@ -191,6 +194,7 @@ import {
   type PlayCameraMode,
 } from "./PlayScene3D";
 import { ScreenFX } from "./ScreenFX";
+import { BACKROOMS_LEVEL_ZERO_FLOOR_OBJECT_ID } from "../schema/presets";
 import { SpatialInventoryGrid } from "./SpatialInventoryGrid";
 import {
   PLAYMODE_VERB_PAST_TENSE,
@@ -199,7 +203,16 @@ import {
 } from "../utils/playModeCommands";
 import {
   getNormalizedMovementRepeatIntervalMs,
+  isLargePlayMap,
   resolveHeldMovementIntent,
+  resolveLiveHeldMovementIntent,
+  resolvePlayArchitectureRadiusMacro,
+  resolvePlayDprCap,
+  resolvePlayFrameIntervalMs,
+  resolvePlayPointLightBudget,
+  resolvePlayRenderRadiusMacro,
+  shouldDispatchHeldInputRepeat,
+  shouldPreserveHeldInputOnCombatStart,
   shouldDriveDemandFrames,
 } from "../utils/playInput";
 import {
@@ -213,6 +226,7 @@ import {
   normalizeFirstPersonFacing,
   resolveAuthoredViewMode,
   resolveHeldFirstPersonIntent,
+  resolveLiveHeldFirstPersonIntent,
   rotateFacing45,
 } from "../utils/firstPersonControls";
 import {
@@ -227,11 +241,19 @@ import {
   isThirdPersonCameraActive,
   isThirdPersonStructuralCameraCell,
   resolveHeldThirdPersonIntent,
+  resolveLiveHeldThirdPersonIntent,
   resolveThirdPersonCameraSubject,
   rotateThirdPersonFacing45,
   thirdPersonStepVector,
 } from "../utils/thirdPersonControls";
-import { hasAuthoritativePresentLight } from "../utils/lightRendering";
+import {
+  BACKROOMS_LEVEL_ZERO_PLAY_AMBIENT_LIGHT,
+  hasAuthoritativePresentLight,
+} from "../utils/lightRendering";
+import {
+  getPlayerCarriedObject,
+  placePlayerCarriedObject,
+} from "../utils/contextualObjectActions";
 import {
   ABILITY_BAR_PAGE_SIZE,
   ABILITY_PAGE_LABELS,
@@ -293,10 +315,7 @@ import {
   LEVEL_UP_CHOICES,
   getEnemyXpReward,
   getPendingLevelUps,
-  getSaveExperience,
   getSaveLevel,
-  getXpRemainingForNextLevel,
-  getXpRequiredForLevel,
 } from "../utils/leveling";
 import type { ExperienceGrantResult, LevelUpStat } from "../utils/leveling";
 import {
@@ -305,6 +324,7 @@ import {
   isPushableObject,
   placementHasCollision,
   placementOccupiesCell,
+  placementOriginKey,
 } from "../utils/objectFootprint";
 import { getJamEngineVisualHeight } from "../utils/legacyJamCompatibility";
 import {
@@ -330,7 +350,6 @@ import {
   Circle,
   Clock,
   Hand,
-  ListChecks,
   LockKeyhole,
   MessageCircle,
   Sparkles,
@@ -359,7 +378,7 @@ const DIALOGUE_ARCHIVE_CATEGORIES: Array<{
   label: string;
 }> = [
   { id: "people", label: "People" },
-  { id: "intercessors", label: "Intercessors" },
+  { id: "intercessors", label: "Echoes" },
   { id: "places", label: "Places" },
   { id: "objects", label: "Objects" },
   { id: "events", label: "Events" },
@@ -474,30 +493,23 @@ const PLAYER_FOOTSTEP_COOLDOWN_MS = 70;
 const COMBAT_ACTOR_SWITCH_INPUT_DELAY_MS = 180;
 const EMPTY_ENGINE_EVENTS: ReturnType<typeof usePlayStore.getState>["engineEvents"] = [];
 const EMPTY_EXPLORED_CELL_KEYS: string[] = [];
-const PLAY_RENDER_RADIUS_MACRO: Record<VisualScalePreset, number> = {
-  performance: 10,
-  balanced: 12,
-  high: 16,
-  ultra: 18,
-};
-const PLAY_FRAME_INTERVAL_MS: Record<VisualScalePreset, number> = {
-  performance: 1000 / 30,
-  balanced: 1000 / 30,
-  // The authored GIFs top out at 12.5 fps and the scene is grid-driven.
-  // Submitting an otherwise unchanged High/Ultra scene at 45/60 Hz only
-  // multiplies shadows and post-processing cost without adding visual detail.
-  high: 1000 / 30,
-  ultra: 1000 / 45,
-};
 
-// These cap only the cosmetic Three.js point-light accents. The authoritative
-// per-cell ground-light field, fog presentation, and Senses illumination keep
-// rendering every mechanically illuminated cell at every visual preset.
+// Cap nearby physical lights by preset. Senses and fog still use the complete
+// authoritative illumination field. Room fixtures have a separate smaller
+// budget because their broad pools overlap; compiling every authored fixture
+// and every simulation source into the same material shader caused the QA hub
+// to become GPU-bound.
 const PLAY_AUTHORITATIVE_POINT_LIGHT_BUDGET: Record<VisualScalePreset, number> = {
-  performance: 2,
-  balanced: 3,
-  high: 5,
-  ultra: 8,
+  performance: 1,
+  balanced: 2,
+  high: 3,
+  ultra: 4,
+};
+const PLAY_PRESENTATION_POINT_LIGHT_BUDGET: Record<VisualScalePreset, number> = {
+  performance: 3,
+  balanced: 5,
+  high: 6,
+  ultra: 7,
 };
 // Moving observers already refresh perception at each macro-tile boundary.
 // While stationary, Performance mode uses a coarser clock bucket so the same
@@ -1556,8 +1568,7 @@ const getNearbyHostiles = (
       const dist =
         Math.abs(save.player.cell[0] - cell[0]) +
         Math.abs(save.player.cell[1] - cell[1]);
-      const combatAlerted =
-        state.alertness === "combat" && Number(state.alert_score || 0) >= 0.45;
+      const combatAlerted = state.alertness === "combat";
       if (dist > radius && !(combatAlerted && dist <= alertedChaseRadius)) return [];
       return [{
         key,
@@ -1631,7 +1642,7 @@ const getControlledActor = (
     return {
       key: "player",
       isPlayer: true,
-      name: "You",
+      name: "Steve",
       cell: [save.player.cell[0], save.player.cell[1]],
       facing: [save.player.facing[0], save.player.facing[1]],
       hp: save.playerStats.hp,
@@ -1649,7 +1660,7 @@ const getControlledActor = (
   return {
     key: actor.id,
     isPlayer: actor.kind === "player",
-    name: actor.name,
+    name: actor.kind === "player" ? "Steve" : actor.name,
     cell: actor.cell,
     facing: actor.facing || [0, 1],
     hp: actor.hp,
@@ -2077,10 +2088,35 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   onGameEndRef.current = onGameEnd;
   const rawGamePackage = useEngineStore((state) => state.gamePackage);
   // Play mode simulates the FINE world — expand the authored macro package.
-  const baseGamePackage = useMemo(
-    () => expandGamePackageToFine(withRuntimePackageArrays(rawGamePackage)),
-    [rawGamePackage],
-  );
+  const baseGamePackage = useMemo(() => {
+    const expanded = expandGamePackageToFine(
+      withRuntimePackageArrays(rawGamePackage),
+    );
+    return {
+      ...expanded,
+      metadata: {
+        ...expanded.metadata,
+        title: "Backrooms",
+      },
+      items: expanded.items.map((item) => ({
+        ...item,
+        display_name: item.display_name.replace(
+          /\bExpedition\b/gi,
+          "Backrooms",
+        ),
+      })),
+      settings: {
+        ...(expanded.settings || {}),
+        intercessor_succession: {
+          ...((expanded.settings?.intercessor_succession || {}) as Record<
+            string,
+            unknown
+          >),
+          enabled: false,
+        },
+      },
+    } as GamePackage;
+  }, [rawGamePackage]);
   const {
     saveData,
     logMessages,
@@ -2236,8 +2272,14 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     if (!mapId || !playerCell) return;
     const authored = rawGamePackage.maps.find((map) => map.id === mapId);
     if (!authored || !isLargeAuthoredMap(authored)) return;
-    const sectorX = Math.floor(playerCell[0] / (32 * FINE_PER_MACRO));
-    const sectorZ = Math.floor(playerCell[1] / (32 * FINE_PER_MACRO));
+    // Runtime sectors are anchored to the authored map bounds, which may be
+    // negative. A zero-origin division leaves the old materialized window in
+    // place after crossing a real sector boundary and eventually makes both
+    // player and enemy movement hit missing cells.
+    const [sectorX, sectorZ] = getRuntimeMapGrid(authored).sectorOfFine(
+      playerCell[0],
+      playerCell[1],
+    );
     const windowKey = `${authored.id}:${sectorX}:${sectorZ}`;
     if (largeMapWindowKeyRef.current === windowKey) return;
     largeMapWindowKeyRef.current = windowKey;
@@ -2298,10 +2340,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   const [showSkills, setShowSkills] = useState(false);
   const [showSaveMenu, setShowSaveMenu] = useState(false);
   const [showJournal, setShowJournal] = useState(false);
-  const successionNoticeOpen = Boolean(
-    saveData?.intercessor_campaign?.last_transition &&
-      !saveData.intercessor_campaign.last_transition.acknowledged,
-  );
+  const [showGameMenu, setShowGameMenu] = useState(false);
+  const [contextActionMenuOpen, setContextActionMenuOpen] = useState(false);
+  const actHoldTimerRef = useRef<number | null>(null);
+  const actHoldTriggeredRef = useRef(false);
+  const successionNoticeOpen = false;
   // Bumped after slot writes/deletes so the menu re-reads localStorage.
   const [saveSlotRevision, setSaveSlotRevision] = useState(0);
   const [targetingSkillId, setTargetingSkillId] = useState<string | null>(null);
@@ -2329,6 +2372,14 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   useEffect(() => {
     verbTargetingRef.current = verbTargeting;
   }, [verbTargeting]);
+  useEffect(() => {
+    setContextActionMenuOpen(false);
+  }, [
+    saveData?.current_map_id,
+    saveData?.player.cell?.[0],
+    saveData?.player.cell?.[1],
+    saveData?.in_combat,
+  ]);
   // Chemistry advances one tick per player step / clock move; the effect
   // itself now lives after `playSfx` so its feedback presenter can speak.
   const chemistryStepRef = useRef("");
@@ -2380,6 +2431,13 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   const thirdPersonVisualYawRef = useRef(
     facingToThirdPersonYaw(saveData?.player.facing || [0, -1]),
   );
+  const [thirdPersonStreamDirection, setThirdPersonStreamDirection] = useState<
+    [number, number]
+  >(() => {
+    const facing = saveData?.player.facing || [0, -1];
+    const length = Math.hypot(facing[0], facing[1]) || 1;
+    return [facing[0] / length, facing[1] / length];
+  });
   const [activeDocumentId, setActiveDocumentId] = useState<string | null>(null);
   const [dialogueArchiveOpen, setDialogueArchiveOpen] = useState(false);
   const [dialogueArchiveFilter, setDialogueArchiveFilter] = useState<
@@ -2580,11 +2638,36 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     [engineEvents],
   );
   const visualConfig = SCREEN_VISUAL_PRESETS[visualPreset];
-  const visualDprCap = Math.min(PLAY_DPR_MAX, visualConfig.dprCap);
+  const activeMapCellCount = activeMap?.cells.length || 0;
+  const largePlayMap = isLargePlayMap(activeMapCellCount);
+  const backroomsLevelZeroActive = useMemo(
+    () =>
+      Boolean(
+        activeMap?.cells.some(
+          (cell) =>
+            cell.object_id === BACKROOMS_LEVEL_ZERO_FLOOR_OBJECT_ID,
+        ),
+      ),
+    [activeMap?.cells],
+  );
+  const visualDprCap = Math.min(
+    PLAY_DPR_MAX,
+    resolvePlayDprCap(
+      visualPreset,
+      visualConfig.dprCap,
+      activeMapCellCount,
+    ),
+  );
   const effectivePlayDpr = Math.min(playDpr, visualDprCap);
-  const playFrameIntervalMs = PLAY_FRAME_INTERVAL_MS[visualPreset];
+  const playFrameIntervalMs = resolvePlayFrameIntervalMs(
+    visualPreset,
+    activeMapCellCount,
+  );
   const playRenderRadius = scaleMacroDistanceToFine(
-    PLAY_RENDER_RADIUS_MACRO[visualPreset],
+    resolvePlayRenderRadiusMacro(visualPreset, activeMapCellCount),
+  );
+  const playArchitectureRadius = scaleMacroDistanceToFine(
+    resolvePlayArchitectureRadiusMacro(visualPreset, activeMapCellCount),
   );
   // Preset changes used to leave the adaptive probe's raw DPR above the
   // effective cap. It then caused repeated heavyweight Play re-renders while
@@ -3973,6 +4056,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         showSkills ||
         showSaveMenu ||
         showJournal ||
+        showGameMenu ||
         successionNoticeOpen ||
         ((targetingSkillId || verbTargeting) &&
           !thirdPersonActiveRef.current) ||
@@ -3991,6 +4075,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     showSkills,
     showSaveMenu,
     showJournal,
+    showGameMenu,
     successionNoticeOpen,
     targetingSkillId,
     verbTargeting,
@@ -4056,6 +4141,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       showSkills ||
       showSaveMenu ||
       showJournal ||
+      showGameMenu ||
       successionNoticeOpen ||
       activeDialogueId ||
       activeShopId ||
@@ -4095,23 +4181,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   };
   toggleStealthRef.current = toggleStealthMode;
 
-  // Death is an atomic campaign transition, not a destructive run reset. The
-  // Phase 6–8 wrapper consumes the stable Phase 5 requests immediately: it
-  // materializes one persistent ghost and one independent bundle, conserves
-  // registered artifacts, and remains idempotent under React replay/refresh.
+  // Steve is the single protagonist. Death freezes the current run in place
+  // until the player loads a save or starts over; no successor, ghost, or
+  // expedition transition is created.
   useEffect(() => {
     if ((saveData?.playerStats.hp ?? 1) > 0) return;
-    const current = usePlayStore.getState().saveData;
-    if (!current) return;
-    const transition = transitionFractureCrawlOnDeath(baseGamePackage, current);
-    const deceased = transition.deceasedIntercessorId
-      ? transition.save.intercessor_campaign?.records[transition.deceasedIntercessorId]
-      : undefined;
-    const successor = transition.successorIntercessorId
-      ? transition.save.intercessor_campaign?.records[transition.successorIntercessorId]
-      : undefined;
-    if (!transition.changed || !deceased || !successor) return;
-
     clearInputState();
     setActiveCutscene(null);
     setCutsceneActionIndex(0);
@@ -4120,6 +4194,8 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     setShowSkills(false);
     setShowSaveMenu(false);
     setShowJournal(false);
+    setShowGameMenu(false);
+    setContextActionMenuOpen(false);
     setTargetingSkillId(null);
     setVerbTargeting(null);
     setActiveDocumentId(null);
@@ -4127,21 +4203,10 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     endDialogue();
     closeShop();
     closeContainer();
-    commitRuntimeSave(transition.save);
-    const successorMap = baseGamePackage.maps.find(
-      (map) => map.id === transition.save.current_map_id,
-    );
-    if (successorMap) setActiveMap(successorMap);
-    addLog(
-      `${deceased.display_name} died. ${successor.display_name} takes up the expedition record; a ghost and death bundle remain behind.`,
-    );
     playSfx("enemy_defeat", { volume: 0.55, cooldownMs: 250 });
   }, [
-    addLog,
-    baseGamePackage,
     closeContainer,
     closeShop,
-    commitRuntimeSave,
     endDialogue,
     playSfx,
     saveData?.playerStats.hp,
@@ -4162,6 +4227,22 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     }
 
     if (previousTurn === activeTurn) return;
+
+    if (
+      shouldPreserveHeldInputOnCombatStart({
+        previousTurnId: previousTurn,
+        nextTurnId: activeTurn,
+      })
+    ) {
+      // Being spotted is a simulation-state transition, not an actor switch.
+      // Keep W/S and the current repeat clock live so Steve continues the
+      // movement the player is physically holding through the combat banner.
+      activeCombatTurnRef.current = activeTurn;
+      combatInputLockUntilRef.current = 0;
+      combatInputNeedsReleaseRef.current = false;
+      combatInputHeldKeysRef.current.clear();
+      return;
+    }
 
     // Suppress only keyboard keys physically held at the turn boundary.
     // A carried-over key should not auto-spend the new turn, but it also
@@ -4345,7 +4426,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         const ez = state?.cell ? state.cell[1] : p.cell[1];
 
         const dist = Math.abs(px - ex) + Math.abs(pz - ez);
-        if (dist <= 2 && state?.alertness === "combat" && Number(state?.alert_score || 0) >= 0.45) {
+        if (dist <= 2 && state?.alertness === "combat") {
           const entityData = useEngineStore
             .getState()
             .gamePackage.entities.find((e) => e.id === p.entity_id);
@@ -4497,10 +4578,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           const state = saveData.entity_states?.[key] || {};
           const hp = state.hp ?? definition.max_hp ?? 1;
           if (state.dead || state.hidden || hp <= 0) return false;
-          if (
-            state.alertness !== "combat" ||
-            Number(state.alert_score || 0) < 0.45
-          ) {
+          if (state.alertness !== "combat") {
             return false;
           }
           const cell = (state.cell || placement.cell) as [number, number];
@@ -4582,6 +4660,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     if (activeCutscene) return;
 
     const gp = getRuntimeGamePackage();
+    const entityById = new Map(gp.entities.map((entity) => [entity.id, entity]));
     const events: typeof store.engineEvents = [];
     const defeated = new Map<string, GamePackage["entities"][number]>();
     const hostiles = getV1NearbyHostiles({
@@ -4630,7 +4709,15 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         }
       }
 
-      actingHostileIds.push(hostile.id);
+      const movement = hostile.entityId
+        ? entityById.get(hostile.entityId)?.independent_movement
+        : undefined;
+      // Independently scheduled enemies own both movement and attacks on their
+      // real-time cadence. Never grant them a second action from the player's
+      // fine-step/full-action pulse.
+      if (!movement?.enabled) {
+        actingHostileIds.push(hostile.id);
+      }
     }
 
     const pulse = dispatchV1EnemyPulse({
@@ -4722,6 +4809,155 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       if (combatPulseRef.current === resolveCombatPulse) combatPulseRef.current = null;
     };
   }, [resolveCombatPulse]);
+
+  const independentEnemyDueAtRef = useRef<Map<string, number>>(new Map());
+  const independentEnemyMapIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const scheduler = window.setInterval(() => {
+      const map = activeMapRef.current;
+      const store = usePlayStore.getState();
+      const currentSave = store.saveData;
+      if (
+        !map ||
+        !currentSave ||
+        currentSave.playerStats.hp <= 0 ||
+        inputBlockedRef.current
+      ) {
+        return;
+      }
+
+      if (independentEnemyMapIdRef.current !== map.id) {
+        independentEnemyMapIdRef.current = map.id;
+        independentEnemyDueAtRef.current.clear();
+      }
+
+      const gp = getRuntimeGamePackage();
+      const entityById = new Map(gp.entities.map((entity) => [entity.id, entity]));
+      const party = new Set(currentSave.party_members || []);
+      const now = performance.now();
+      const livingKeys = new Set<string>();
+      const dueActors: Array<{ actorId: string; steps: number }> = [];
+
+      for (let index = 0; index < (map.entity_placements || []).length; index += 1) {
+        const placement = map.entity_placements[index]!;
+        if (party.has(placement.entity_id)) continue;
+        const definition = entityById.get(placement.entity_id);
+        const movement = definition?.independent_movement;
+        if (!definition || definition.is_npc || !movement?.enabled) continue;
+
+        const actorId = entityPlacementStateKey(map.id, placement, index);
+        const state = currentSave.entity_states?.[actorId] || {};
+        const hp = state.hp ?? definition.max_hp ?? 1;
+        if (
+          state.dead ||
+          state.hidden ||
+          hp <= 0
+        ) {
+          continue;
+        }
+
+        const cell = (state.cell || placement.cell) as [number, number];
+        const pursuit = resolveV1IndependentPursuitTarget(
+          currentSave,
+          actorId,
+          map.id,
+        );
+        if (!pursuit) continue;
+        const distance =
+          Math.abs(cell[0] - pursuit.cell[0]) +
+          Math.abs(cell[1] - pursuit.cell[1]);
+        const activationRadius = scaleMacroDistanceToFine(
+          movement.activation_radius ?? 18,
+        );
+        if (distance > activationRadius) {
+          continue;
+        }
+
+        livingKeys.add(actorId);
+        const intervalMs = Math.max(
+          180,
+          Math.min(5000, movement.interval_ms ?? 650),
+        );
+        const dueAt = independentEnemyDueAtRef.current.get(actorId);
+        if (dueAt === undefined) {
+          independentEnemyDueAtRef.current.set(actorId, now + intervalMs);
+          continue;
+        }
+        if (now < dueAt) continue;
+        independentEnemyDueAtRef.current.set(actorId, now + intervalMs);
+        dueActors.push({
+          actorId,
+          steps: Math.max(
+            1,
+            Math.min(3, Math.floor(movement.steps_per_pulse ?? 1)),
+          ),
+        });
+      }
+
+      for (const actorId of independentEnemyDueAtRef.current.keys()) {
+        if (!livingKeys.has(actorId)) independentEnemyDueAtRef.current.delete(actorId);
+      }
+      if (dueActors.length === 0) return;
+
+      const actorsByStride = new Map<number, string[]>();
+      dueActors.forEach(({ actorId, steps }) => {
+        actorsByStride.set(steps, [
+          ...(actorsByStride.get(steps) || []),
+          actorId,
+        ]);
+      });
+      let workingSave = currentSave;
+      const pulseResults: Array<ReturnType<typeof dispatchV1EnemyPulse>> = [];
+      for (const [steps, actorIds] of [...actorsByStride.entries()].sort(
+        ([left], [right]) => left - right,
+      )) {
+        const pulse = dispatchV1EnemyPulse({
+          gamePackage: gp,
+          save: workingSave,
+          mapId: map.id,
+          actorIds,
+          movementSteps: steps,
+          allowAttack: true,
+          independentMovement: true,
+        });
+        if (!pulse.ok) continue;
+        workingSave = pulse.save;
+        pulseResults.push(pulse);
+      }
+      if (pulseResults.length === 0) return;
+      const pulseEvents = pulseResults.flatMap((pulse) => pulse.events);
+      const resolved = pulseEvents.some(
+        (event) => event.type === "enemy_turn_resolved",
+      );
+      const moved = pulseEvents.some(
+        (event) =>
+          event.type === "enemy_turn_resolved" &&
+          (event.payload as unknown as EnemyTurnOutcome).kind === "move",
+      );
+      const attacks = pulseEvents
+        .filter((event) => event.type === "melee_attack_resolved")
+        .map((event) => event.payload as unknown as CombatAttackOutcome);
+      if (!resolved && attacks.length === 0) return;
+
+      store.commitRuntimeSave(workingSave);
+      store.pushEngineEvents(pulseEvents);
+      attacks.forEach((attack) => presentMeleeOutcome(attack));
+      if (moved) {
+        playSfx("footstep_stone", {
+          volume: 0.16,
+          playbackRate: 0.82,
+          cooldownMs: 110,
+        });
+      }
+    }, 80);
+
+    return () => {
+      window.clearInterval(scheduler);
+      independentEnemyDueAtRef.current.clear();
+      independentEnemyMapIdRef.current = null;
+    };
+  }, [playSfx, presentMeleeOutcome]);
 
   // Overwatch is a combat stance — disarm it when combat ends so the flag
   // doesn't linger into exploration.
@@ -5411,10 +5647,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       const keys = keysDownRef.current;
 
       if (thirdPersonActiveRef.current) {
-        const intent = resolveHeldThirdPersonIntent(
-          keys,
-          consumedMovementTapKeysRef.current,
-        );
+        const intent = resolveLiveHeldThirdPersonIntent(keys);
         setThirdPersonPitchInput(intent.pitch);
 
         // Targeting pauses simulation movement but deliberately leaves Q/E
@@ -5507,7 +5740,13 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             ? isEnemyNearbyRef.current()
             : false;
           const inCombat = Boolean(currentSave?.in_combat);
-          if (inCombat || !enemyNearby) {
+          if (
+            shouldDispatchHeldInputRepeat({
+              inCombat,
+              enemyNearby,
+              locomotionHeld: stepping,
+            })
+          ) {
             if (turning && time >= state.nextTurnTick) {
               state.nextTurnTick = time + THIRD_PERSON_TURN_REPEAT_MS;
               fireTurn();
@@ -5527,10 +5766,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       // chord buffer, cadence normalization, stealth throttle, and
       // enemy-nearby repeat gate as the isometric path.
       if (firstPersonActiveRef.current) {
-        const intent = resolveHeldFirstPersonIntent(
-          keys,
-          consumedMovementTapKeysRef.current,
-        );
+        const intent = resolveLiveHeldFirstPersonIntent(keys);
         // Pitch is a camera affordance, not a world command: it applies while
         // held even with no movement pressed and never enters the repeat gate.
         firstPersonLookRef.pitchInput = intent.pitch;
@@ -5628,7 +5864,13 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           const enemyNearby = isEnemyNearbyRef.current
             ? isEnemyNearbyRef.current()
             : false;
-          if (!enemyNearby) {
+          if (
+            shouldDispatchHeldInputRepeat({
+              inCombat: Boolean(currentSave?.in_combat),
+              enemyNearby,
+              locomotionHeld: stepping,
+            })
+          ) {
             if (turning && time >= state.nextTurnTick) {
               state.nextTurnTick = time + FIRST_PERSON_TURN_REPEAT_MS;
               fireTurn();
@@ -5642,10 +5884,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         return;
       }
 
-      const { ax, az, wait } = resolveHeldMovementIntent(
-        keys,
-        consumedMovementTapKeysRef.current,
-      );
+      const { ax, az, wait } = resolveLiveHeldMovementIntent(keys);
 
       const isPressing = ax !== 0 || az !== 0 || wait;
 
@@ -5706,7 +5945,14 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           const enemyNearby = isEnemyNearbyRef.current
             ? isEnemyNearbyRef.current()
             : false;
-          if ((inCombat || !enemyNearby) && time >= state.nextTick) {
+          if (
+            shouldDispatchHeldInputRepeat({
+              inCombat,
+              enemyNearby,
+              locomotionHeld: rx !== 0 || rz !== 0,
+            }) &&
+            time >= state.nextTick
+          ) {
             // Schedule from the frame that actually committed the step. A
             // slow render must never be repaid with a burst of simulation
             // commands on the following frames.
@@ -6291,6 +6537,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           ?.flatMap((p, index) => {
             if (partyMembers.has(p.entity_id)) return [];
             const def = entityByIdForPlay.get(p.entity_id);
+            // Wall-clock hunters own their entire exploration cadence. Keeping
+            // them in the player-energy pump as well made one player step
+            // grant an extra movement/attack and produced nondeterministic
+            // double chases.
+            if (def?.independent_movement?.enabled) return [];
             // Use instance key
             const key = entityPlacementStateKey(activeMap.id, p, index);
             const saved = nextEntities[key] || {};
@@ -7356,6 +7607,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         // stealth the closed door remains a bump until the player exits the
         // stance and deliberately acts on it.
         allowDoorwayAssist: actor.isPlayer && !inCombat && !actorUsesStealth,
+        // Fine-grid corner alignment is ordinary locomotion, so it remains
+        // available while sneaking. Combat retains exact tactical movement.
+        allowCornerAssist: actor.isPlayer && !inCombat,
       });
       if (movementCommand.ok) {
         const resolvedCell = actor.isPlayer
@@ -7375,54 +7629,62 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       // every cell of the destination footprint is checked.
       let blocked = !movementCommand.ok;
       const contactedArchitecture = new Set<string>();
-      for (const [fx, fz] of actorFootprintCells([nx, nz])) {
-        const footCell = getActiveCell(fx, fz);
-        const stepTooHigh = Boolean(
-          footCell &&
-            getJamEngineVisualHeight(footCell) -
-              getJamEngineVisualHeight(currentCell) >
-              1,
-        );
-        if (
-          !footCell ||
-          !footCell.walkable ||
-          stepTooHigh
-        ) {
-          if (
+      // Once the core has accepted a move (including a corner-assist
+      // substitute), its resolved destination is authoritative. Re-running a
+      // second, slightly different PlayMode validator used to veto that save
+      // and reduce the command to a facing update: the visible
+      // "turning/walking in place" failure.
+      if (!movementCommand.ok) {
+        for (const [fx, fz] of actorFootprintCells([nx, nz])) {
+          const footCell = getActiveCell(fx, fz);
+          const stepTooHigh = Boolean(
             footCell &&
-            (!footCell.walkable || footCell.blocks_los || stepTooHigh)
+              getJamEngineVisualHeight(footCell) -
+                getJamEngineVisualHeight(currentCell) >
+                1,
+          );
+          if (
+            !footCell ||
+            !footCell.walkable ||
+            stepTooHigh
           ) {
-            contactedArchitecture.add(fineCoordKey(fx, fz));
-          }
-          blocked = true;
-          break;
-        }
-        // Object collisions (cell-baked objects like walls).
-        if (footCell.object_id) {
-          const cellObjDef = useEngineStore
-            .getState()
-            .gamePackage.object_library.find(
-              (o) => o.id === footCell.object_id,
-            );
-          if (cellObjDef && cellObjDef.collision?.profile !== "none") {
-            if (isStableMemoryStructureObject(cellObjDef)) {
+            if (
+              footCell &&
+              (!footCell.walkable || footCell.blocks_los || stepTooHigh)
+            ) {
               contactedArchitecture.add(fineCoordKey(fx, fz));
             }
             blocked = true;
             break;
           }
-        }
-        if (isBlockedByPlacement(fx, fz)) {
-          if (stableMemoryPlacementCells.has(playCellKey(fx, fz))) {
-            contactedArchitecture.add(fineCoordKey(fx, fz));
+
+          // Object collisions (cell-baked objects like walls).
+          if (footCell.object_id) {
+            const cellObjDef = useEngineStore
+              .getState()
+              .gamePackage.object_library.find(
+                (o) => o.id === footCell.object_id,
+              );
+            if (cellObjDef && cellObjDef.collision?.profile !== "none") {
+              if (isStableMemoryStructureObject(cellObjDef)) {
+                contactedArchitecture.add(fineCoordKey(fx, fz));
+              }
+              blocked = true;
+              break;
+            }
           }
-          blocked = true;
-          break;
-        }
-        // Containers occupy their whole macro tile.
-        if (getContainerAtCell(fx, fz)) {
-          blocked = true;
-          break;
+          if (isBlockedByPlacement(fx, fz)) {
+            if (stableMemoryPlacementCells.has(playCellKey(fx, fz))) {
+              contactedArchitecture.add(fineCoordKey(fx, fz));
+            }
+            blocked = true;
+            break;
+          }
+          // Containers occupy their whole macro tile.
+          if (getContainerAtCell(fx, fz)) {
+            blocked = true;
+            break;
+          }
         }
       }
 
@@ -7451,6 +7713,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
 
       // Entity collisions: walking into any entity whose footprint would
       // overlap the destination footprint counts as a bump (talk / attack).
+      // Successful doorway/corner alignment may substitute a safe one-cell
+      // direction, so only failed moves probe the originally requested edge.
+      const collisionProbeDelta: [number, number] = movementCommand.ok
+        ? movementCommand.resolvedDelta
+        : [dx, dz];
       const entityIndex = activeMap.entity_placements?.findIndex((e, idx) => {
         if ((currentSave.party_members || []).includes(e.entity_id)) return false;
         const key = entityPlacementStateKey(activeMap.id, e, idx);
@@ -7459,7 +7726,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         const cz = est?.cell?.[1] ?? e.cell[1];
         return footprintIntersectsLeadingEdge(
           [actorCell[0], actorCell[1]],
-          [dx, dz],
+          collisionProbeDelta,
           [cx, cz],
         ) && !est?.dead && !est?.hidden;
       });
@@ -8001,11 +8268,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       if (dx === 0 && dy === 0) return;
       const isTouch = gesture.pointerType === "touch";
       const nextLook = applyThirdPersonLookDelta(
-        thirdPersonLookRef.yaw ??
-          thirdPersonVisualYawRef.current ??
-          facingToThirdPersonYaw(
-            usePlayStore.getState().saveData?.player.facing || [0, -1],
-          ),
+        thirdPersonLookRef.yawOffset,
         thirdPersonLookRef.pitch,
         dx,
         dy,
@@ -8016,23 +8279,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           ? THIRD_PERSON_TOUCH_PITCH_SENSITIVITY
           : THIRD_PERSON_PITCH_DRAG_SENSITIVITY,
       );
-      thirdPersonLookRef.yaw = nextLook.yaw;
+      markThirdPersonManualLookActivity();
+      thirdPersonLookRef.yawOffset = nextLook.yawOffset;
       thirdPersonLookRef.pitch = nextLook.pitch;
-      thirdPersonVisualYawRef.current = nextLook.yaw;
-      const actor = getControlledActor(
-        usePlayStore.getState().saveData,
-        getRuntimeGamePackage(),
-      );
-      if (
-        !inputBlockedRef.current &&
-        actor &&
-        (actor.facing[0] !== nextLook.authoritativeFacing[0] ||
-          actor.facing[1] !== nextLook.authoritativeFacing[1])
-      ) {
-        updateControlledActorFacing(nextLook.authoritativeFacing);
-      }
     },
-    [updateControlledActorFacing],
+    [],
   );
 
   const endThirdPersonLook = useCallback(
@@ -8050,6 +8301,17 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   const handleThirdPersonVisualYaw = useCallback((yaw: number) => {
     thirdPersonVisualYawRef.current = yaw;
   }, []);
+  const handleThirdPersonStreamDirection = useCallback(
+    (direction: readonly [number, number]) => {
+      setThirdPersonStreamDirection((previous) =>
+        Math.abs(previous[0] - direction[0]) < 0.0001 &&
+        Math.abs(previous[1] - direction[1]) < 0.0001
+          ? previous
+          : [direction[0], direction[1]],
+      );
+    },
+    [],
+  );
 
   const handlePlayfieldCellClick = useCallback(
     (x: number, z: number) => {
@@ -8839,6 +9101,216 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     playSfx,
   ]);
 
+  const facedManipulationTarget = (
+    currentSave: PlaySave,
+  ): {
+    cell: [number, number];
+    placement?: ObjectPlacementData;
+    name?: string;
+  } => {
+    const cell = facedProbeCell(
+      currentSave.player.cell,
+      currentSave.player.facing,
+    );
+    const placement = effectiveObjectPlacements.find((candidate) => {
+      const definition = objectByIdForPlay.get(candidate.object_id);
+      return (
+        placementHasCollision(candidate, definition) &&
+        isPushableObject(definition) &&
+        placementOccupiesCell(
+          candidate,
+          definition,
+          cell[0],
+          cell[1],
+        )
+      );
+    });
+    return {
+      cell,
+      placement,
+      name: placement
+        ? objectByIdForPlay.get(placement.object_id)?.display_name || "object"
+        : undefined,
+    };
+  };
+
+  const carriedStackAt = (cell: [number, number]) =>
+    effectiveObjectPlacements
+      .filter(
+        (placement) =>
+          placement.cell[0] === cell[0] &&
+          placement.cell[1] === cell[1],
+      )
+      .sort(
+        (left, right) =>
+          (left.stack_index || 0) - (right.stack_index || 0),
+      );
+
+  const placeCarriedObject = (mode: "place" | "stack") => {
+    const currentSave = usePlayStore.getState().saveData;
+    if (!currentSave || !activeMap || currentSave.in_combat) return false;
+    const carried = getPlayerCarriedObject(currentSave, activeMap.id);
+    if (!carried) return false;
+    const facing = currentSave.player.facing || [0, 1];
+    const faced = facedManipulationTarget(currentSave);
+
+    let cell: [number, number];
+    let stackRootKey: string | undefined;
+    let stackIndex: number | undefined;
+    let heightOffset: number | undefined;
+
+    if (mode === "stack") {
+      if (!faced.placement) {
+        addLog("Face another crate or movable object to stack it.");
+        playSfx("warning", { volume: 0.22, cooldownMs: 120 });
+        return false;
+      }
+      cell = [faced.placement.cell[0], faced.placement.cell[1]];
+      const stack = carriedStackAt(cell);
+      const top = stack[stack.length - 1] || faced.placement;
+      stackIndex = (top.stack_index || 0) + 1;
+      if (stackIndex > 2) {
+        addLog("That stack is already too high to handle safely.");
+        playSfx("warning", { volume: 0.22, cooldownMs: 120 });
+        return false;
+      }
+      const base = stack[0] || faced.placement;
+      stackRootKey =
+        base.stack_root_key || placementOriginKey(base);
+      heightOffset = stackIndex * 0.72;
+    } else {
+      cell = [
+        currentSave.player.cell[0] + facing[0] * FINE_PER_MACRO,
+        currentSave.player.cell[1] + facing[1] * FINE_PER_MACRO,
+      ];
+      const footprintOpen = actorFootprintCells(cell).every(([x, z]) => {
+        const target = getActiveCell(x, z);
+        if (!target?.walkable || getContainerAtCell(x, z)) return false;
+        if (isBlockedByPlacement(x, z)) return false;
+        return !(activeMap.entity_placements || []).some((placement, index) => {
+          const key = entityPlacementStateKey(activeMap.id, placement, index);
+          const state =
+            currentSave.entity_states?.[key] ||
+            currentSave.entity_states?.[placement.entity_id] ||
+            {};
+          if (state.dead || state.hidden) return false;
+          const actorCell = state.cell || placement.cell;
+          return footprintContainsCell(actorCell, [x, z]);
+        });
+      });
+      if (!footprintOpen) {
+        addLog("There is not enough room to put that down.");
+        playSfx("bump", { volume: 0.24, cooldownMs: 90 });
+        return false;
+      }
+    }
+
+    const nextSave = placePlayerCarriedObject(currentSave, {
+      mapId: activeMap.id,
+      placementKey: carried.key,
+      cell,
+      facing: [facing[0], facing[1]],
+      stackRootKey,
+      stackIndex,
+      heightOffset,
+    });
+    commitRuntimeSave({
+      ...nextSave,
+      playerStats: {
+        ...nextSave.playerStats,
+        energy: Math.max(0, (nextSave.playerStats.energy || 0) - 1000),
+      },
+    });
+    const objectName =
+      objectByIdForPlay.get(carried.objectId)?.display_name || "object";
+    addLog(
+      mode === "stack"
+        ? `You stack the ${objectName}.`
+        : `You put down the ${objectName}.`,
+    );
+    playSfx("door_transition", { volume: 0.28, cooldownMs: 120 });
+    setContextActionMenuOpen(false);
+    return true;
+  };
+
+  const carryFacedObject = () => {
+    const currentSave = usePlayStore.getState().saveData;
+    if (!currentSave || !activeMap || currentSave.in_combat) return false;
+    if (getPlayerCarriedObject(currentSave, activeMap.id)) {
+      addLog("Your hands are already full.");
+      playSfx("warning", { volume: 0.22, cooldownMs: 120 });
+      return false;
+    }
+    const faced = facedManipulationTarget(currentSave);
+    if (!faced.placement) return false;
+    const result = dispatchV1CarryObject({
+      gamePackage: getRuntimeGamePackage(),
+      save: currentSave,
+      x: faced.cell[0],
+      y: faced.cell[1],
+      dx: 0,
+      dy: 0,
+      energyCost: 1000,
+    });
+    if (!result.ok) {
+      addLog(
+        result.reason === "stack is too bulky"
+          ? "Separate the stack before trying to carry it."
+          : `You cannot carry the ${faced.name || "object"}.`,
+      );
+      playSfx("warning", { volume: 0.22, cooldownMs: 120 });
+      return false;
+    }
+    commitWithFacts(currentSave, result);
+    addLog(`You pick up the ${faced.name || "object"}.`);
+    playSfx("item_pickup", { volume: 0.32, cooldownMs: 120 });
+    setContextActionMenuOpen(false);
+    return true;
+  };
+
+  const pullFacedObject = () => {
+    const currentSave = usePlayStore.getState().saveData;
+    if (!currentSave || !activeMap || currentSave.in_combat) return false;
+    const faced = facedManipulationTarget(currentSave);
+    if (!faced.placement) return false;
+    const facing = currentSave.player.facing || [0, 1];
+    const stepBack = dispatchV1MoveEntity({
+      gamePackage: getRuntimeGamePackage(),
+      save: currentSave,
+      dx: -facing[0],
+      dy: -facing[1],
+      facingOverride: [facing[0], facing[1]],
+      energyCost: 0,
+    });
+    if (!stepBack.ok) {
+      addLog("There is no room behind Steve to pull from here.");
+      playSfx("bump", { volume: 0.24, cooldownMs: 90 });
+      return false;
+    }
+    const pulled = dispatchV1PullObject({
+      gamePackage: getRuntimeGamePackage(),
+      save: stepBack.save,
+      x: faced.cell[0],
+      y: faced.cell[1],
+      dx: -facing[0],
+      dy: -facing[1],
+      energyCost: 1000,
+    });
+    if (!pulled.ok) {
+      addLog(`The ${faced.name || "object"} will not pull free.`);
+      playSfx("bump", { volume: 0.24, cooldownMs: 90 });
+      return false;
+    }
+    commitRuntimeSave(pulled.save);
+    usePlayStore
+      .getState()
+      .pushEngineEvents([...stepBack.events, ...pulled.events]);
+    addLog(`You pull the ${faced.name || "object"}.`);
+    playSfx("door_transition", { volume: 0.28, cooldownMs: 120 });
+    setContextActionMenuOpen(false);
+    return true;
+  };
+
   const handleAct = () => {
     if (!activeMap || !saveData) return;
     if (saveData.playerStats.hp <= 0) return;
@@ -8905,81 +9377,10 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       return; // a whiff costs nothing — reposition instead
     }
 
-    // Persistent campaign landmarks are deliberately not ordinary entities or
-    // item drops: they do not join AI, collision, combat, or remembered-fog
-    // state. Act reaches a faced/underfoot ghost or bundle by macro footprint.
-    const landmarkCells: [number, number][] = [[tx, tz], actorCell];
-    const reachableGhost = getPersistentGhosts(saveData).find(
-      (ghost) =>
-        ghost.status === "present" &&
-        ghost.map_id === activeMap.id &&
-        landmarkCells.some((cell) => sameMacroCoord(ghost.cell, cell)),
-    );
-    if (reachableGhost) {
-      const communion = communeWithPersistentGhost(gp, saveData, reachableGhost.id);
-      const source = saveData.intercessor_campaign?.records[reachableGhost.source_intercessor_id];
-      const skill = communion.skillId
-        ? gp.abilities.find((ability) => ability.id === communion.skillId)
-        : undefined;
-      const nextSave = communion.changed
-        ? {
-            ...communion.save,
-            playerStats: {
-              ...communion.save.playerStats,
-              energy: Math.max(0, (communion.save.playerStats.energy || 0) - 1000),
-            },
-          }
-        : communion.save;
-      if (nextSave !== saveData) commitRuntimeSave(nextSave);
-      if (communion.outcome === "inherited") {
-        addLog(
-          `${source?.display_name || "The ghost"} teaches ${skill?.display_name || communion.skillId}. The inheritance is permanent.`,
-        );
-        useFxStore.getState().addPopup(reachableGhost.cell, "Skill inherited", "#c4b5fd", 1.9);
-        playSfx("level_up", { volume: 0.42, cooldownMs: 180 });
-      } else if (communion.outcome === "already_known") {
-        addLog(
-          `${source?.display_name || "The ghost"}'s signature is ${skill?.display_name || communion.skillId}; you already know it.`,
-        );
-        playSfx("dialogue_open", { volume: 0.22, cooldownMs: 120 });
-      } else if (communion.outcome === "already_inherited") {
-        addLog(`${source?.display_name || "The ghost"} has already given this life all it can.`);
-        playSfx("ui_back", { volume: 0.16, cooldownMs: 120 });
-      } else {
-        addLog(`${source?.display_name || "The ghost"} remembers no transferable signature skill.`);
-        playSfx("dialogue_open", { volume: 0.18, cooldownMs: 120 });
-      }
-      return;
-    }
-
-    const reachableBundle = getDeathBundles(saveData).find(
-      (bundle) =>
-        bundle.status === "available" &&
-        bundle.map_id === activeMap.id &&
-        landmarkCells.some((cell) => sameMacroCoord(bundle.cell, cell)),
-    );
-    if (reachableBundle) {
-      const recovery = recoverDeathBundle(gp, saveData, reachableBundle.id);
-      if (recovery.outcome === "recovered") {
-        const nextSave: PlaySave = {
-          ...recovery.save,
-          playerStats: {
-            ...recovery.save.playerStats,
-            energy: Math.max(0, (recovery.save.playerStats.energy || 0) - 1000),
-          },
-        };
-        commitRuntimeSave(nextSave);
-        const owner = saveData.intercessor_campaign?.records[reachableBundle.owner_intercessor_id];
-        const itemCount = reachableBundle.contents.reduce((total, entry) => total + entry.count, 0);
-        addLog(
-          `Recovered ${owner?.display_name || "a prior Intercessor"}'s death bundle: ${itemCount} item${itemCount === 1 ? "" : "s"}${recovery.artifactIds.length ? ` and ${recovery.artifactIds.length} registered artifact${recovery.artifactIds.length === 1 ? "" : "s"}` : ""}.`,
-        );
-        useFxStore.getState().addPopup(reachableBundle.cell, "Bundle recovered", "#f5d0fe", 1.8);
-        playSfx("item_pickup", { volume: 0.4, cooldownMs: 120 });
-      } else {
-        addLog("That death bundle has already been recovered or returned.");
-        playSfx("warning", { volume: 0.2, cooldownMs: 120 });
-      }
+    const carried = getPlayerCarriedObject(saveData, activeMap.id);
+    if (carried) {
+      const faced = facedManipulationTarget(saveData);
+      placeCarriedObject(faced.placement ? "stack" : "place");
       return;
     }
 
@@ -9492,7 +9893,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     return [
       {
         id: "player",
-        name: "You",
+        name: "Steve",
         hp: saveData.playerStats.hp,
         maxHp: saveData.playerStats.max_hp,
         dead: saveData.playerStats.hp <= 0,
@@ -9792,40 +10193,48 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       })),
     [activeMap?.container_placements],
   );
-  const campaignLandmarkItems = useMemo(() => {
-    if (!activeMap || !saveData) {
-      return [] as { id: string; cell: [number, number]; icon: string }[];
-    }
-    const ghosts = getPersistentGhosts(saveData)
-      .filter((ghost) => ghost.status === "present" && ghost.map_id === activeMap.id)
-      .map((ghost) => ({
-        id: ghost.id,
-        cell: [ghost.cell[0], ghost.cell[1]] as [number, number],
-        icon: ghost.marker_icon || "✧",
-      }));
-    const bundles = getDeathBundles(saveData)
-      .filter((bundle) => bundle.status === "available" && bundle.map_id === activeMap.id)
-      .map((bundle) => ({
-        id: bundle.id,
-        cell: [bundle.cell[0], bundle.cell[1]] as [number, number],
-        icon: bundle.marker_icon || "▣",
-      }));
-    return [...ghosts, ...bundles];
-  }, [activeMap?.id, saveData?.fracture_crawl_campaign]);
+  const carriedObjectRenderPlacements = useMemo(() => {
+    if (!activeMap || !saveData) return [] as ObjectPlacementData[];
+    const carried = getPlayerCarriedObject(saveData, activeMap.id);
+    if (!carried) return [] as ObjectPlacementData[];
+    const authored = (activeMap.custom_object_placements || []).find(
+      (placement) => placementOriginKey(placement) === carried.key,
+    );
+    const facing = saveData.player.facing || [0, 1];
+    return [
+      {
+        id: `runtime_carried_${carried.key}`,
+        object_id: carried.objectId || authored?.object_id || "",
+        cell: [
+          saveData.player.cell[0] + facing[0] * (FINE_HALF_EXTENT + 0.3),
+          saveData.player.cell[1] + facing[1] * (FINE_HALF_EXTENT + 0.3),
+        ],
+        facing: [facing[0], facing[1]],
+        height_offset: 0.82,
+        collision_mode: "none",
+      },
+    ] satisfies ObjectPlacementData[];
+  }, [
+    activeMap,
+    saveData?.map_deltas,
+    saveData?.player.cell,
+    saveData?.player.facing,
+  ]);
+  const extraRenderPlacements = useMemo(
+    () => [...containerRenderPlacements, ...carriedObjectRenderPlacements],
+    [carriedObjectRenderPlacements, containerRenderPlacements],
+  );
   const worldItemsRender = useMemo(() => {
     if (!activeMap)
       return [] as { id: string; cell: [number, number]; icon: string }[];
     const iconOf = (itemId: string) =>
       gamePackage.items.find((i) => i.id === itemId)?.icon || "📦";
-    return [
-      ...getEffectiveWorldItems(activeMap, renderMapDelta).map((w) => ({
-        id: w.id,
-        cell: w.cell,
-        icon: iconOf(w.item_id),
-      })),
-      ...campaignLandmarkItems,
-    ];
-  }, [activeMap, renderMapDelta, gamePackage.items, campaignLandmarkItems]);
+    return getEffectiveWorldItems(activeMap, renderMapDelta).map((w) => ({
+      id: w.id,
+      cell: w.cell,
+      icon: iconOf(w.item_id),
+    }));
+  }, [activeMap, renderMapDelta, gamePackage.items]);
 
   // Living hostiles in threat range — drives the danger HUD panel and
   // engaged HP-bar presentation in GameRenderer.
@@ -9910,10 +10319,10 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     readonly ThirdPersonCameraBlocker[]
   >(() => {
     if (!thirdPersonAuthored || !activeMap) return [];
-    // The normal chase boom is four cells long. Filtering eighteen cells of
-    // structural geometry made every camera frame test hundreds of blockers
-    // that it could never reach, especially in the large institutional map.
-    const windowRadius = 7;
+    // The longest authored boom is under 4.5 cells. Six cells retains a full
+    // collision margin while removing blockers that no camera sweep can reach
+    // from the per-frame shoulder and boom probes.
+    const windowRadius = 6;
     return [...thirdPersonStructuralCameraMacros.entries()].flatMap(
       ([key, height]) => {
         const [macroX, macroZ] = key.split(":").map(Number);
@@ -10524,25 +10933,125 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     !showInventory &&
     !showSkills &&
     !showSaveMenu &&
-    !showJournal;
-  const clockTotalMinutes = Math.floor(saveData.clock_minutes ?? 0);
-  const clockDay = Math.floor(clockTotalMinutes / 1440) + 1;
-  const clockHour = Math.floor(clockTotalMinutes / 60) % 24;
-  const clockMinute = clockTotalMinutes % 60;
-  const clockPhase = CLOCK_PHASE_LABELS[getClockPhaseId(clockHour)];
+    !showJournal &&
+    !showGameMenu;
   const playerLevel = getSaveLevel(saveData);
-  const playerExperience = getSaveExperience(saveData);
-  const currentLevelXp = getXpRequiredForLevel(playerLevel);
-  const nextLevelXp = getXpRequiredForLevel(playerLevel + 1);
-  const xpSpan = Math.max(1, nextLevelXp - currentLevelXp);
-  const xpProgress = Math.max(
-    0,
-    Math.min(100, ((playerExperience - currentLevelXp) / xpSpan) * 100),
-  );
-  const xpRemaining = getXpRemainingForNextLevel(saveData);
   const shopConditionCtx = buildConditionContext(saveData);
   const questJournal = buildQuestJournal(saveData, gamePackage);
-  const activeQuestStep = questJournal.activeStep;
+  const contextualProbeCell = facedProbeCell(playerPos, playerFacing);
+  const contextualManipulationTarget = facedManipulationTarget(saveData);
+  const playerCarriedObject = getPlayerCarriedObject(saveData, activeMap.id);
+  const contextualWorldItems = getEffectiveWorldItems(
+    activeMap,
+    saveData.map_deltas?.[activeMap.id],
+  );
+  const contextualWorldItem =
+    contextualWorldItems.find((item) =>
+      sameMacroCoord(item.cell, contextualProbeCell),
+    ) || selectPlayModePickupCandidate(contextualWorldItems, playerPos);
+  const contextualEntity = getLivingActorAtCell(
+    saveData,
+    activeMap,
+    gamePackage,
+    contextualProbeCell[0],
+    contextualProbeCell[1],
+  );
+  const contextualContainer = getContainerAtCell(
+    contextualProbeCell[0],
+    contextualProbeCell[1],
+  );
+  const contextualPlacement = effectiveObjectPlacements.find((placement) => {
+    const definition = objectByIdForPlay.get(placement.object_id);
+    return placementOccupiesCell(
+      placement,
+      definition,
+      contextualProbeCell[0],
+      contextualProbeCell[1],
+    );
+  });
+  const contextualTrigger = activeMap.triggers?.find(
+    (trigger) =>
+      trigger.type === "interact" &&
+      trigger.cell &&
+      sameMacroCoord(
+        [trigger.cell[0], trigger.cell[1]],
+        contextualProbeCell,
+      ),
+  );
+  const contextualActLabel = playerCarriedObject
+    ? contextualManipulationTarget.placement
+      ? `Stack ${objectByIdForPlay.get(playerCarriedObject.objectId)?.display_name || "object"}`
+      : `Place ${objectByIdForPlay.get(playerCarriedObject.objectId)?.display_name || "object"}`
+    : contextualManipulationTarget.placement
+      ? `Push ${contextualManipulationTarget.name || "object"}`
+      : contextualEntity
+        ? contextualEntity.isNpc
+          ? `Talk to ${contextualEntity.name}`
+          : `Strike ${contextualEntity.name}`
+        : contextualContainer
+          ? `Open ${contextualContainer.display_name || "container"}`
+          : contextualWorldItem
+            ? `Take ${gamePackage.items.find((item) => item.id === contextualWorldItem.item_id)?.display_name || "item"}`
+            : contextualPlacement
+              ? isBuildingDoorPlacement(contextualPlacement)
+                ? "Open door"
+                : contextualPlacement.dialogue_id
+                  ? "Interact"
+                  : null
+              : contextualTrigger || reachableWorkstation
+                ? "Interact"
+                : null;
+  const contextualActionOptions: Array<{
+    id: string;
+    label: string;
+    action: () => void;
+  }> = playerCarriedObject
+    ? [
+        ...(contextualManipulationTarget.placement
+          ? [
+              {
+                id: "stack",
+                label: `Stack on ${contextualManipulationTarget.name || "object"}`,
+                action: () => {
+                  placeCarriedObject("stack");
+                },
+              },
+            ]
+          : []),
+        {
+          id: "place",
+          label: "Put down",
+          action: () => {
+            placeCarriedObject("place");
+          },
+        },
+      ]
+    : contextualManipulationTarget.placement
+      ? [
+          {
+            id: "push",
+            label: "Push",
+            action: () => {
+              handleAct();
+              setContextActionMenuOpen(false);
+            },
+          },
+          {
+            id: "pull",
+            label: "Pull",
+            action: () => {
+              pullFacedObject();
+            },
+          },
+          {
+            id: "carry",
+            label: "Carry",
+            action: () => {
+              carryFacedObject();
+            },
+          },
+        ]
+      : [];
   const partyMemberIds = saveData.party_members || [];
   const knownAbilityIds = new Set([
     ...(saveData.known_skills || []),
@@ -10551,6 +11060,14 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   const actorAbilityIds = new Set(controlledActor?.skills || []);
   const allAbilityEntries: AbilityBarEntry[] = gamePackage.abilities
     .filter((ability) => {
+      if (!inCombat) return false;
+      if (
+        ability.ability_kind !== "skill" &&
+        ability.runtime_action &&
+        isPlayModeVerbAction(ability.runtime_action)
+      ) {
+        return false;
+      }
       if (ability.ability_kind === "skill") {
         return controlledActor
           ? actorAbilityIds.has(ability.id) || knownAbilityIds.has(ability.id)
@@ -10689,7 +11206,12 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     : 0;
   const activeAbilityPageData = abilityBarPages[safeAbilityPageIndex];
   const visibleAbilityEntries = activeAbilityPageData?.entries || [];
-  const abilityBarVisible = abilityBarPages.length > 0 && !levelUpOpen && !targetingSkillId && !overlayOpen;
+  const abilityBarVisible =
+    inCombat &&
+    abilityBarPages.length > 0 &&
+    !levelUpOpen &&
+    !targetingSkillId &&
+    !overlayOpen;
   const abilityPageLabel = activeAbilityPageData?.label || "Abilities";
   const setAbilityPageByOffset = (offset: number) => {
     if (!abilityBarPages.length) return;
@@ -10777,7 +11299,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         if (id === "player") {
           return {
             id,
-            name: "You",
+            name: "Steve",
             hp: saveData.playerStats.hp,
             maxHp: saveData.playerStats.max_hp,
             kind: "player" as const,
@@ -10908,6 +11430,14 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     searching: "They are searching",
     combat: "You are seen",
   };
+  const survivalVitalsVisible =
+    !overlayOpen &&
+    (inCombat ||
+      saveData.playerStats.hp < saveData.playerStats.max_hp ||
+      (saveData.playerStats.energy || 0) < 1000 ||
+      ALERTNESS_RANK[stealthAlertness] > 0 ||
+      (saveData.actor_statuses?.player?.length || 0) > 0 ||
+      playerPhysicalActive);
   const worldStateGate =
     worldStateEvaluation?.denials[0] ||
     worldStateEvaluation?.gates.find((gate) => !gate.passed && gate.severity === "warning") ||
@@ -11224,17 +11754,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       data-active-map={activeMap.id}
       data-player-cell={`${saveData.player.cell?.[0] ?? 0},${saveData.player.cell?.[1] ?? 0}`}
       data-player-facing={`${saveData.player.facing?.[0] ?? 0},${saveData.player.facing?.[1] ?? -1}`}
+      data-player-name="Steve"
       data-view-mode={rendererViewPresentation}
       data-player-energy={String(saveData.playerStats.energy || 0)}
-      data-current-intercessor-id={currentIntercessor?.id || ""}
-      data-current-intercessor-name={currentIntercessor?.display_name || ""}
-      data-intercessor-generation={String(currentIntercessor?.generation || 0)}
-      data-expedition-id={saveData.world_state_layers?.expedition.id || ""}
-      data-expedition-index={String(saveData.world_state_layers?.expedition.index || 0)}
-      data-intercessor-count={String(intercessorHistory.length)}
-      data-death-event-count={String(Object.keys(intercessorCampaign?.death_events || {}).length)}
-      data-ghost-request-count={String(Object.keys(intercessorCampaign?.ghost_requests || {}).length)}
-      data-bundle-request-count={String(Object.keys(intercessorCampaign?.bundle_requests || {}).length)}
       data-stealth-active={String(playerStealthActive)}
       data-player-stance={playerStealthActive ? "stealth" : "normal"}
       data-movement-noise={playerStealthActive ? "quiet" : "normal"}
@@ -11247,6 +11769,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             showSkills ||
             showSaveMenu ||
             showJournal ||
+            showGameMenu ||
             successionNoticeOpen ||
             ((targetingSkillId || verbTargeting) &&
               !thirdPersonActive) ||
@@ -11284,10 +11807,15 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           // loop as soon as the tab becomes visible again.
           frameloop="demand"
           shadows={
-            bottomPanelOpen ||
-            (visualPreset !== "high" && visualPreset !== "ultra")
-              ? false
-              : "basic"
+            thirdPersonActive
+              ? visualPreset === "performance" || bottomPanelOpen
+                ? false
+                : "basic"
+              : largePlayMap ||
+                  bottomPanelOpen ||
+                  (visualPreset !== "high" && visualPreset !== "ultra")
+                ? false
+                : "basic"
           }
           camera={{
             position: initialCameraPosition,
@@ -11319,7 +11847,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
               subjectFacing={thirdPersonSubjectFacing}
               subjectWorldY={thirdPersonSubjectWorldY}
               blockers={thirdPersonCameraBlockers}
+              profile={inCombat ? "combat" : "explore"}
               onVisualYawChange={handleThirdPersonVisualYaw}
+              onStreamDirectionChange={handleThirdPersonStreamDirection}
             />
           ) : firstPersonAuthored ? (
             <FirstPersonCameraRig
@@ -11342,35 +11872,48 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           <color
             attach="background"
             args={[
-              firstPersonAuthored
+              thirdPersonActive
+                ? "#151925"
+                : firstPersonAuthored
                 ? FIRST_PERSON_ATMOSPHERE.background
                 : ISOMETRIC_ATMOSPHERE.background,
             ]}
           />
-          <fog
-            attach="fog"
-            args={
-              firstPersonAuthored
-                ? [
-                    FIRST_PERSON_ATMOSPHERE.fogColor,
-                    FIRST_PERSON_ATMOSPHERE.fogNear,
-                    FIRST_PERSON_ATMOSPHERE.fogFar,
-                  ]
-                : [
-                    ISOMETRIC_ATMOSPHERE.fogColor,
-                    ISOMETRIC_ATMOSPHERE.fogNear,
-                    ISOMETRIC_ATMOSPHERE.fogFar,
-                  ]
-            }
-          />
+          {!thirdPersonActive && (
+            <fog
+              attach="fog"
+              args={
+                firstPersonAuthored
+                  ? [
+                      FIRST_PERSON_ATMOSPHERE.fogColor,
+                      FIRST_PERSON_ATMOSPHERE.fogNear,
+                      FIRST_PERSON_ATMOSPHERE.fogFar,
+                    ]
+                  : [
+                      ISOMETRIC_ATMOSPHERE.fogColor,
+                      ISOMETRIC_ATMOSPHERE.fogNear,
+                      ISOMETRIC_ATMOSPHERE.fogFar,
+                    ]
+              }
+            />
+          )}
           {firstPersonAuthored && (
             <PlayAtmosphereRig firstPerson={firstPersonActive} />
           )}
           <BlackStarLightRig
             playerPos={visualPlayerPos}
-            ambientLight={activeMap.ambient_light ?? 0.08}
+            palette={
+              backroomsLevelZeroActive ? "backrooms" : "black_star"
+            }
+            ambientLight={
+              backroomsLevelZeroActive
+                ? BACKROOMS_LEVEL_ZERO_PLAY_AMBIENT_LIGHT
+                : activeMap.ambient_light ?? 0.08
+            }
             shadowsEnabled={
+              !thirdPersonActive &&
               (visualPreset === "high" || visualPreset === "ultra") &&
+              !largePlayMap &&
               !bottomPanelOpen
             }
           />
@@ -11391,7 +11934,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             playerFacing={renderedPlayerFacing}
             playerSpriteId={saveData.player?.sprite_id}
             worldItems={worldItemsRender}
-            extraPlacements={containerRenderPlacements}
+            extraPlacements={extraRenderPlacements}
             onCellClick={
               thirdPersonActive && !targetingSkillId && !verbTargeting
                 ? undefined
@@ -11438,6 +11981,10 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                 : cameraFocusOverride || renderedFocusPos
             }
             renderRadius={playRenderRadius}
+            architectureRadius={playArchitectureRadius}
+            renderForward={
+              thirdPersonActive ? thirdPersonStreamDirection : undefined
+            }
             fogOfWar={fogOfWar}
             fogResolution={(gamePackage.settings?.fog_los_resolution as "macro" | "fine" | undefined) ?? "macro"}
             authoritativeVisibility={viewerVisibilityPresentation}
@@ -11446,7 +11993,23 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             showMemoryDebug={showMemoryDebug}
             performanceMode={visualPreset === "performance"}
             authoritativePointLightBudget={
-              PLAY_AUTHORITATIVE_POINT_LIGHT_BUDGET[visualPreset]
+              resolvePlayPointLightBudget(
+                visualPreset,
+                PLAY_AUTHORITATIVE_POINT_LIGHT_BUDGET[visualPreset],
+                activeMapCellCount,
+              )
+            }
+            presentationPointLightBudget={
+              resolvePlayPointLightBudget(
+                visualPreset,
+                PLAY_PRESENTATION_POINT_LIGHT_BUDGET[visualPreset],
+                activeMapCellCount,
+              )
+            }
+            presentationShadowsEnabled={
+              thirdPersonActive &&
+              visualPreset !== "performance" &&
+              !bottomPanelOpen
             }
             initialExplored={rendererExploredCells}
             onExplore={queueExploredCells}
@@ -11463,7 +12026,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
 
         {/* Virtual Joystick touch zone. Third person reserves the right half
             for camera look, while mouse grid selection remains on the canvas. */}
-        {!levelUpOpen && !targetingSkillId && !verbTargeting && !activeShopId && !activeDialogueId && !activeDocumentId && !activeContainerId && !activeAttendNodePanel && (
+        {!levelUpOpen && !targetingSkillId && !verbTargeting && !showInventory && !showSkills && !showSaveMenu && !showJournal && !showGameMenu && !activeShopId && !activeDialogueId && !activeDocumentId && !activeContainerId && !activeAttendNodePanel && (
           <div
             ref={joystickOverlayRef}
             className="absolute inset-0 z-10"
@@ -11513,37 +12076,107 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           </div>
         )}
 
-        {/* Floating stance / Act controls. Stealth remains reachable while a
-            target cursor is open so it can deliberately cancel that action. */}
-        {!levelUpOpen && !activeCutscene?.is_blocking && !showInventory && !showSkills && !showSaveMenu && !showJournal && !successionNoticeOpen && !activeShopId && !activeDialogueId && !activeDocumentId && !activeContainerId && !activeAttendNodePanel && (
-          <div className="absolute right-3 z-20 flex flex-col gap-2 pointer-events-auto" style={{ bottom: 'calc(0.75rem + env(safe-area-inset-bottom))' }}>
+        {/* Exploration controls stay quiet until the world offers an action. */}
+        {!inCombat &&
+          !levelUpOpen &&
+          !activeCutscene?.is_blocking &&
+          !showInventory &&
+          !showSkills &&
+          !showSaveMenu &&
+          !showJournal &&
+          !showGameMenu &&
+          !activeShopId &&
+          !activeDialogueId &&
+          !activeDocumentId &&
+          !activeContainerId &&
+          !activeAttendNodePanel && (
+          <div
+            className="absolute right-3 z-20 flex flex-col items-end gap-2 pointer-events-auto"
+            style={{ bottom: "calc(0.75rem + env(safe-area-inset-bottom))" }}
+          >
+            {contextActionMenuOpen && contextualActionOptions.length > 0 && (
+              <div
+                data-testid="context-action-menu"
+                className="mb-1 min-w-36 overflow-hidden rounded-sm border border-neutral-700/80 bg-black/88 p-1 shadow-[0_0_24px_rgba(0,0,0,0.9)] backdrop-blur-sm"
+              >
+                {contextualActionOptions.map((option) => (
+                  <button
+                    key={option.id}
+                    type="button"
+                    onClick={option.action}
+                    className="block w-full rounded-sm px-3 py-2 text-left font-[family-name:var(--font-display)] text-[10px] font-bold uppercase tracking-widest text-neutral-200 transition hover:bg-neutral-800 hover:text-white"
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            )}
             <button
               type="button"
               data-testid="stealth-stance-toggle"
               aria-pressed={playerStealthActive}
-              className={`flex h-11 w-12 select-none touch-manipulation flex-col items-center justify-center gap-0.5 rounded-full border-2 shadow-[0_0_15px_rgba(0,0,0,0.8)] transition-all active:scale-90 active:brightness-150 sm:h-14 sm:w-16 ${
+              className={`flex h-9 w-9 select-none touch-manipulation items-center justify-center rounded-full border shadow-[0_0_15px_rgba(0,0,0,0.8)] transition-all active:scale-90 active:brightness-150 ${
                 playerStealthActive
-                  ? "border-violet-300 bg-violet-950/95 text-violet-100 shadow-[0_0_18px_rgba(139,92,246,0.45)]"
-                  : "border-slate-500 bg-ui-panel text-slate-300"
+                  ? "border-violet-300/90 bg-violet-950/88 text-violet-100"
+                  : "border-neutral-700/80 bg-black/68 text-neutral-400"
               }`}
               onClick={toggleStealthMode}
               title={`${playerStealthActive ? "Exit" : "Enter"} stealth mode (C)`}
             >
-              <Eye className="h-4 w-4 drop-shadow-md sm:h-5 sm:w-5" />
-              <span className="text-[7px] font-[family-name:var(--font-display)] font-bold uppercase tracking-widest sm:text-[8px]">
-                {playerStealthActive ? "Stand" : "Sneak"}
-              </span>
+              <Eye className="h-4 w-4 drop-shadow-md" />
             </button>
-            {!targetingSkillId && !verbTargeting ? (
+            {!targetingSkillId && !verbTargeting && contextualActLabel ? (
               <button
-                className="w-12 h-12 sm:w-16 sm:h-16 bg-ui-panel active:brightness-150 rounded-full flex flex-col items-center justify-center active:scale-90 transition-all select-none shadow-[0_0_15px_rgba(0,0,0,0.8)] border-ui-accent text-[var(--color-ui-accent)] touch-manipulation gap-0.5"
-                style={{ borderStyle: "solid", borderWidth: "2px" }}
-                onClick={handleAct}
-                title="Interact / Act"
+                data-testid="context-act-button"
+                className="flex min-h-11 max-w-52 select-none touch-manipulation items-center gap-2 rounded-sm border border-neutral-500/75 bg-black/78 px-3 py-2 text-neutral-100 shadow-[0_0_20px_rgba(0,0,0,0.86)] backdrop-blur-sm transition active:scale-[0.98] active:brightness-125"
+                onPointerDown={(event) => {
+                  event.stopPropagation();
+                  actHoldTriggeredRef.current = false;
+                  if (actHoldTimerRef.current !== null) {
+                    window.clearTimeout(actHoldTimerRef.current);
+                  }
+                  actHoldTimerRef.current = window.setTimeout(() => {
+                    actHoldTimerRef.current = null;
+                    if (contextualActionOptions.length <= 1) return;
+                    actHoldTriggeredRef.current = true;
+                    setContextActionMenuOpen(true);
+                    playSfx("ui_click", {
+                      volume: 0.16,
+                      cooldownMs: 100,
+                    });
+                  }, 420);
+                }}
+                onPointerUp={(event) => {
+                  event.stopPropagation();
+                  if (actHoldTimerRef.current !== null) {
+                    window.clearTimeout(actHoldTimerRef.current);
+                    actHoldTimerRef.current = null;
+                  }
+                  if (!actHoldTriggeredRef.current) handleAct();
+                  actHoldTriggeredRef.current = false;
+                }}
+                onPointerCancel={() => {
+                  if (actHoldTimerRef.current !== null) {
+                    window.clearTimeout(actHoldTimerRef.current);
+                    actHoldTimerRef.current = null;
+                  }
+                  actHoldTriggeredRef.current = false;
+                }}
+                onContextMenu={(event) => event.preventDefault()}
+                title={
+                  contextualActionOptions.length > 1
+                    ? `${contextualActLabel}. Hold for options.`
+                    : contextualActLabel
+                }
               >
-                <Hand className="w-5 h-5 sm:w-7 sm:h-7 drop-shadow-md" />
-                <span className="text-[8px] font-[family-name:var(--font-display)] font-bold tracking-widest uppercase opacity-90 text-accent-glow">
-                  Act
+                <Hand className="h-4 w-4 shrink-0" />
+                <span className="text-left font-[family-name:var(--font-display)] text-[10px] font-bold uppercase tracking-wider">
+                  {contextualActLabel}
+                  {contextualActionOptions.length > 1 && (
+                    <span className="mt-0.5 block text-[7px] tracking-widest text-neutral-500">
+                      Hold for options
+                    </span>
+                  )}
                 </span>
               </button>
             ) : null}
@@ -11630,7 +12263,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             >
               {controlledActor
                 ? controlledActor.isPlayer
-                  ? "You act — the field answers"
+                  ? "Steve acts"
                   : `${controlledActor.name.split(" ")[0]} acts — the field answers`
                 : "Resolving..."}
             </div>
@@ -11801,88 +12434,53 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
 
         {/* HUD / Controls Overlay */}
         <div className="absolute top-2 left-2 z-20 flex flex-col gap-1 pointer-events-auto">
-          {/* Player Vitals - compact */}
-          <div
-            className="px-2.5 py-2 sm:px-4 sm:py-3 bg-ui-panel border-ui-accent rounded-sm shadow-[0_0_20px_rgba(0,0,0,0.8)] flex flex-col gap-1.5 sm:gap-2.5 w-36 sm:w-48"
-            style={{ borderStyle: "solid", borderWidth: "2px" }}
-          >
-            {currentIntercessor && (
-              <div className="border-b border-[var(--color-ui-accent-dark)]/45 pb-1">
-                <div className="truncate font-serif text-[10px] font-bold text-[var(--color-ui-text)] sm:text-xs" title={currentIntercessor.display_name}>
-                  {currentIntercessor.display_name}
-                </div>
-                <div className="font-[family-name:var(--font-display)] text-[7px] font-bold uppercase tracking-[0.2em] text-[var(--color-ui-accent)] sm:text-[8px]">
-                  Intercessor {currentIntercessor.generation} · Expedition {saveData.world_state_layers?.expedition.index || 1}
-                </div>
-              </div>
-            )}
-            <div>
-              <div className="flex justify-between items-end mb-0.5 px-0.5">
-                <span className="text-[#e63946] text-[9px] sm:text-[11px] font-[family-name:var(--font-display)] font-bold tracking-widest uppercase">Vitality</span>
-                <span className="font-serif font-bold text-[9px] sm:text-[11px] text-[var(--color-ui-text)] drop-shadow-sm">
-                  {saveData.playerStats.hp} / {saveData.playerStats.max_hp}
+          {survivalVitalsVisible && (
+            <div
+              data-testid="contextual-survival-hud"
+              className="w-36 rounded-sm border border-red-950/80 bg-black/72 px-2.5 py-2 text-neutral-100 shadow-[0_0_22px_rgba(0,0,0,0.82)] backdrop-blur-[2px] sm:w-44"
+            >
+              <div className="mb-1.5 flex items-center justify-between gap-2">
+                <span className="font-[family-name:var(--font-display)] text-[9px] font-bold uppercase tracking-[0.22em] text-neutral-300">
+                  Steve
+                </span>
+                <span className="text-[9px] font-bold text-red-200">
+                  {saveData.playerStats.hp}/{saveData.playerStats.max_hp}
                 </span>
               </div>
-              <div className="w-full bg-black/80 h-2 border border-[#4a1010] shadow-[inset_0_0_5px_rgba(0,0,0,1)] relative">
+              <div className="h-1.5 overflow-hidden bg-neutral-950">
                 <div
-                  className="h-full bg-gradient-to-r from-[#8b1c1c] to-[#e63946] transition-all duration-300 shadow-[0_0_8px_rgba(230,57,70,0.5)]"
+                  className="h-full bg-gradient-to-r from-red-950 via-red-700 to-red-400 transition-all duration-300"
                   style={{
-                    width: `${Math.max(0, Math.min(100, (saveData.playerStats.hp / saveData.playerStats.max_hp) * 100))}%`,
+                    width: `${Math.max(
+                      0,
+                      Math.min(
+                        100,
+                        (saveData.playerStats.hp /
+                          Math.max(1, saveData.playerStats.max_hp)) *
+                          100,
+                      ),
+                    )}%`,
                   }}
                 />
               </div>
+              {(saveData.playerStats.energy || 0) < 1000 && (
+                <div className="mt-1.5 h-1 overflow-hidden bg-neutral-950">
+                  <div
+                    className="h-full bg-amber-200/80 transition-all duration-200"
+                    style={{
+                      width: `${Math.max(
+                        0,
+                        Math.min(100, (saveData.playerStats.energy || 0) / 10),
+                      )}%`,
+                    }}
+                  />
+                </div>
+              )}
             </div>
-            <div>
-              <div className="flex justify-between items-end mb-0.5 px-0.5">
-                <span className="text-[#457b9d] text-[9px] sm:text-[11px] font-[family-name:var(--font-display)] font-bold tracking-widest uppercase">Aether</span>
-                <span className="font-serif font-bold text-[9px] sm:text-[11px] text-[var(--color-ui-text)] drop-shadow-sm">
-                  {saveData.playerStats.mp ?? 10} / {saveData.playerStats.max_mp ?? 10}
-                </span>
-              </div>
-              <div className="w-full bg-black/80 h-2 border border-[#0f1f38] shadow-[inset_0_0_5px_rgba(0,0,0,1)] relative">
-                <div
-                  className="h-full bg-gradient-to-r from-[#1d3557] to-[#457b9d] transition-all duration-300 shadow-[0_0_8px_rgba(69,123,157,0.5)]"
-                  style={{
-                    width: `${Math.max(0, Math.min(100, ((saveData.playerStats.mp ?? 10) / (saveData.playerStats.max_mp ?? 10)) * 100))}%`,
-                  }}
-                />
-              </div>
-            </div>
-            <div className="flex justify-between font-serif text-[9px] text-[var(--color-ui-text)] px-0.5 font-bold">
-              <span title="Attack" className="flex items-center gap-0.5"><span className="text-[var(--color-ui-accent)]">⚔</span> {saveData.playerStats.attack}</span>
-              <span title="Defense" className="flex items-center gap-0.5"><span className="text-[var(--color-ui-accent)]">🛡</span> {saveData.playerStats.defense}</span>
-              <span title="Speed" className="flex items-center gap-0.5"><span className="text-[var(--color-ui-accent)]">⚡</span> {saveData.playerStats.speed}</span>
-            </div>
-            <div className="pt-1 border-t border-[var(--color-ui-accent-dark)]/35">
-              <div className="flex items-center justify-between px-0.5">
-                <span className="text-[var(--color-ui-accent)] text-[9px] sm:text-[10px] font-[family-name:var(--font-display)] font-bold tracking-widest uppercase">
-                  Level {playerLevel}
-                </span>
-                <span className="font-serif text-[8px] sm:text-[9px] font-bold text-[var(--color-ui-text)]">
-                  {xpRemaining} XP
-                  {pendingLevelUps > 0 ? ` +${pendingLevelUps}` : ""}
-                </span>
-              </div>
-              <div className="mt-1 h-1.5 w-full border border-[var(--color-ui-accent-dark)] bg-black/75">
-                <div
-                  className="h-full bg-gradient-to-r from-[var(--color-ui-accent-dark)] to-[var(--color-ui-accent)] transition-all duration-300"
-                  style={{ width: `${xpProgress}%` }}
-                />
-              </div>
-            </div>
-            <div className="pt-1 border-t border-[var(--color-ui-accent-dark)]/50 flex justify-between items-center px-0.5">
-              <span className="text-[var(--color-ui-accent)] text-[9px] sm:text-[11px] font-[family-name:var(--font-display)] font-bold tracking-widest uppercase">
-                {clockPhase}
-              </span>
-              <span className="font-serif font-bold text-[9px] sm:text-[10px] text-[var(--color-ui-text)] drop-shadow-sm">
-                Day {clockDay} · {String(clockHour).padStart(2, "0")}:
-                {String(clockMinute).padStart(2, "0")}
-              </span>
-            </div>
-          </div>
+          )}
 
           {/* Party panel — the people beside you, with their real stats */}
-          {partyMemberIds.length > 0 && (
+          {inCombat && partyMemberIds.length > 0 && (
             <div
               className="px-2.5 py-2 sm:px-4 sm:py-3 bg-ui-panel border-[var(--color-ui-accent-dark)] rounded-sm shadow-[0_0_20px_rgba(0,0,0,0.8)] flex flex-col gap-1.5 sm:gap-2.5 w-36 sm:w-48 mt-0.5"
               style={{ borderStyle: "solid", borderWidth: "1px" }}
@@ -11935,40 +12533,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             </div>
           )}
 
-          {!overlayOpen && (
-            <div
-              data-testid="stealth-stance-indicator"
-              data-stealth-active={String(playerStealthActive)}
-              data-noise-level={playerStealthActive ? "quiet" : "normal"}
-              className={`mt-0.5 w-36 rounded-sm border px-2.5 py-2 shadow-[0_0_20px_rgba(0,0,0,0.75)] sm:w-48 ${
-                playerStealthActive
-                  ? "border-violet-500/75 bg-violet-950/90 text-violet-100"
-                  : "border-slate-700/75 bg-slate-950/88 text-slate-200"
-              }`}
-              style={{ borderStyle: "solid", borderWidth: "1px" }}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="flex items-center gap-1 text-[9px] font-[family-name:var(--font-display)] font-bold uppercase tracking-widest sm:text-[10px]">
-                  <Eye className="h-3 w-3 shrink-0 sm:h-3.5 sm:w-3.5" />
-                  Stance
-                </span>
-                <span className="text-[9px] font-bold uppercase tracking-wide sm:text-[10px]">
-                  {playerStealthActive ? "Stealth" : "Normal"}
-                </span>
-              </div>
-              <div className="mt-1 flex items-center justify-between gap-2 text-[8px] font-bold uppercase tracking-wide opacity-90 sm:text-[9px]">
-                <span>{playerStealthActive ? "Quiet steps" : "Normal steps"}</span>
-                <span>{playerStealthActive ? "Slower" : "Full pace"}</span>
-              </div>
-              {partyMemberIds.length > 0 && (
-                <div className="mt-1 border-t border-current/20 pt-1 font-serif text-[8px] leading-tight opacity-75 sm:text-[9px]">
-                  Collective stance: followers move {playerStealthActive ? "quietly" : "normally"} with you.
-                </div>
-              )}
-            </div>
-          )}
-
-          {!overlayOpen && perceptionSnapshot && (
+          {!overlayOpen &&
+            perceptionSnapshot &&
+            ALERTNESS_RANK[stealthAlertness] > 0 && (
             <div
               className={`mt-0.5 w-36 rounded-sm border px-2.5 py-2 shadow-[0_0_20px_rgba(0,0,0,0.75)] sm:w-48 ${ALERTNESS_HUD_STYLES[stealthAlertness]}`}
               style={{ borderStyle: "solid", borderWidth: "1px" }}
@@ -11988,7 +12555,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             </div>
           )}
 
-          {!overlayOpen && activeAlderamonticoGridConfig && (
+          {!overlayOpen && showPerceptionDebug && activeAlderamonticoGridConfig && (
             <div
               className="mt-0.5 w-36 rounded-sm border border-emerald-700/80 bg-neutral-950/88 px-2.5 py-2 text-emerald-100 shadow-[0_0_20px_rgba(0,0,0,0.75)] sm:w-48"
               style={{ borderStyle: "solid", borderWidth: "1px" }}
@@ -12215,7 +12782,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
 
           {/* Danger panel — who's hunting you, how hurt they are.
               In combat the initiative strip carries this information. */}
-          {!inCombat && visibleNearbyHostiles.length > 0 && (
+          {showPerceptionDebug && !inCombat && visibleNearbyHostiles.length > 0 && (
             <div
               className="px-4 py-3 bg-ui-panel border-[#8b1c1c] rounded-sm shadow-[0_0_20px_rgba(0,0,0,0.8)] flex flex-col gap-2.5 w-48 mt-1"
               style={{ borderStyle: "solid", borderWidth: "1px" }}
@@ -12253,173 +12820,32 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           )}
         </div>
 
-        {/* Top-right icon buttons */}
-        <div className="absolute top-2 right-2 z-20 flex flex-col items-end gap-1.5 pointer-events-auto">
-          <div className="flex gap-1.5">
-            <button
-              onClick={() => {
-                playSfx("ui_click", { volume: 0.22, cooldownMs: 120 });
-                setShowInventory(true);
-              }}
-              className="w-8 h-8 sm:w-10 sm:h-10 bg-neutral-900/90 border border-neutral-700 hover:bg-neutral-700 text-neutral-300 rounded-full shadow-lg transition-all flex items-center justify-center"
-              title="Inventory"
-            >
-              <Briefcase className="w-4 h-4 sm:w-5 sm:h-5" />
-            </button>
-            <button
-              onClick={() => {
-                playSfx("ui_click", { volume: 0.22, cooldownMs: 120 });
-                setShowSkills(true);
-              }}
-              className="w-8 h-8 sm:w-10 sm:h-10 bg-indigo-900/90 border border-indigo-700 hover:bg-indigo-700 text-indigo-200 rounded-full shadow-lg transition-all flex items-center justify-center"
-              title="Spells & Skills"
-            >
-              <Sparkles className="w-4 h-4 sm:w-5 sm:h-5" />
-            </button>
-            <button
-              onClick={() => {
-                clearInputState();
-                playSfx("ui_click", { volume: 0.22, cooldownMs: 120 });
-                setShowJournal(true);
-              }}
-              className="w-8 h-8 sm:w-10 sm:h-10 bg-sky-950/90 border border-sky-800 hover:bg-sky-800 text-sky-200 rounded-full shadow-lg transition-all flex items-center justify-center"
-              title="Journal"
-            >
-              <BookOpen className="w-4 h-4 sm:w-5 sm:h-5" />
-            </button>
-            <button
-              onClick={() => {
-                clearInputState();
-                playSfx("save_chime", { volume: 0.32, cooldownMs: 120 });
-                setShowSaveMenu(true);
-              }}
-              className="w-8 h-8 sm:w-10 sm:h-10 bg-amber-950/90 border border-amber-800 hover:bg-amber-800 text-amber-200 rounded-full shadow-lg transition-all flex items-center justify-center"
-              title="Save / Load"
-            >
-              <Save className="w-4 h-4 sm:w-5 sm:h-5" />
-            </button>
-            {(saveData.party_members || []).length > 0 && (
-              <button
-                onClick={handlePartyTalk}
-                className="w-8 h-8 sm:w-10 sm:h-10 bg-emerald-900/90 border border-emerald-700 hover:bg-emerald-700 text-emerald-100 rounded-full shadow-lg transition-all flex items-center justify-center"
-                title="Talk to Party"
-              >
-                <MessageCircle className="w-4 h-4 sm:w-5 sm:h-5" />
-              </button>
-            )}
-          </div>
-          {!overlayOpen &&
-            !targetingSkillId &&
-            !showInventory &&
-            !showSkills &&
-            !showSaveMenu &&
-            !showJournal && (
-              <div className="flex h-8 items-center gap-1.5 rounded-sm border border-neutral-700/80 bg-neutral-950/88 px-2 shadow-lg backdrop-blur-sm sm:h-9">
-                <SlidersHorizontal className="h-3.5 w-3.5 shrink-0 text-cyan-200/90 sm:h-4 sm:w-4" />
-                <select
-                  aria-label="Visual scaling preset"
-                  title={`Visual scaling: ${visualConfig.label} (${effectivePlayDpr.toFixed(2)} DPR)`}
-                  value={visualPreset}
-                  onPointerDown={(event) => {
-                    event.stopPropagation();
-                    clearInputState();
-                  }}
-                  onFocus={clearInputState}
-                  onBlur={clearInputState}
-                  onKeyDown={(event) => {
-                    if (
-                      isCombatCommandKey(event.key.toLowerCase()) ||
-                      event.key.toLowerCase() === "q" ||
-                      event.key.toLowerCase() === "e"
-                    ) {
-                      clearInputState();
-                    }
-                    event.stopPropagation();
-                  }}
-                  onKeyUp={(event) => {
-                    clearInputState();
-                    event.stopPropagation();
-                  }}
-                  onChange={(event) => {
-                    clearInputState();
-                    const nextPreset = event.target.value as VisualScalePreset;
-                    setVisualPreset(nextPreset);
-                    playSfx("ui_click", { volume: 0.18, cooldownMs: 120 });
-                  }}
-                  className="h-7 w-[7.25rem] bg-transparent font-[family-name:var(--font-display)] text-[10px] font-bold uppercase tracking-wider text-neutral-100 outline-none sm:w-[8.25rem] sm:text-[11px]"
-                >
-                  {VISUAL_SCALE_PRESET_ORDER.map((preset) => (
-                    <option
-                      key={preset}
-                      value={preset}
-                      className="bg-neutral-950 text-neutral-100"
-                    >
-                      {SCREEN_VISUAL_PRESETS[preset].label}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  onPointerDown={(event) => { event.stopPropagation(); clearInputState(); }}
-                  onClick={() => { clearInputState(); setShowPerceptionDebug((value) => !value); }}
-                  title="Illumination, sensory causes, and evidence cells"
-                  className={`h-7 shrink-0 rounded-sm px-2 font-[family-name:var(--font-display)] text-[10px] font-bold uppercase tracking-wider transition-colors sm:text-[11px] ${
-                    showPerceptionDebug
-                      ? "bg-cyan-500/25 text-cyan-100"
-                      : "text-neutral-400 hover:text-neutral-100"
-                  }`}
-                >
-                  Senses
-                </button>
-                <button
-                  onPointerDown={(event) => { event.stopPropagation(); clearInputState(); }}
-                  onClick={() => { clearInputState(); setShowMemoryDebug((value) => !value); }}
-                  title="Unknown / Remembered / Visible presentation states"
-                  className={`h-7 shrink-0 rounded-sm px-2 font-[family-name:var(--font-display)] text-[10px] font-bold uppercase tracking-wider transition-colors sm:text-[11px] ${
-                    showMemoryDebug
-                      ? "bg-violet-500/25 text-violet-100"
-                      : "text-neutral-400 hover:text-neutral-100"
-                  }`}
-                >
-                  Memory
-                </button>
-                <button
-                  onPointerDown={(event) => { event.stopPropagation(); clearInputState(); }}
-                  onClick={() => {
-                    clearInputState();
-                    setFogOfWar(!fogOfWar);
-                    playSfx("ui_click", { volume: 0.18, cooldownMs: 120 });
-                  }}
-                  title={fogOfWar ? "Fog of war: on" : "Fog of war: off"}
-                  className={`h-7 shrink-0 rounded-sm px-2 font-[family-name:var(--font-display)] text-[10px] font-bold uppercase tracking-wider transition-colors sm:text-[11px] ${
-                    fogOfWar ? "bg-cyan-500/25 text-cyan-100" : "text-neutral-400 hover:text-neutral-100"
-                  }`}
-                >
-                  Fog
-                </button>
-                <button
-                  onPointerDown={(event) => { event.stopPropagation(); clearInputState(); }}
-                  onClick={() => { clearInputState(); setShowEngineEvents((v) => !v); }}
-                  title="Engine-core event stream (debug)"
-                  className={`h-7 shrink-0 rounded-sm px-2 font-[family-name:var(--font-display)] text-[10px] font-bold uppercase tracking-wider transition-colors sm:text-[11px] ${
-                    showEngineEvents ? "bg-violet-500/25 text-violet-100" : "text-neutral-400 hover:text-neutral-100"
-                  }`}
-                >
-                  Events
-                </button>
-                <button
-                  onPointerDown={(event) => { event.stopPropagation(); clearInputState(); }}
-                  onClick={() => { clearInputState(); setShowBehaviorIntents((value) => !value); }}
-                  title="NPC behavior intent tags and decision log"
-                  className={`h-7 shrink-0 rounded-sm px-2 font-[family-name:var(--font-display)] text-[10px] font-bold uppercase tracking-wider transition-colors sm:text-[11px] ${
-                    showBehaviorIntents
-                      ? "bg-amber-500/25 text-amber-100"
-                      : "text-neutral-400 hover:text-neutral-100"
-                  }`}
-                >
-                  Intents
-                </button>
-              </div>
-            )}
+        {/* Minimal exploration chrome: inventory and one pause/settings menu. */}
+        <div className="absolute right-2 top-2 z-20 flex gap-1.5 pointer-events-auto">
+          <button
+            onClick={() => {
+              clearInputState();
+              playSfx("ui_click", { volume: 0.2, cooldownMs: 120 });
+              setShowInventory(true);
+            }}
+            className="grid h-9 w-9 place-items-center rounded-full border border-neutral-700/70 bg-black/68 text-neutral-300 shadow-lg backdrop-blur-[2px] transition hover:border-neutral-400 hover:text-white"
+            title="Inventory"
+          >
+            <Briefcase className="h-4 w-4" />
+          </button>
+          <button
+            data-testid="backrooms-game-menu"
+            onClick={() => {
+              clearInputState();
+              playSfx("ui_click", { volume: 0.2, cooldownMs: 120 });
+              setShowGameMenu(true);
+            }}
+            className="grid h-9 w-9 place-items-center rounded-full border border-neutral-700/70 bg-black/68 text-neutral-300 shadow-lg backdrop-blur-[2px] transition hover:border-neutral-400 hover:text-white"
+            title="Menu"
+          >
+            <SlidersHorizontal className="h-4 w-4" />
+          </button>
+        </div>
           {showPerceptionDebug && (
             <div className="pointer-events-none absolute left-2 top-24 z-30 w-[calc(100vw-1rem)] max-w-80 rounded-sm border border-cyan-800/70 bg-neutral-950/94 p-2 font-mono text-[10px] leading-snug text-cyan-100 shadow-lg backdrop-blur-sm sm:top-80">
               <div className="mb-1 font-bold uppercase tracking-wider text-cyan-300">Perception evidence</div>
@@ -12598,36 +13024,8 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
               </div>
             </div>
           )}
-          {activeQuestStep &&
-            !targetingSkillId &&
-            !activeShopId &&
-            !activeDialogueId &&
-            !activeDocumentId &&
-            !activeContainerId &&
-            !showInventory &&
-            !showSkills &&
-            !showSaveMenu &&
-            !showJournal && (
-              <button
-                onClick={() => {
-                  clearInputState();
-                  playSfx("ui_click", { volume: 0.22, cooldownMs: 120 });
-                  setShowJournal(true);
-                }}
-                className="max-w-[15rem] sm:max-w-[18rem] rounded-sm border border-sky-800/80 bg-neutral-950/86 px-3 py-2 text-left shadow-lg transition-colors hover:bg-sky-950/90"
-                title="Open Journal"
-              >
-                <div className="flex items-center gap-2 text-[10px] font-[family-name:var(--font-display)] font-bold uppercase tracking-widest text-sky-300">
-                  <ListChecks className="h-3.5 w-3.5 shrink-0" />
-                  <span>Current Objective</span>
-                </div>
-                <div className="mt-1 line-clamp-2 text-xs font-serif leading-snug text-neutral-100">
-                  {activeQuestStep.text}
-                </div>
-              </button>
-            )}
           {targetingSkillId && (
-            <div className="flex flex-col gap-2 items-end">
+            <div className="absolute right-2 top-14 z-20 flex flex-col items-end gap-2 pointer-events-auto">
               <button
                 onClick={() => {
                   playSfx("ui_back", { volume: 0.22, cooldownMs: 120 });
@@ -12651,7 +13049,6 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
               )}
             </div>
           )}
-        </div>
 
         {workstationPromptVisible && reachableWorkstation && (
           <div
@@ -12826,72 +13223,191 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         />
       )}
 
-      {/* Succession is persisted before this notice appears. Refreshing here
-          restores the same transition instead of replaying the death. */}
-      {successionNoticeOpen && successionNotice && successionDeceased && successionSuccessor && (
+      {showGameMenu && saveData.playerStats.hp > 0 && (
         <div
-          data-testid="succession-overlay"
-          className="absolute inset-0 z-50 flex items-center justify-center bg-[radial-gradient(ellipse_at_center,rgba(45,28,69,0.93)_0%,rgba(3,3,8,0.98)_72%)] p-4"
+          data-testid="backrooms-menu-overlay"
+          className="absolute inset-0 z-50 flex items-center justify-center bg-black/72 p-4 backdrop-blur-[2px]"
         >
-          <div className="w-full max-w-xl border border-violet-700/80 bg-neutral-950/94 p-6 text-center shadow-[0_0_60px_rgba(76,29,149,0.45)] sm:p-8">
-            <div className="font-[family-name:var(--font-display)] text-[10px] font-bold uppercase tracking-[0.34em] text-violet-300">
-              Expedition {successionDeceased.death?.expedition_index || ""} closed
-            </div>
-            <h1 className="mt-3 font-serif text-4xl font-bold text-red-300 sm:text-5xl">
-              {successionDeceased.display_name} died
-            </h1>
-            <p className="mx-auto mt-4 max-w-md font-serif text-sm leading-relaxed text-neutral-300">
-              The map remembers. A persistent ghost and an independent death bundle now remain at {successionDeceased.death?.map_id || "the last map"}
-              {successionDeceased.death ? ` · ${successionDeceased.death.cell[0]},${successionDeceased.death.cell[1]}` : ""}.
-            </p>
-            <div className="mx-auto mt-6 max-w-sm border-y border-violet-900/70 py-4">
-              <div className="font-[family-name:var(--font-display)] text-[9px] font-bold uppercase tracking-[0.28em] text-violet-400">
-                The next Intercessor
+          <div className="w-full max-w-lg overflow-hidden rounded-sm border border-[#a39252]/45 bg-[#090a08]/96 shadow-[0_0_70px_rgba(0,0,0,0.95)]">
+            <div className="flex items-center justify-between border-b border-[#a39252]/25 px-5 py-4">
+              <div>
+                <div className="font-[family-name:var(--font-display)] text-[9px] font-bold uppercase tracking-[0.34em] text-[#b7aa72]">
+                  Backrooms
+                </div>
+                <h2 className="mt-1 font-serif text-xl font-bold text-neutral-100">
+                  Steve
+                </h2>
               </div>
-              <div className="mt-1 font-serif text-2xl font-bold text-violet-100">
-                {successionSuccessor.display_name}
-              </div>
-              <div className="mt-1 text-[10px] font-bold uppercase tracking-widest text-neutral-500">
-                Generation {successionSuccessor.generation} · Expedition {saveData.world_state_layers?.expedition.index || ""}
-              </div>
-            </div>
-            <div className="mt-6 flex flex-col justify-center gap-3 sm:flex-row">
               <button
                 onClick={() => {
-                  clearInputState();
-                  playSfx("ui_click", { volume: 0.26, cooldownMs: 120 });
-                  commitRuntimeSave(acknowledgeSuccessionTransition(saveData));
-                  addLog(`${successionSuccessor.display_name} begins the next expedition.`);
+                  playSfx("ui_back", { volume: 0.18, cooldownMs: 120 });
+                  setShowGameMenu(false);
                 }}
-                className="border border-violet-500 bg-violet-950/80 px-7 py-3 font-[family-name:var(--font-display)] text-xs font-bold uppercase tracking-[0.2em] text-violet-100 transition hover:bg-violet-900"
+                className="grid h-9 w-9 place-items-center rounded-full border border-neutral-700 text-neutral-400 transition hover:border-neutral-400 hover:text-white"
+                title="Resume"
               >
-                Continue as {successionSuccessor.display_name}
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 p-4">
+              <button
+                onClick={() => setShowGameMenu(false)}
+                className="col-span-2 border border-[#a39252]/45 bg-[#a39252]/10 px-4 py-3 text-left font-[family-name:var(--font-display)] text-xs font-bold uppercase tracking-[0.2em] text-[#ded5ae] transition hover:bg-[#a39252]/20"
+              >
+                Resume
               </button>
               <button
                 onClick={() => {
-                  playSfx("save_chime", { volume: 0.32, cooldownMs: 120 });
+                  setShowGameMenu(false);
+                  setShowInventory(true);
+                }}
+                className="border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-left text-xs font-bold uppercase tracking-wider text-neutral-200 transition hover:border-neutral-600"
+              >
+                Inventory
+              </button>
+              <button
+                onClick={() => {
+                  setShowGameMenu(false);
+                  setShowJournal(true);
+                }}
+                className="border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-left text-xs font-bold uppercase tracking-wider text-neutral-200 transition hover:border-neutral-600"
+              >
+                Journal
+              </button>
+              <button
+                onClick={() => {
+                  setShowGameMenu(false);
                   setShowSaveMenu(true);
                 }}
-                className="border border-amber-800 bg-amber-950/70 px-6 py-3 font-[family-name:var(--font-display)] text-xs font-bold uppercase tracking-[0.2em] text-amber-100 transition hover:bg-amber-900"
+                className="col-span-2 border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-left text-xs font-bold uppercase tracking-wider text-neutral-200 transition hover:border-neutral-600"
               >
-                Load Save
+                Save / Load
               </button>
+              {(saveData.party_members || []).length > 0 && (
+                <button
+                  onClick={() => {
+                    setShowGameMenu(false);
+                    handlePartyTalk();
+                  }}
+                  className="col-span-2 border border-neutral-800 bg-neutral-950/70 px-4 py-3 text-left text-xs font-bold uppercase tracking-wider text-neutral-200 transition hover:border-neutral-600"
+                >
+                  Talk to companion
+                </button>
+              )}
             </div>
+
+            <div className="border-t border-neutral-800/80 px-4 py-3">
+              <div className="mb-2 text-[9px] font-bold uppercase tracking-[0.24em] text-neutral-500">
+                Display
+              </div>
+              <div className="flex gap-2">
+                <select
+                  aria-label="Visual scaling preset"
+                  title={`Visual scaling: ${visualConfig.label} (${effectivePlayDpr.toFixed(2)} DPR)`}
+                  value={visualPreset}
+                  onChange={(event) => {
+                    const nextPreset = event.target.value as VisualScalePreset;
+                    setVisualPreset(nextPreset);
+                    playSfx("ui_click", { volume: 0.16, cooldownMs: 120 });
+                  }}
+                  className="h-10 flex-1 border border-neutral-800 bg-black px-3 text-xs font-bold uppercase tracking-wider text-neutral-200 outline-none"
+                >
+                  {VISUAL_SCALE_PRESET_ORDER.map((preset) => (
+                    <option key={preset} value={preset}>
+                      {SCREEN_VISUAL_PRESETS[preset].label}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  onClick={() => setFogOfWar(!fogOfWar)}
+                  className={`h-10 border px-3 text-[10px] font-bold uppercase tracking-wider ${
+                    fogOfWar
+                      ? "border-[#a39252]/60 bg-[#a39252]/15 text-[#ded5ae]"
+                      : "border-neutral-800 bg-black text-neutral-500"
+                  }`}
+                >
+                  Fog {fogOfWar ? "On" : "Off"}
+                </button>
+              </div>
+            </div>
+
+            <details className="border-t border-neutral-800/80 px-4 py-3">
+              <summary className="cursor-pointer select-none text-[9px] font-bold uppercase tracking-[0.24em] text-neutral-600">
+                Developer tools
+              </summary>
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                {[
+                  {
+                    id: "senses",
+                    label: "Senses",
+                    active: showPerceptionDebug,
+                    toggle: () =>
+                      setShowPerceptionDebug((value) => !value),
+                  },
+                  {
+                    id: "memory",
+                    label: "Memory",
+                    active: showMemoryDebug,
+                    toggle: () => setShowMemoryDebug((value) => !value),
+                  },
+                  {
+                    id: "events",
+                    label: "Events",
+                    active: showEngineEvents,
+                    toggle: () => setShowEngineEvents((value) => !value),
+                  },
+                  {
+                    id: "intents",
+                    label: "Intents",
+                    active: showBehaviorIntents,
+                    toggle: () =>
+                      setShowBehaviorIntents((value) => !value),
+                  },
+                ].map((tool) => (
+                  <button
+                    key={tool.id}
+                    onClick={tool.toggle}
+                    className={`border px-3 py-2 text-[10px] font-bold uppercase tracking-wider ${
+                      tool.active
+                        ? "border-cyan-800 bg-cyan-950/40 text-cyan-100"
+                        : "border-neutral-800 bg-black text-neutral-500"
+                    }`}
+                  >
+                    {tool.label}
+                  </button>
+                ))}
+              </div>
+            </details>
           </div>
         </div>
       )}
 
-      {/* Packages may explicitly disable succession and retain conventional
-          game-over behavior. New Game is the only full campaign discard. */}
-      {!successionNoticeOpen &&
-        gamePackage.settings?.intercessor_succession?.enabled === false &&
-        saveData.playerStats.hp <= 0 && (
-        <div className="absolute inset-0 bg-red-950/80 z-50 flex flex-col items-center justify-center p-4">
-          <h1 className="text-6xl font-bold font-serif text-red-500 mb-4 tracking-widest">YOU DIED</h1>
-          <p className="text-red-200/60 mb-8 max-w-sm text-center">Succession is disabled for this package.</p>
+      {/* Steve is the only protagonist: death offers a conventional retry. */}
+      {saveData.playerStats.hp <= 0 && (
+        <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-[radial-gradient(ellipse_at_center,rgba(70,12,12,0.72)_0%,rgba(0,0,0,0.96)_72%)] p-4">
+          <div className="mb-3 text-[10px] font-bold uppercase tracking-[0.38em] text-red-300/60">
+            Steve is lost
+          </div>
+          <h1 className="mb-4 font-serif text-5xl font-bold tracking-widest text-red-500 sm:text-6xl">
+            YOU DIED
+          </h1>
+          <p className="mb-8 max-w-sm text-center text-sm text-neutral-400">
+            Load a saved point, or begin again.
+          </p>
           <div className="flex gap-4">
-            <button onClick={resetRun} className="px-8 py-3 bg-red-900 text-red-100 rounded font-bold tracking-widest">NEW CAMPAIGN</button>
-            <button onClick={() => setShowSaveMenu(true)} className="px-8 py-3 bg-amber-950 text-amber-100 border border-amber-800 rounded font-bold tracking-widest">LOAD SAVE</button>
+            <button
+              onClick={() => setShowSaveMenu(true)}
+              className="border border-neutral-600 bg-neutral-950 px-7 py-3 text-xs font-bold uppercase tracking-widest text-neutral-100"
+            >
+              Load Save
+            </button>
+            <button
+              onClick={resetRun}
+              className="border border-red-900 bg-red-950/75 px-7 py-3 text-xs font-bold uppercase tracking-widest text-red-100"
+            >
+              Start Over
+            </button>
           </div>
         </div>
       )}
@@ -13004,6 +13520,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
               </section>
 
               <section className="space-y-4">
+                {false && (
                 <div className="space-y-2" data-testid="intercessor-history">
                   <div className="flex items-center justify-between gap-2">
                     <h3 className="text-xs font-semibold uppercase tracking-wide text-violet-400">Intercessor History</h3>
@@ -13076,7 +13593,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                     </button>
                   )}
                 </div>
+                )}
 
+                {false && (
                 <div className="space-y-2" data-testid="fracture-crawl-legacy-registry">
                   <div className="flex items-center justify-between gap-2">
                     <h3 className="text-xs font-semibold uppercase tracking-wide text-fuchsia-300">Ghosts, Recovery & Glass</h3>
@@ -13139,6 +13658,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                     </div>
                   </div>
                 </div>
+                )}
 
                 <div className="space-y-2">
                   <h3 className="text-xs font-semibold uppercase tracking-wide text-neutral-500">Inventory</h3>
@@ -14403,11 +14923,11 @@ export function PlayMode() {
         <div className="relative z-10 flex h-full w-full flex-col justify-end px-6 pb-8 pt-8 sm:px-12 sm:pb-12 lg:px-16">
           <div className="max-w-[46rem]">
             <h1 className="font-[family-name:var(--font-display)] text-5xl font-black uppercase tracking-[0.18em] text-[var(--color-ui-text)] drop-shadow-[0_5px_20px_rgba(0,0,0,0.95)] sm:text-7xl lg:text-8xl">
-              {gamePackage.metadata.title || "CRPG Engine"}
+              Backrooms
             </h1>
             <div className="mt-4 h-px w-44 bg-gradient-to-r from-[var(--color-ui-accent)] via-[var(--color-ui-accent-dark)] to-transparent" />
             <p className="mt-4 font-[family-name:var(--font-display)] text-xs font-bold uppercase tracking-[0.34em] text-[var(--color-ui-accent)] drop-shadow-[0_2px_10px_rgba(0,0,0,0.9)]">
-              Version {gamePackage.metadata.version}
+              Stay quiet. Keep moving.
             </p>
           </div>
 

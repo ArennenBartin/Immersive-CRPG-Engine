@@ -124,6 +124,16 @@ export const resolveHeldFirstPersonIntent = (
   };
 };
 
+const NO_CONSUMED_LIVE_FIRST_PERSON_KEYS: ReadonlySet<string> = new Set();
+
+export const resolveLiveHeldFirstPersonIntent = (
+  heldKeys: ReadonlySet<string>,
+): HeldFirstPersonIntent =>
+  resolveHeldFirstPersonIntent(
+    heldKeys,
+    NO_CONSUMED_LIVE_FIRST_PERSON_KEYS,
+  );
+
 // Resolve forward/strafe pressure into one fine-grid step relative to the
 // facing. Components clamp to a single cell so a diagonal facing plus a
 // strafe cannot produce a two-cell lunge.

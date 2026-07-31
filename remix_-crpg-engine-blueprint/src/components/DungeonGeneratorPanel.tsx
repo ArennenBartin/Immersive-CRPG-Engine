@@ -27,6 +27,8 @@ import { DungeonRecipeSchema } from "../dungeonGen/schema";
 import {
   createInstitutionalRuinSingleMapRecipe,
   INSTITUTIONAL_RUIN_SINGLE_MAP_RECIPE_ID,
+  INSTITUTIONAL_RUIN_THEME,
+  INSTITUTIONAL_RUIN_THEME_ID,
   installInstitutionalRuinGeneratorContent,
 } from "../dungeonGen/presets/institutionalRuin";
 import {
@@ -264,10 +266,20 @@ export function DungeonGeneratorPanel() {
       ? [`id: A recipe with ID ${recipeDraft.id} already exists.`]
       : [])
     : recipeParse.error.issues.map((issue) => `${issue.path.join(".") || "recipe"}: ${issue.message}`);
+  const installedInstitutionalTheme = gamePackage.dungeon_themes.find(
+    (theme) => theme.id === INSTITUTIONAL_RUIN_THEME_ID,
+  );
+  const requiredRoomLightIds =
+    INSTITUTIONAL_RUIN_THEME.population.roomLightObjectIds;
   const contentInstalled =
     gamePackage.dungeon_themes.length > 0 &&
     gamePackage.dungeon_room_archetypes.length > 0 &&
-    gamePackage.dungeon_recipes.some((recipe) => recipe.id === INSTITUTIONAL_RUIN_SINGLE_MAP_RECIPE_ID);
+    gamePackage.dungeon_recipes.some((recipe) => recipe.id === INSTITUTIONAL_RUIN_SINGLE_MAP_RECIPE_ID) &&
+    requiredRoomLightIds.every((objectId) =>
+      installedInstitutionalTheme?.population.roomLightObjectIds.includes(
+        objectId,
+      ) &&
+      gamePackage.object_library.some((object) => object.id === objectId));
 
   const previewPackage = useMemo(
     () => buildPreviewPackage(gamePackage, result),

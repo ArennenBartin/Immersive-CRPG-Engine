@@ -239,12 +239,25 @@ const makeAuthoritativePlayerMaterial = (
     fallbackName,
   ) as THREE.MeshStandardMaterial;
   const baseColor = source.color?.clone() || new THREE.Color("#FFFFFF");
-  const material = new THREE.MeshBasicMaterial({
+  // Steve used to be converted to MeshBasicMaterial, which made him immune to
+  // every world light and left him looking pasted over the scene. Retain the
+  // authored PBR channels so the same physical lights that shape nearby walls
+  // and props also move naturally across his model.
+  const material = new THREE.MeshStandardMaterial({
     color: baseColor,
     map: source.map || null,
     alphaMap: source.alphaMap || null,
     aoMap: source.aoMap || null,
     lightMap: source.lightMap || null,
+    normalMap: source.normalMap || null,
+    normalScale: source.normalScale?.clone() || new THREE.Vector2(1, 1),
+    roughnessMap: source.roughnessMap || null,
+    metalnessMap: source.metalnessMap || null,
+    roughness: Number.isFinite(source.roughness) ? source.roughness : 0.82,
+    metalness: Number.isFinite(source.metalness) ? source.metalness : 0,
+    emissive: source.emissive?.clone() || new THREE.Color("#000000"),
+    emissiveMap: source.emissiveMap || null,
+    emissiveIntensity: Math.max(0, source.emissiveIntensity || 0),
     transparent: source.transparent,
     opacity: source.opacity,
     alphaTest: source.alphaTest,
@@ -253,7 +266,7 @@ const makeAuthoritativePlayerMaterial = (
     depthWrite: source.depthWrite,
     vertexColors: source.vertexColors,
     fog: false,
-    toneMapped: false,
+    toneMapped: true,
   });
   material.name = source.name || fallbackName;
   material.userData.crpgPlayerBaseColor = baseColor.getHex();
@@ -309,8 +322,8 @@ const cloneAssetSceneForObject = (
             "asset_material_1",
           );
       mesh.renderOrder = PLAYER_MODEL_SURFACE_RENDER_ORDER;
-      mesh.castShadow = false;
-      mesh.receiveShadow = false;
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
       return;
     }
 
@@ -1020,10 +1033,10 @@ export function AssetModelRenderer({
         ? mesh.material
         : [mesh.material];
       materials.forEach((material) => {
-        const basic = material as THREE.MeshBasicMaterial;
-        const baseColor = basic.userData.crpgPlayerBaseColor;
-        if (!basic.color || typeof baseColor !== "number") return;
-        basic.color.setHex(baseColor).multiplyScalar(brightness);
+        const litMaterial = material as THREE.MeshStandardMaterial;
+        const baseColor = litMaterial.userData.crpgPlayerBaseColor;
+        if (!litMaterial.color || typeof baseColor !== "number") return;
+        litMaterial.color.setHex(baseColor).multiplyScalar(brightness);
       });
     });
   }, [appearance, illumination, renderedScene]);

@@ -212,6 +212,7 @@ export interface DoorRef {
 
 export interface PushableObjectRef {
   key: string;
+  stackKeys?: string[];
   objectId: string;
   displayName?: string;
   cell: [number, number];
@@ -609,12 +610,16 @@ export interface InteractiveGridWorld extends GridWorld {
   resolveSkillCast?(actorId: string, skillId: string, targetCells: [number, number][]): SkillCastOutcome;
   updateCombatSession?(options: CombatSessionUpdateOptions): CombatSessionUpdateOutcome;
   advanceCombatTurn?(): CombatTurnAdvanceOutcome;
-  canResolveEnemyTurn?(actorId?: string): ValidationResult;
+  canResolveEnemyTurn?(
+    actorId?: string,
+    independentMovement?: boolean,
+  ): ValidationResult;
   resolveEnemyTurn?(
     actorId?: string,
     advanceTurn?: boolean,
     movementSteps?: number,
     allowAttack?: boolean,
+    independentMovement?: boolean,
   ): EnemyTurnOutcome;
 }
 
@@ -2398,7 +2403,10 @@ export const EnemyTurnHandler: CommandHandler = {
   validate(cmd, world) {
     const w = world as InteractiveGridWorld;
     if (!w.canResolveEnemyTurn || !w.resolveEnemyTurn) return { ok: false, reason: "unsupported" };
-    return w.canResolveEnemyTurn(cmd.actorId);
+    return w.canResolveEnemyTurn(
+      cmd.actorId,
+      cmd.params?.independentMovement === true,
+    );
   },
   resolve(cmd) {
     return [
@@ -2411,6 +2419,7 @@ export const EnemyTurnHandler: CommandHandler = {
             cmd.params?.advanceTurn !== false,
             Number(cmd.params?.movementSteps || 0) || undefined,
             cmd.params?.allowAttack !== false,
+            cmd.params?.independentMovement === true,
           );
           if (outcome.attack) {
             tw.events.emit("melee_attack_resolved", tw.tick, {

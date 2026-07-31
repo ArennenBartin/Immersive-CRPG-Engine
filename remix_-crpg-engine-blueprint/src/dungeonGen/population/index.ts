@@ -243,6 +243,122 @@ const chooseFreeCell = (
   return [...selected];
 };
 
+const populateRoomLighting = (
+  input: DungeonPopulationInput,
+  maps: Record<string, DungeonMapPopulation>,
+  diagnostics: DungeonDiagnostic[],
+): number => {
+  const objectIds = [
+    ...new Set(input.theme.population.roomLightObjectIds || []),
+  ].sort();
+  if (!objectIds.length) return 0;
+
+  const definitions = objectIds.flatMap((objectId) => {
+    const definition = input.gamePackage.object_library.find(
+      (candidate) => candidate.id === objectId,
+    );
+    if (!definition) {
+      diagnostics.push(dungeonDiagnostic(
+        "fatal",
+        "population",
+        "DNG_ROOM_LIGHT_OBJECT_MISSING",
+        `Room light object ${objectId} does not exist in the package.`,
+        { relatedIds: [objectId] },
+      ));
+      return [];
+    }
+    if (
+      !definition.tags.includes("presentation_room_light") &&
+      (
+        !definition.light_source ||
+        !definition.light_source.active_by_default ||
+        definition.light_source.mobility !== "fixed"
+      )
+    ) {
+      diagnostics.push(dungeonDiagnostic(
+        "fatal",
+        "population",
+        "DNG_ROOM_LIGHT_OBJECT_INVALID",
+        `Room light object ${objectId} must be a presentation fixture or an active fixed light source.`,
+        { relatedIds: [objectId] },
+      ));
+      return [];
+    }
+    return [definition];
+  });
+  if (!definitions.length) return 0;
+
+  const rng = input.seedContext.stream("dressing");
+  let placed = 0;
+  for (const node of [...input.spatial.graph.nodes].sort((left, right) =>
+    left.id.localeCompare(right.id))) {
+    const geometry = input.spatial.roomGeometry[node.id];
+    const mapPopulation = geometry ? maps[geometry.mapId] : undefined;
+    const available = walkableRoomCells(input, node.id);
+    if (!geometry || !mapPopulation || !available.length) continue;
+
+    // Small connectors still receive one fixture. Larger chambers gain
+    // several pools instead of one giant flat wash, capped so the authored
+    // source count stays predictable on very large generated floors.
+    const fixtureCount = Math.min(
+      3,
+      Math.max(1, Math.ceil(available.length / 30)),
+    );
+    const centerOrdered = centerFirst(available);
+    const selected: MacroCell[] = [];
+
+    for (let index = 0; index < fixtureCount; index += 1) {
+      const remaining = centerOrdered.filter(
+        (cell) =>
+          !selected.some(
+            (chosen) => macroCellKey(chosen) === macroCellKey(cell),
+          ),
+      );
+      if (!remaining.length) break;
+      const ordered =
+        selected.length === 0
+          ? remaining
+          : [...remaining].sort((left, right) => {
+              const leftSpacing = Math.min(
+                ...selected.map((cell) =>
+                  Math.abs(left[0] - cell[0]) +
+                  Math.abs(left[1] - cell[1])),
+              );
+              const rightSpacing = Math.min(
+                ...selected.map((cell) =>
+                  Math.abs(right[0] - cell[0]) +
+                  Math.abs(right[1] - cell[1])),
+              );
+              return rightSpacing - leftSpacing ||
+                compareMacroCells(left, right);
+            });
+      const pool = ordered
+        .slice(0, Math.min(5, ordered.length))
+        .map((cell) => ({ id: macroCellKey(cell), cell }));
+      const cell = rng.pick(rng.shuffleById(pool)).cell;
+      const definition = definitions[
+        (rng.int(definitions.length) + index) % definitions.length
+      ];
+      const facings: MacroCell[] = [
+        [0, 1],
+        [1, 0],
+        [0, -1],
+        [-1, 0],
+      ];
+      selected.push(cell);
+      mapPopulation.objects.push({
+        semanticKey: `room-light:${node.id}:${index}`,
+        object_id: definition.id,
+        cell: [...cell],
+        facing: [...facings[rng.int(facings.length)]],
+        collision_mode: "none",
+      });
+      placed += 1;
+    }
+  }
+  return placed;
+};
+
 const weightedPermutation = <T extends { id: string; weight: number }>(
   values: readonly T[],
   rng: DungeonRandom,
@@ -794,6 +910,7 @@ export const populateDungeon = (
   const rewardRooms = populateRewards(input, maps, occupied);
   const narrativeRooms = populateNarrative(input, maps, occupied, diagnostics);
   const { encounterRooms, quietRooms } = populateEncounters(input, maps, occupied, diagnostics);
+  const roomLights = populateRoomLighting(input, maps, diagnostics);
   Object.values(maps).forEach((entry) => {
     entry.cellMutations.sort((left, right) => compareMacroCells(left.cell, right.cell));
     entry.objects.sort((left, right) => left.semanticKey.localeCompare(right.semanticKey));
@@ -808,6 +925,7 @@ export const populateDungeon = (
   const value = { maps, activeHazardCells, encounterRooms, quietRooms, rewardRooms, narrativeRooms };
   const metrics = { activeHazardCells, encounterRooms, quietRooms, rewardRooms, narrativeRooms,
     startingLights,
+    roomLights,
     manipulationObjects,
     objects: Object.values(maps).reduce((sum, entry) => sum + entry.objects.length, 0),
     entities: Object.values(maps).reduce((sum, entry) => sum + entry.entities.length, 0) };

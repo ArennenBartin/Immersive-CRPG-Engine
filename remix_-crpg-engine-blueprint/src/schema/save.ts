@@ -271,7 +271,13 @@ export interface MapDelta {
   // Kernel grid manipulation (K3): custom object placements pushed/dragged to a
   // new cell, keyed by authored placement origin key. Collision, navigation, and
   // rendering read these overrides on top of the authored placements.
-  moved_objects?: Record<string, { cell: [number, number]; facing: [number, number] }>;
+  moved_objects?: Record<string, {
+    cell: [number, number];
+    facing: [number, number];
+    height_offset?: number;
+    stack_index?: number;
+    stack_root_key?: string;
+  }>;
   carried_objects?: Record<string, {
     object_id: string;
     actor_ids: string[];

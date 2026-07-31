@@ -32,6 +32,12 @@ import {
   migrateLegacyDialoguePackage,
   validateKeywordDialoguePackage,
 } from "../engine-core/keywordDialogue";
+import {
+  BACKROOMS_PARASITE_ENTITY,
+  BACKROOMS_PARASITE_ENTITY_ID,
+  BACKROOMS_PARASITE_MODEL,
+  BACKROOMS_PARASITE_MODEL_OBJECT_ID,
+} from "../data/backroomsEntityAssets";
 export type {
   MigrationChange,
   MigrationWarning,
@@ -291,14 +297,143 @@ export const createDefaultEnginePackage = (): GamePackage => {
   return structuredClone(bundledDefaultPackage);
 };
 
+const BACKROOMS_LEVEL_ZERO_MAP_ID = "qa_backrooms_level_zero";
+const BUNDLED_PROJECT_TITLES = new Set([
+  "CRPG Engine Feature Test Suite",
+  "Fracture Crawl — Integrated Architecture Scenario",
+]);
+
 /**
- * Persisted browser workspaces are authored projects, even when they began as
- * the bundled QA suite. Hydration must therefore be observational and may not
- * refresh content by recognizing map IDs or package versions. Users can merge
- * or explicitly replace QA content through the guarded Studio actions.
+ * Persisted browser workspaces remain authored projects: existing records are
+ * never overwritten. Repository-owned additions may be appended narrowly to
+ * recognizable bundled projects so a new built-in encounter becomes available
+ * without asking the user to replace their edited package.
  */
-export const refreshBundledEnginePackage = (pkg: GamePackage): GamePackage =>
-  pkg;
+export const refreshBundledEnginePackage = (pkg: GamePackage): GamePackage => {
+  const mapIndex = pkg.maps.findIndex(
+    (map) => map.id === BACKROOMS_LEVEL_ZERO_MAP_ID,
+  );
+  if (mapIndex < 0 || !BUNDLED_PROJECT_TITLES.has(pkg.metadata.title)) {
+    return pkg;
+  }
+
+  const hasModel = pkg.object_library.some(
+    (object) => object.id === BACKROOMS_PARASITE_MODEL_OBJECT_ID,
+  );
+  const hasEntity = pkg.entities.some(
+    (entity) => entity.id === BACKROOMS_PARASITE_ENTITY_ID,
+  );
+  const parasiteHasCurrentHunterProfile = pkg.entities.some((entity) => {
+    if (
+      entity.id !== BACKROOMS_PARASITE_ENTITY_ID ||
+      entity.independent_movement?.enabled !== true ||
+      entity.independent_movement.interval_ms !==
+        BACKROOMS_PARASITE_ENTITY.independent_movement?.interval_ms ||
+      entity.independent_movement.activation_radius !==
+        BACKROOMS_PARASITE_ENTITY.independent_movement?.activation_radius ||
+      entity.independent_movement.steps_per_pulse !==
+        BACKROOMS_PARASITE_ENTITY.independent_movement?.steps_per_pulse ||
+      entity.sensory_profile?.id !==
+        BACKROOMS_PARASITE_ENTITY.sensory_profile?.id ||
+      entity.sensory_profile.memory_ticks !==
+        BACKROOMS_PARASITE_ENTITY.sensory_profile?.memory_ticks ||
+      entity.sensory_profile.search_ticks !==
+        BACKROOMS_PARASITE_ENTITY.sensory_profile?.search_ticks
+    ) {
+      return false;
+    }
+    const currentSight = entity.sensory_profile.channels.find((channel) =>
+      channel.stimulus_kinds.includes("visible_player"),
+    );
+    const expectedSight =
+      BACKROOMS_PARASITE_ENTITY.sensory_profile?.channels.find((channel) =>
+        channel.stimulus_kinds.includes("visible_player"),
+      );
+    const currentHearing = entity.sensory_profile.channels.find((channel) =>
+      channel.stimulus_kinds.includes("sound"),
+    );
+    const expectedHearing =
+      BACKROOMS_PARASITE_ENTITY.sensory_profile?.channels.find((channel) =>
+        channel.stimulus_kinds.includes("sound"),
+      );
+    return (
+      currentSight?.range === expectedSight?.range &&
+      currentSight?.requires_los === true &&
+      currentSight?.tracks_live_target === true &&
+      currentSight?.requires_illumination === false &&
+      currentHearing?.range === expectedHearing?.range &&
+      currentHearing?.requires_los === false &&
+      currentHearing?.tracks_live_target === false &&
+      currentHearing?.barrier_response === expectedHearing?.barrier_response
+    );
+  });
+  const hasPlacement = pkg.maps[mapIndex].entity_placements.some(
+    (placement) => placement.entity_id === BACKROOMS_PARASITE_ENTITY_ID,
+  );
+  const hasBackroomsHearingTuning =
+    Number(pkg.settings?.movement_hearing?.normal_movement_loudness || 0) >=
+      6.5 &&
+    Number(
+      pkg.settings?.movement_hearing?.stealth_noise_multiplier ??
+        Number.POSITIVE_INFINITY,
+    ) <= 0.1;
+  if (
+    hasModel &&
+    hasEntity &&
+    hasPlacement &&
+    parasiteHasCurrentHunterProfile &&
+    hasBackroomsHearingTuning
+  ) {
+    return pkg;
+  }
+
+  return {
+    ...pkg,
+    settings: {
+      ...pkg.settings,
+      movement_hearing: {
+        ...(pkg.settings?.movement_hearing || {}),
+        normal_movement_loudness: 6.5,
+        stealth_noise_multiplier: 0.1,
+      },
+    },
+    object_library: hasModel
+      ? pkg.object_library
+      : [...pkg.object_library, structuredClone(BACKROOMS_PARASITE_MODEL)],
+    entities: hasEntity
+      ? pkg.entities.map((entity) =>
+          entity.id === BACKROOMS_PARASITE_ENTITY_ID
+            ? {
+                ...entity,
+                independent_movement: structuredClone(
+                  BACKROOMS_PARASITE_ENTITY.independent_movement,
+                ),
+                sensory_profile: structuredClone(
+                  BACKROOMS_PARASITE_ENTITY.sensory_profile,
+                ),
+              }
+            : entity,
+        )
+      : [...pkg.entities, structuredClone(BACKROOMS_PARASITE_ENTITY)],
+    maps: hasPlacement
+      ? pkg.maps
+      : pkg.maps.map((map, index) =>
+          index === mapIndex
+            ? {
+                ...map,
+                entity_placements: [
+                  ...map.entity_placements,
+                  {
+                    entity_id: BACKROOMS_PARASITE_ENTITY_ID,
+                    cell: [7, 13],
+                    facing: [-1, 0],
+                  },
+                ],
+              }
+            : map,
+        ),
+  };
+};
 
 export const serializePackageForExport = (pkg: GamePackage): string => {
   const result = GamePackageSchema.safeParse(pkg);

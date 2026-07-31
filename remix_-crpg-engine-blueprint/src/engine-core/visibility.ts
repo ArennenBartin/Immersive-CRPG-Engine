@@ -1,5 +1,9 @@
-import type { GamePackage } from "../schema/game";
-import type { PlaySave, SimulationEnvironmentFieldRecord } from "../schema/save";
+import type { GamePackage, MapData } from "../schema/game";
+import type {
+  MapDelta,
+  PlaySave,
+  SimulationEnvironmentFieldRecord,
+} from "../schema/save";
 import { entityPlacementStateKey } from "../utils/entityState";
 import { placementOriginKey } from "../utils/objectFootprint";
 import {
@@ -651,15 +655,17 @@ const prepareVisionMap = (
 };
 
 const AUTHORED_SMOKE_TERMS = /smoke|fog|mist|miasma|obscur/;
-
-const applyAuthoredSmokeToSimulation = (
-  gamePackage: GamePackage,
-  mapId: string,
-  simulation: SimulationMapSnapshot,
-): SimulationMapSnapshot => {
-  const map = gamePackage.maps.find((candidate) => candidate.id === mapId);
-  if (!map) return simulation;
-  const authoredSmoke = new Set(
+const authoredSmokeCellCache = new WeakMap<
+  MapData,
+  {
+    cells: MapData["cells"];
+    keys: ReadonlySet<string>;
+  }
+>();
+const authoredSmokeCellsForMap = (map: MapData): ReadonlySet<string> => {
+  const cached = authoredSmokeCellCache.get(map);
+  if (cached?.cells === map.cells) return cached.keys;
+  const keys = new Set(
     map.cells
       .filter((cell) =>
         AUTHORED_SMOKE_TERMS.test(
@@ -668,6 +674,18 @@ const applyAuthoredSmokeToSimulation = (
       )
       .map((cell) => coordKey([cell.x, cell.z])),
   );
+  authoredSmokeCellCache.set(map, { cells: map.cells, keys });
+  return keys;
+};
+
+const applyAuthoredSmokeToSimulation = (
+  gamePackage: GamePackage,
+  mapId: string,
+  simulation: SimulationMapSnapshot,
+): SimulationMapSnapshot => {
+  const map = gamePackage.maps.find((candidate) => candidate.id === mapId);
+  if (!map) return simulation;
+  const authoredSmoke = authoredSmokeCellsForMap(map);
   if (authoredSmoke.size === 0) return simulation;
   return {
     ...simulation,
@@ -696,15 +714,89 @@ const applyAuthoredSmokeToSimulation = (
   };
 };
 
+const VISIBILITY_STRUCTURE_FIELD_KINDS = new Set([
+  "smoke",
+  "steam",
+  "poison_gas",
+  "acid_fumes",
+]);
+
+const visibilityStructuralSave = (
+  gamePackage: GamePackage,
+  save: PlaySave,
+  mapId: string,
+): PlaySave => {
+  const map = gamePackage.maps.find((candidate) => candidate.id === mapId);
+  const delta = save.map_deltas?.[mapId];
+  const tick = currentTick(save);
+  const environmentFields = delta?.environment_fields
+    ? Object.fromEntries(
+        Object.entries(delta.environment_fields).flatMap(([key, fields]) => {
+          const opticalFields = fields
+            .filter(
+              (field) =>
+                VISIBILITY_STRUCTURE_FIELD_KINDS.has(field.kind) &&
+                field.intensity > 0 &&
+                (!field.expires_at_tick || field.expires_at_tick > tick),
+            )
+            // Age does not change optical density. Normalize temporal metadata
+            // so ordinary clock movement cannot invalidate all map cells.
+            .map((field) => ({
+              ...field,
+              created_at_tick: 0,
+              age_ticks: 0,
+              expires_at_tick: undefined,
+            }));
+          return opticalFields.length ? [[key, opticalFields]] : [];
+        }),
+      )
+    : undefined;
+  const structuralDelta: MapDelta | undefined = delta
+    ? {
+        opened_doors: delta.opened_doors,
+        moved_objects: delta.moved_objects,
+        carried_objects: delta.carried_objects,
+        removed_objects: delta.removed_objects,
+        environment_fields: environmentFields,
+      }
+    : undefined;
+  const hiddenEntityStates = Object.fromEntries(
+    (map?.entity_placements || []).map((placement, index) => [
+      entityPlacementStateKey(mapId, placement, index),
+      { hidden: true },
+    ]),
+  );
+  return {
+    ...save,
+    // The structural cache changes only when the active optical field set
+    // changes. The public visibility snapshot restores the authoritative tick.
+    clock_minutes: 0,
+    entity_states: hiddenEntityStates,
+    map_deltas: structuralDelta ? { [mapId]: structuralDelta } : {},
+    simulation_regions: {},
+  };
+};
+
 const createVisibilitySimulation = (
   gamePackage: GamePackage,
   save: PlaySave,
   mapId: string,
-) => applyAuthoredSmokeToSimulation(
-  gamePackage,
-  mapId,
-  createCachedSimulationSnapshotFromV1(gamePackage, save, mapId),
-);
+) => {
+  const structural = applyAuthoredSmokeToSimulation(
+    gamePackage,
+    mapId,
+    createCachedSimulationSnapshotFromV1(
+      gamePackage,
+      visibilityStructuralSave(gamePackage, save, mapId),
+      mapId,
+      "visibility_structure",
+    ),
+  );
+  const generatedAtTick = currentTick(save);
+  return structural.generated_at_tick === generatedAtTick
+    ? structural
+    : { ...structural, generated_at_tick: generatedAtTick };
+};
 
 const analyzeLightLine = (
   visionByKey: PreparedVisionMap,

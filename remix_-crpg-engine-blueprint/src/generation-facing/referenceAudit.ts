@@ -871,6 +871,7 @@ export const auditGamePackageReferences = (
   pkg.entities.forEach((entity, index) => {
     const path = `$.entities[${index}]`;
     reference(indexes.sprites, entity.sprite_id, `${path}.sprite_id`, "REF_SPRITE_MISSING", "sprite");
+    reference(indexes.objects, entity.model_object_id, `${path}.model_object_id`, "REF_OBJECT_MISSING", "entity model");
     reference(indexes.dialogue, entity.dialogue_id, `${path}.dialogue_id`, "REF_DIALOGUE_MISSING", "dialogue");
     reference(indexes.dialogue, entity.party_dialogue_id, `${path}.party_dialogue_id`, "REF_DIALOGUE_MISSING", "dialogue");
     entity.skills?.forEach((id, skillIndex) => reference(indexes.abilities, id, `${path}.skills[${skillIndex}]`, "REF_SKILL_MISSING", "skill"));

@@ -76,9 +76,21 @@ export const placementOccupiesCell = (
 export const placementHasCollision = (
   placement: Pick<ObjectPlacementData, "collision_mode">,
   objectDef: ObjectData | undefined,
-): boolean =>
-  placement.collision_mode !== "none" &&
-  Boolean(objectDef && objectDef.collision?.profile !== "none");
+): boolean => {
+  const tags = new Set(objectDef?.tags || []);
+  // Ceiling fixtures and other room-light presentation objects live in the
+  // same placement collection as ordinary props, but they are scenery rather
+  // than floor-level obstacles. Keep that invariant here at the shared
+  // collision boundary so stale maps cannot turn a light into an invisible
+  // wall merely because their placement predates collision_mode="none".
+  if (tags.has("light_ceiling") || tags.has("presentation_room_light")) {
+    return false;
+  }
+  return (
+    placement.collision_mode !== "none" &&
+    Boolean(objectDef && objectDef.collision?.profile !== "none")
+  );
+};
 
 export const placementBlocksCell = (
   placement: ObjectPlacementData,
@@ -142,7 +154,13 @@ export const placementOriginKey = (placement: ObjectPlacementData): string =>
   `${placement.object_id}|${placement.cell[0]}|${placement.cell[1]}|${placement.facing?.[0] ?? 0}|${placement.facing?.[1] ?? 1}`;
 
 export interface PlacementDelta {
-  moved_objects?: Record<string, { cell: [number, number]; facing: [number, number] }>;
+  moved_objects?: Record<string, {
+    cell: [number, number];
+    facing: [number, number];
+    height_offset?: number;
+    stack_index?: number;
+    stack_root_key?: string;
+  }>;
   removed_objects?: string[];
   carried_objects?: Record<string, unknown>;
 }
@@ -162,7 +180,18 @@ export const applyPlacementDeltas = (
     const key = placementOriginKey(placement);
     if (removed.has(key) || carried.has(key)) continue;
     const moved = delta.moved_objects?.[key];
-    result.push(moved ? { ...placement, cell: moved.cell, facing: moved.facing } : placement);
+    result.push(
+      moved
+        ? {
+            ...placement,
+            cell: moved.cell,
+            facing: moved.facing,
+            height_offset: moved.height_offset,
+            stack_index: moved.stack_index,
+            stack_root_key: moved.stack_root_key,
+          }
+        : placement,
+    );
   }
   return result;
 };

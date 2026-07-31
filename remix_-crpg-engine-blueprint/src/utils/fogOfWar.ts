@@ -18,6 +18,38 @@ export const fogCellKey = fineCoordKey;
 
 export type FogRenderState = "visible" | "explored" | "unseen";
 
+export type ImmersiveViewPresentation =
+  | "isometric"
+  | "first_person"
+  | "third_person";
+
+export type ImmersiveVisibilityPresentationPolicy = Readonly<{
+  /** Whether remembered/unseen fog materials should cover world geometry. */
+  fogMaskEnabled: boolean;
+  /** Whether current perception may remove physical actors/items from view. */
+  gatePhysicalContent: boolean;
+  /** Whether rendered light sources are restricted to perceived terrain. */
+  cullLightsToVisibleCells: boolean;
+}>;
+
+/**
+ * Authored third-person Backrooms play uses the camera image as its visual
+ * truth: geometry, actors, items, and light sources remain mounted and real
+ * lighting makes them readable (or not). Mechanical perception remains
+ * authoritative for AI, combat, targeting, markers, and debug readouts.
+ */
+export const resolveImmersiveVisibilityPresentationPolicy = (
+  presentation: ImmersiveViewPresentation,
+  fogRequested: boolean,
+): ImmersiveVisibilityPresentationPolicy => {
+  const unrestrictedWorldImage = presentation === "third_person";
+  return {
+    fogMaskEnabled: Boolean(fogRequested) && !unrestrictedWorldImage,
+    gatePhysicalContent: !unrestrictedWorldImage,
+    cullLightsToVisibleCells: !unrestrictedWorldImage,
+  };
+};
+
 export interface AuthoritativeFogPresentationCell {
   key: string;
   world_cell: [number, number];

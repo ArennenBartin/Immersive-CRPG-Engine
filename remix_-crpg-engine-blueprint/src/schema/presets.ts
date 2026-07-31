@@ -10,6 +10,36 @@ import {
   BUNDLED_PLAYER_IDLE_MODEL,
   PLAYER_IDLE_FBX_MODEL_ID,
 } from "../data/playerModelAssets";
+import {
+  BACKROOMS_PARASITE_MODEL,
+  BACKROOMS_PARASITE_MODEL_OBJECT_ID,
+} from "../data/backroomsEntityAssets";
+
+export const INSTITUTIONAL_CEILING_LIGHT_OBJECT_ID =
+  "obj_institutional_ceiling_light";
+
+export const BACKROOMS_LEVEL_ZERO_FLOOR_OBJECT_ID =
+  "obj_backrooms_level_zero_floor";
+export const BACKROOMS_LEVEL_ZERO_WALL_OBJECT_ID =
+  "obj_backrooms_level_zero_wall";
+export const BACKROOMS_LEVEL_ZERO_LIGHT_OBJECT_ID =
+  "obj_backrooms_level_zero_ceiling_light";
+
+export const BACKROOMS_LEVEL_ZERO_TEXTURES = {
+  carpet: "/textures/backrooms/level-zero-carpet.jpg",
+  wallpaper: "/textures/backrooms/level-zero-wallpaper.jpg",
+  ceiling: "/textures/backrooms/level-zero-ceiling-tile.jpg",
+} as const;
+
+const BACKROOMS_LEVEL_ZERO_MATERIALS = {
+  carpet: "mat_backrooms_level_zero_carpet",
+  wallpaper: "mat_backrooms_level_zero_wallpaper",
+  trim: "mat_backrooms_level_zero_trim",
+  ceilingTile: "mat_backrooms_level_zero_ceiling_tile",
+  fixtureMetal: "mat_backrooms_level_zero_fixture_metal",
+  diffuser: "mat_backrooms_level_zero_diffuser",
+  fluorescentTube: "mat_backrooms_level_zero_fluorescent_tube",
+} as const;
 
 export const asciiToPixels = (
   ascii: string,
@@ -516,6 +546,283 @@ const baseObjectLibraryPresets: ObjectData[] = [
       requires_cooperation: true,
     },
   ),
+  {
+    ...object(
+      BACKROOMS_LEVEL_ZERO_FLOOR_OBJECT_ID,
+      "Level Zero Damp Carpet",
+      "terrain",
+      [
+        "tile",
+        "ground",
+        "floor",
+        "carpet",
+        "backrooms",
+        "level_zero",
+        "institutional",
+      ],
+      [1, 0.06, 1],
+      [
+        part(
+          "box",
+          "damp_carpet",
+          [0, 0.02, 0],
+          [1, 0.04, 1],
+          BACKROOMS_LEVEL_ZERO_MATERIALS.carpet,
+        ),
+      ],
+      { profile: "none", footprint: [[0, 0]] },
+      [BACKROOMS_LEVEL_ZERO_MATERIALS.carpet],
+    ),
+    material_settings: [
+      {
+        id: BACKROOMS_LEVEL_ZERO_MATERIALS.carpet,
+        name: "Aged ochre carpet",
+        color: "#b38a3b",
+        emissive: "#000000",
+        emissive_intensity: 0,
+        opacity: 1,
+        transparent: false,
+        roughness: 0.98,
+        metalness: 0,
+        texture_kind: "cloth_weave",
+        texture_scale: 1,
+        texture_strength: 0.82,
+        texture_image_url: BACKROOMS_LEVEL_ZERO_TEXTURES.carpet,
+      },
+    ],
+  },
+  {
+    ...object(
+      BACKROOMS_LEVEL_ZERO_WALL_OBJECT_ID,
+      "Level Zero Wallpaper Wall",
+      "structure",
+      [
+        "wall",
+        "tile",
+        "wallpaper",
+        "backrooms",
+        "level_zero",
+        "institutional",
+      ],
+      [1.04, 1.84, 1.04],
+      [
+        part(
+          "box",
+          "wallpaper_body",
+          [0, 0.92, 0],
+          [1, 1.68, 1],
+          BACKROOMS_LEVEL_ZERO_MATERIALS.wallpaper,
+        ),
+        part(
+          "box",
+          "base_trim",
+          [0, 0.08, 0],
+          [1.04, 0.16, 1.04],
+          BACKROOMS_LEVEL_ZERO_MATERIALS.trim,
+        ),
+        part(
+          "box",
+          "top_trim",
+          [0, 1.78, 0],
+          [1.04, 0.12, 1.04],
+          BACKROOMS_LEVEL_ZERO_MATERIALS.trim,
+        ),
+      ],
+      { profile: "single", footprint: [[0, 0]] },
+      [
+        BACKROOMS_LEVEL_ZERO_MATERIALS.wallpaper,
+        BACKROOMS_LEVEL_ZERO_MATERIALS.trim,
+      ],
+      {
+        material_id: "sim_mat_stone",
+        mass_kg: 780,
+        bulk: 8,
+        awkwardness: 1,
+        push_difficulty: 20,
+        carry_size: "immovable",
+        requires_cooperation: true,
+      },
+    ),
+    material_settings: [
+      {
+        id: BACKROOMS_LEVEL_ZERO_MATERIALS.wallpaper,
+        name: "Aged yellow wallpaper",
+        color: "#c4ad58",
+        emissive: "#000000",
+        emissive_intensity: 0,
+        opacity: 1,
+        transparent: false,
+        roughness: 0.9,
+        metalness: 0,
+        texture_kind: "paper_fiber",
+        texture_scale: 1,
+        texture_strength: 0.72,
+        texture_image_url: BACKROOMS_LEVEL_ZERO_TEXTURES.wallpaper,
+      },
+      {
+        id: BACKROOMS_LEVEL_ZERO_MATERIALS.trim,
+        name: "Darkened wood trim",
+        color: "#5a4523",
+        emissive: "#000000",
+        emissive_intensity: 0,
+        opacity: 1,
+        transparent: false,
+        roughness: 0.82,
+        metalness: 0,
+        texture_kind: "wood_grain",
+        texture_scale: 2.5,
+        texture_strength: 0.38,
+      },
+    ],
+  },
+  {
+    ...object(
+      BACKROOMS_LEVEL_ZERO_LIGHT_OBJECT_ID,
+      "Level Zero Fluorescent Ceiling Fixture",
+      "fixture",
+      [
+        "prop",
+        "presentation_room_light",
+        "light_ceiling",
+        "dungeon_room_light",
+        "light_warm_fluorescent",
+        "institutional",
+        "backrooms",
+        "level_zero",
+      ],
+      [1, 2.84, 1],
+      [
+        part(
+          "box",
+          "ceiling_tile_backer",
+          [0, 2.81, 0],
+          [1, 0.06, 1],
+          BACKROOMS_LEVEL_ZERO_MATERIALS.ceilingTile,
+        ),
+        part(
+          "box",
+          "ballast_housing",
+          [0, 2.73, 0],
+          [0.9, 0.1, 0.4],
+          BACKROOMS_LEVEL_ZERO_MATERIALS.fixtureMetal,
+        ),
+        part(
+          "box",
+          "reflector_tray",
+          [0, 2.67, 0],
+          [0.8, 0.035, 0.31],
+          BACKROOMS_LEVEL_ZERO_MATERIALS.fixtureMetal,
+        ),
+        part(
+          "box",
+          "left_rail",
+          [-0.41, 2.66, 0],
+          [0.055, 0.08, 0.36],
+          BACKROOMS_LEVEL_ZERO_MATERIALS.fixtureMetal,
+        ),
+        part(
+          "box",
+          "right_rail",
+          [0.41, 2.66, 0],
+          [0.055, 0.08, 0.36],
+          BACKROOMS_LEVEL_ZERO_MATERIALS.fixtureMetal,
+        ),
+        part(
+          "box",
+          "aged_diffuser",
+          [0, 2.64, 0],
+          [0.72, 0.022, 0.27],
+          BACKROOMS_LEVEL_ZERO_MATERIALS.diffuser,
+        ),
+        part(
+          "box",
+          "fluorescent_tube_a",
+          [0, 2.625, -0.065],
+          [0.62, 0.018, 0.032],
+          BACKROOMS_LEVEL_ZERO_MATERIALS.fluorescentTube,
+        ),
+        part(
+          "box",
+          "fluorescent_tube_b",
+          [0, 2.625, 0.065],
+          [0.62, 0.018, 0.032],
+          BACKROOMS_LEVEL_ZERO_MATERIALS.fluorescentTube,
+        ),
+      ],
+      { profile: "none", footprint: [[0, 0]] },
+      [
+        BACKROOMS_LEVEL_ZERO_MATERIALS.ceilingTile,
+        BACKROOMS_LEVEL_ZERO_MATERIALS.fixtureMetal,
+        BACKROOMS_LEVEL_ZERO_MATERIALS.diffuser,
+        BACKROOMS_LEVEL_ZERO_MATERIALS.fluorescentTube,
+      ],
+    ),
+    material_settings: [
+      {
+        id: BACKROOMS_LEVEL_ZERO_MATERIALS.ceilingTile,
+        name: "Stained acoustic ceiling tile",
+        color: "#c6b975",
+        // The panel sits above the downward-facing spot cone. Keep a restrained
+        // warm self-bounce so it reads as stained tile inside the halo instead
+        // of becoming a black rectangle. This material is fixture-local and
+        // cannot lift the surrounding room.
+        emissive: "#8a7848",
+        emissive_intensity: 0.18,
+        opacity: 1,
+        transparent: false,
+        roughness: 0.96,
+        metalness: 0,
+        texture_kind: "stone_grain",
+        texture_scale: 1,
+        texture_strength: 0.64,
+        texture_image_url: BACKROOMS_LEVEL_ZERO_TEXTURES.ceiling,
+      },
+      {
+        id: BACKROOMS_LEVEL_ZERO_MATERIALS.fixtureMetal,
+        name: "Aged fluorescent housing",
+        color: "#777263",
+        // Painted, dusty steel should retain a readable dark-metal value even
+        // though the fluorescent cone points away from its own housing.
+        emissive: "#625d4c",
+        emissive_intensity: 0.22,
+        opacity: 1,
+        transparent: false,
+        roughness: 0.72,
+        metalness: 0.14,
+        texture_kind: "metal_scratches",
+        texture_scale: 2.5,
+        texture_strength: 0.28,
+      },
+      {
+        id: BACKROOMS_LEVEL_ZERO_MATERIALS.diffuser,
+        name: "Yellowed fluorescent diffuser",
+        color: "#fff1bd",
+        emissive: "#ffd878",
+        emissive_intensity: 0.36,
+        opacity: 1,
+        transparent: false,
+        roughness: 0.48,
+        metalness: 0,
+        texture_kind: "glass_facets",
+        texture_scale: 1.5,
+        texture_strength: 0.18,
+      },
+      {
+        id: BACKROOMS_LEVEL_ZERO_MATERIALS.fluorescentTube,
+        name: "Warm fluorescent tubes",
+        color: "#fffbdc",
+        emissive: "#ffe9a8",
+        emissive_intensity: 0.88,
+        opacity: 1,
+        transparent: false,
+        roughness: 0.2,
+        metalness: 0,
+        texture_kind: "none",
+        texture_scale: 1,
+        texture_strength: 0,
+      },
+    ],
+  },
   object(
     "obj_p_door",
     "Door",
@@ -609,6 +916,56 @@ const baseObjectLibraryPresets: ObjectData[] = [
     { profile: "single", footprint: [[0, 0]] },
     ["#334155", "#64748B", "#A78BFA"],
   ),
+  {
+    ...object(
+      INSTITUTIONAL_CEILING_LIGHT_OBJECT_ID,
+      "Institutional Ceiling Light",
+      "fixture",
+      [
+        "prop",
+        "presentation_room_light",
+        "light_ceiling",
+        "dungeon_room_light",
+        "light_warm_fluorescent",
+        "institutional",
+      ],
+      [1, 2.72, 1],
+      [
+        part(
+          "box",
+          "ceiling_mount",
+          [0, 2.61, 0],
+          [0.88, 0.12, 0.3],
+          "#3f4650",
+        ),
+        part(
+          "box",
+          "fluorescent_panel",
+          [0, 2.54, 0],
+          [0.72, 0.045, 0.22],
+          "#fff4bd",
+        ),
+      ],
+      { profile: "none", footprint: [[0, 0]] },
+      ["#3f4650", "#fff4bd"],
+    ),
+    material_settings: [
+      {
+        id: "#fff4bd",
+        name: "Aged fluorescent diffuser",
+        color: "#fff4bd",
+        emissive: "#ffe88f",
+        emissive_intensity: 0.9,
+        opacity: 1,
+        transparent: false,
+        roughness: 0.42,
+        metalness: 0,
+        texture_kind: "none",
+        texture_scale: 1,
+        texture_strength: 0,
+      },
+    ],
+  },
   object(
     "obj_bed",
     "Simple Wooden Bed",
@@ -1380,4 +1737,9 @@ export const objectLibraryPresets: ObjectData[] = [
   )
     ? []
     : [BUNDLED_PLAYER_IDLE_MODEL]),
+  ...(baseObjectLibraryPresets.some(
+    (object) => object.id === BACKROOMS_PARASITE_MODEL_OBJECT_ID,
+  )
+    ? []
+    : [BACKROOMS_PARASITE_MODEL]),
 ];

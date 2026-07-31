@@ -3,6 +3,20 @@ import type { GamePackage, ObjectData } from "../schema/game";
 export const PLAYER_IDLE_FBX_MODEL_ID = "obj_player_intercessor_idle_fbx";
 export const PLAYER_IDLE_FBX_CLIP = "mixamo.com";
 export const PLAYER_WALK_FBX_CLIP = "walk";
+export const PLAYER_COLLISION_HEIGHT = 1.8;
+
+const BUNDLED_PLAYER_SOURCE_BOUNDS: [number, number, number] = [
+  0.8027343809808369,
+  0.9980468153953554,
+  0.23242190653400055,
+];
+export const BUNDLED_PLAYER_MODEL_SCALE =
+  PLAYER_COLLISION_HEIGHT / BUNDLED_PLAYER_SOURCE_BOUNDS[1];
+const BUNDLED_PLAYER_RENDER_BOUNDS: [number, number, number] = [
+  BUNDLED_PLAYER_SOURCE_BOUNDS[0] * BUNDLED_PLAYER_MODEL_SCALE,
+  BUNDLED_PLAYER_SOURCE_BOUNDS[1] * BUNDLED_PLAYER_MODEL_SCALE,
+  BUNDLED_PLAYER_SOURCE_BOUNDS[2] * BUNDLED_PLAYER_MODEL_SCALE,
+];
 
 export const resolvePlayerLocomotionClip = (moving: boolean) =>
   moving ? PLAYER_WALK_FBX_CLIP : PLAYER_IDLE_FBX_CLIP;
@@ -20,7 +34,7 @@ export const BUNDLED_PLAYER_IDLE_MODEL: ObjectData = {
     "engine_builtin",
   ],
   origin: "center_floor",
-  bounds: [0.8027343809808369, 0.9980468153953554, 0.23242190653400055],
+  bounds: BUNDLED_PLAYER_RENDER_BOUNDS,
   materials: ["tripo_node_287b615a_3eb4_445c_9a3a_ad5581ae6fd8_materialmat"],
   material_settings: [],
   model_kind: "asset",
@@ -33,7 +47,11 @@ export const BUNDLED_PLAYER_IDLE_MODEL: ObjectData = {
     source_type: "fbx",
     offset: [8.971255627265862e-9, 0, 2.5975171874526026e-9],
     rotation: [0, 0, 0],
-    scale: [1, 1, 1],
+    scale: [
+      BUNDLED_PLAYER_MODEL_SCALE,
+      BUNDLED_PLAYER_MODEL_SCALE,
+      BUNDLED_PLAYER_MODEL_SCALE,
+    ],
     source_min: [
       -0.4013671994616741,
       -1.7170168733740808e-16,
@@ -44,11 +62,7 @@ export const BUNDLED_PLAYER_IDLE_MODEL: ObjectData = {
       0.4990234076976775,
       -2.5975171874526026e-9,
     ],
-    source_bounds: [
-      0.8027343809808369,
-      0.9980468153953554,
-      0.23242190653400055,
-    ],
+    source_bounds: BUNDLED_PLAYER_SOURCE_BOUNDS,
     material_names: [
       "tripo_node_287b615a_3eb4_445c_9a3a_ad5581ae6fd8_materialmat",
     ],
@@ -105,6 +119,38 @@ const isLegacyBundledWorkspace = (gamePackage: GamePackage) => {
   );
 };
 
+const isLegacyBundledPlayerScale = (object: ObjectData): boolean => {
+  if (object.id !== PLAYER_IDLE_FBX_MODEL_ID || !object.asset) return false;
+  const scale = object.asset.scale as [number, number, number];
+  const sourceBounds = object.asset.source_bounds as [number, number, number];
+  const bounds = object.bounds as [number, number, number];
+  if (!scale || !sourceBounds) return false;
+  const nearlyEqual = (left: number, right: number) =>
+    Math.abs(left - right) < 0.000001;
+  return (
+    scale.every((value) => nearlyEqual(value, 1)) &&
+    bounds.every((value, index) =>
+      nearlyEqual(value, sourceBounds[index]),
+    )
+  );
+};
+
+const upgradeLegacyBundledPlayerScale = (object: ObjectData): ObjectData => {
+  if (!isLegacyBundledPlayerScale(object)) return object;
+  return {
+    ...object,
+    bounds: [...BUNDLED_PLAYER_RENDER_BOUNDS],
+    asset: {
+      ...object.asset!,
+      scale: [
+        BUNDLED_PLAYER_MODEL_SCALE,
+        BUNDLED_PLAYER_MODEL_SCALE,
+        BUNDLED_PLAYER_MODEL_SCALE,
+      ],
+    },
+  };
+};
+
 export const getPlayerModelOptions = (
   gamePackage: GamePackage,
 ): ObjectData[] => {
@@ -139,7 +185,9 @@ export const resolvePlayerModelObject = (
   const authored = gamePackage.object_library.find(
     (object) => object.id === modelId,
   );
-  if (authored?.model_kind === "asset" && authored.asset) return authored;
+  if (authored?.model_kind === "asset" && authored.asset) {
+    return upgradeLegacyBundledPlayerScale(authored);
+  }
   return modelId === PLAYER_IDLE_FBX_MODEL_ID
     ? BUNDLED_PLAYER_IDLE_MODEL
     : undefined;

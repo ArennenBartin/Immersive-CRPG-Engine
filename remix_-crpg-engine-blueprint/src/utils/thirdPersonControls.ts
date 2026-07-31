@@ -72,6 +72,16 @@ export const resolveHeldThirdPersonIntent = (
   };
 };
 
+const NO_CONSUMED_LIVE_THIRD_PERSON_KEYS: ReadonlySet<string> = new Set();
+
+export const resolveLiveHeldThirdPersonIntent = (
+  heldKeys: ReadonlySet<string>,
+): HeldThirdPersonIntent =>
+  resolveHeldThirdPersonIntent(
+    heldKeys,
+    NO_CONSUMED_LIVE_THIRD_PERSON_KEYS,
+  );
+
 // Tank motion only has a longitudinal component. A diagonal facing still
 // advances by one fine cell on each axis, matching the engine's existing
 // eight-way grid movement.
@@ -120,14 +130,56 @@ export const quantizeYawToFacing = (yaw: number): [number, number] => {
   return [facing[0], facing[1]];
 };
 
-// ── Centered chase-camera profile ──────────────────────────────────────────
-export const THIRD_PERSON_CHASE_DISTANCE = 4;
-export const THIRD_PERSON_CHASE_HEIGHT = 2.2;
-export const THIRD_PERSON_FOCUS_HEIGHT = 0.9;
-export const THIRD_PERSON_LOOK_AHEAD = 0.65;
-export const THIRD_PERSON_FOV = 58;
-export const THIRD_PERSON_FOLLOW_DAMPING = 10;
-export const THIRD_PERSON_YAW_DAMPING = 12;
+// When a wall shortens the chase boom, the lens tucks in close behind Steve
+// instead of swinging sideways. Fading his material out over this range keeps
+// the forward view readable while the camera is that close.
+export const THIRD_PERSON_PLAYER_FADE_START_DISTANCE = 0.95;
+export const THIRD_PERSON_PLAYER_FADE_END_DISTANCE = 0.3;
+export const THIRD_PERSON_PLAYER_MIN_OPACITY = 0.08;
+
+export const resolveThirdPersonCameraBodyDistance = (
+  camera: readonly [number, number, number],
+  subject: readonly [number, number, number],
+  bodyHeight: number,
+): number => {
+  if (
+    !camera.every(Number.isFinite) ||
+    !subject.every(Number.isFinite) ||
+    !Number.isFinite(bodyHeight)
+  ) {
+    return Number.POSITIVE_INFINITY;
+  }
+  const safeHeight = Math.max(0, bodyHeight);
+  const closestY = Math.max(
+    subject[1],
+    Math.min(subject[1] + safeHeight, camera[1]),
+  );
+  return Math.hypot(
+    camera[0] - subject[0],
+    camera[1] - closestY,
+    camera[2] - subject[2],
+  );
+};
+
+export const resolveThirdPersonPlayerCameraOpacity = (
+  cameraBodyDistance: number,
+): number => {
+  if (!Number.isFinite(cameraBodyDistance)) return 1;
+  const normalized = Math.max(
+    0,
+    Math.min(
+      1,
+      (cameraBodyDistance - THIRD_PERSON_PLAYER_FADE_END_DISTANCE) /
+        (THIRD_PERSON_PLAYER_FADE_START_DISTANCE -
+          THIRD_PERSON_PLAYER_FADE_END_DISTANCE),
+    ),
+  );
+  const eased = normalized * normalized * (3 - 2 * normalized);
+  return (
+    THIRD_PERSON_PLAYER_MIN_OPACITY +
+    (1 - THIRD_PERSON_PLAYER_MIN_OPACITY) * eased
+  );
+};
 
 // Chase-camera collision follows visual structure, not pathfinding. A flat
 // non-walkable floor cell (pit, liquid, void, hazard) must not become an
@@ -148,10 +200,19 @@ export const THIRD_PERSON_TOUCH_PITCH_SENSITIVITY = 0.0045;
 
 // Pitch is presentation-only and intentionally stops short of vertical so a
 // locked camera cannot invert or become an accidental overhead tactical view.
-export const THIRD_PERSON_MIN_PITCH_RADIANS = (-28 * Math.PI) / 180;
-export const THIRD_PERSON_MAX_PITCH_RADIANS = (38 * Math.PI) / 180;
+export const THIRD_PERSON_MIN_PITCH_RADIANS = (-14 * Math.PI) / 180;
+export const THIRD_PERSON_MAX_PITCH_RADIANS = (20 * Math.PI) / 180;
+export const THIRD_PERSON_MAX_YAW_OFFSET_RADIANS = (32 * Math.PI) / 180;
 export const THIRD_PERSON_KEY_PITCH_RATE_RADIANS_PER_SECOND =
   (42 * Math.PI) / 180;
+
+export const clampThirdPersonYawOffset = (yawOffset: number): number => {
+  if (!Number.isFinite(yawOffset)) return 0;
+  return Math.max(
+    -THIRD_PERSON_MAX_YAW_OFFSET_RADIANS,
+    Math.min(THIRD_PERSON_MAX_YAW_OFFSET_RADIANS, yawOffset),
+  );
+};
 
 export const clampThirdPersonPitch = (pitch: number): number => {
   if (!Number.isFinite(pitch)) return 0;
@@ -162,16 +223,15 @@ export const clampThirdPersonPitch = (pitch: number): number => {
 };
 
 export interface ThirdPersonLookState {
-  yaw: number;
+  yawOffset: number;
   pitch: number;
-  authoritativeFacing: [number, number];
 }
 
-// Pure right-drag resolver shared by mouse and touch look input. UI code may
-// substitute the touch sensitivities while retaining the same signs and
-// authoritative facing quantization.
+// Pure presentation-only right-drag resolver shared by mouse and touch look
+// input. The returned yaw is a bounded offset from authoritative actor facing;
+// it must never be persisted as actor facing or simulation state.
 export const applyThirdPersonLookDelta = (
-  yaw: number,
+  yawOffset: number,
   pitch: number,
   deltaX: number,
   deltaY: number,
@@ -186,16 +246,15 @@ export const applyThirdPersonLookDelta = (
   const safePitchSensitivity = Number.isFinite(pitchSensitivity)
     ? Math.max(0, pitchSensitivity)
     : THIRD_PERSON_PITCH_DRAG_SENSITIVITY;
-  const nextYaw = wrapThirdPersonYaw(
-    yaw - safeDeltaX * safeYawSensitivity,
+  const nextYawOffset = clampThirdPersonYawOffset(
+    yawOffset - safeDeltaX * safeYawSensitivity,
   );
   const nextPitch = clampThirdPersonPitch(
     pitch - safeDeltaY * safePitchSensitivity,
   );
   return {
-    yaw: nextYaw,
+    yawOffset: nextYawOffset,
     pitch: nextPitch,
-    authoritativeFacing: quantizeYawToFacing(nextYaw),
   };
 };
 

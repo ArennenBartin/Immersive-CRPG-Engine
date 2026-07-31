@@ -1,45 +1,149 @@
 import assert from "node:assert/strict";
+import { resolveAuthoredViewMode } from "../src/utils/firstPersonControls";
 import {
-  resolveAuthoredViewMode,
-} from "../src/utils/firstPersonControls";
-import {
-  THIRD_PERSON_CHASE_DISTANCE,
-  THIRD_PERSON_CHASE_HEIGHT,
   THIRD_PERSON_FACING_RING,
-  THIRD_PERSON_FOCUS_HEIGHT,
-  THIRD_PERSON_FOV,
   THIRD_PERSON_KEY_PITCH_RATE_RADIANS_PER_SECOND,
-  THIRD_PERSON_LOOK_AHEAD,
   THIRD_PERSON_MAX_PITCH_RADIANS,
+  THIRD_PERSON_MAX_YAW_OFFSET_RADIANS,
   THIRD_PERSON_MIN_PITCH_RADIANS,
   THIRD_PERSON_PITCH_DRAG_SENSITIVITY,
+  THIRD_PERSON_PLAYER_FADE_END_DISTANCE,
+  THIRD_PERSON_PLAYER_FADE_START_DISTANCE,
+  THIRD_PERSON_PLAYER_MIN_OPACITY,
   THIRD_PERSON_TURN_HOLD_START_MS,
   THIRD_PERSON_TURN_REPEAT_MS,
   THIRD_PERSON_YAW_DRAG_SENSITIVITY,
   applyThirdPersonKeyboardPitch,
   applyThirdPersonLookDelta,
   clampThirdPersonPitch,
+  clampThirdPersonYawOffset,
   facingToThirdPersonYaw,
   isThirdPersonCameraActive,
   isThirdPersonStructuralCameraCell,
   quantizeYawToFacing,
   resolveHeldThirdPersonIntent,
+  resolveLiveHeldThirdPersonIntent,
+  resolveThirdPersonCameraBodyDistance,
   resolveThirdPersonCameraSubject,
+  resolveThirdPersonPlayerCameraOpacity,
   rotateThirdPersonFacing45,
   thirdPersonStepVector,
   wrapThirdPersonYaw,
 } from "../src/utils/thirdPersonControls";
 import {
-  getInitialThirdPersonCameraPosition,
-  resolveThirdPersonCameraCollisionFraction,
-  type ThirdPersonCameraBlocker,
-} from "../src/components/PlayScene3D";
+  THIRD_PERSON_CAMERA_PROFILES,
+  THIRD_PERSON_CORRIDOR_ENTER_CLEARANCE,
+  THIRD_PERSON_CORRIDOR_ENTER_MS,
+  THIRD_PERSON_CORRIDOR_EXIT_CLEARANCE,
+  THIRD_PERSON_CORRIDOR_EXIT_MS,
+  THIRD_PERSON_CORRIDOR_PEEK_YAW_LIMIT,
+  THIRD_PERSON_CORRIDOR_PROFILE,
+  THIRD_PERSON_MAX_EYE_HEIGHT_ABOVE_FLOOR,
+  THIRD_PERSON_MAX_PEEK_PITCH,
+  THIRD_PERSON_MAX_TETHER_YAW_RATE,
+  THIRD_PERSON_MIN_PEEK_PITCH,
+  THIRD_PERSON_OPEN_COMBAT_PROFILE,
+  THIRD_PERSON_OPEN_EXPLORE_PROFILE,
+  THIRD_PERSON_OPEN_PEEK_YAW_LIMIT,
+  THIRD_PERSON_SHOULDER_FALLBACK_ADVANTAGE,
+  THIRD_PERSON_SHOULDER_FALLBACK_SWITCH_MS,
+  THIRD_PERSON_SHOULDER_MIN_HOLD_MS,
+  THIRD_PERSON_SHOULDER_RETURN_ADVANTAGE,
+  THIRD_PERSON_SHOULDER_RETURN_SWITCH_MS,
+  THIRD_PERSON_SUBJECT_MAX_LAG,
+  THIRD_PERSON_WALL_BACKED_PEEK_YAW_LIMIT,
+  THIRD_PERSON_WALL_BACKED_PROFILE,
+  THIRD_PERSON_WALL_ENTER_CLEARANCE,
+  THIRD_PERSON_WALL_ENTER_MS,
+  THIRD_PERSON_WALL_EXIT_CLEARANCE,
+  THIRD_PERSON_WALL_EXIT_MS,
+  advanceThirdPersonSpatialState,
+  advanceThirdPersonShoulderSelection,
+  clampThirdPersonPeek,
+  createThirdPersonCameraStepState,
+  createThirdPersonShoulderSelectionState,
+  createThirdPersonSpatialState,
+  resolveThirdPersonCameraProfile,
+  resolveThirdPersonTargetPose,
+  stepThirdPersonCamera,
+  wrapThirdPersonCameraYaw,
+  type ThirdPersonCameraProfileName,
+  type ThirdPersonCameraStepState,
+  type ThirdPersonCameraVec3,
+  type ThirdPersonSpatialMeasurements,
+  type ThirdPersonSpatialMode,
+} from "../src/utils/thirdPersonCamera";
+import {
+  IMMERSIVE_CEILING_HEIGHT,
+  IMMERSIVE_ARCHITECTURE_FORWARD_BONUS,
+  IMMERSIVE_DETAIL_FORWARD_BONUS,
+  IMMERSIVE_STREAM_SECTOR_SIZE,
+  IMMERSIVE_WALL_HEIGHT_SCALE,
+  isWithinImmersiveDirectionalWindow,
+  isWithinDistantArchitectureBand,
+  isImmersiveCeilingView,
+  resolveImmersiveDirectionalWindowOuterRadius,
+  resolveImmersiveStreamSector,
+  resolveImmersiveWallHeight,
+  resolveRuntimeObjectPlacementYOffset,
+} from "../src/utils/immersiveArchitecture";
+import {
+  resolveImmersiveVisibilityPresentationPolicy,
+} from "../src/utils/fogOfWar";
+
+const EPSILON = 0.000001;
+
+const assertNear = (
+  actual: number,
+  expected: number,
+  message: string,
+  tolerance = EPSILON,
+) => {
+  assert.ok(
+    Math.abs(actual - expected) <= tolerance,
+    `${message}: expected ${expected}, received ${actual}`,
+  );
+};
+
+const assertVecNear = (
+  actual: readonly number[],
+  expected: readonly number[],
+  message: string,
+  tolerance = EPSILON,
+) => {
+  assert.equal(actual.length, expected.length, `${message}: vector length`);
+  actual.forEach((value, index) =>
+    assertNear(
+      value,
+      expected[index],
+      `${message} component ${index}`,
+      tolerance,
+    ),
+  );
+};
+
+const vecDistance = (
+  a: readonly [number, number, number],
+  b: readonly [number, number, number],
+) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+
+const assertFiniteVec = (
+  value: readonly number[],
+  message: string,
+) => {
+  assert.ok(value.every(Number.isFinite), message);
+};
+
+const clearMeasurements: ThirdPersonSpatialMeasurements = {
+  boomClearance: Number.POSITIVE_INFINITY,
+  rearClearance: Number.POSITIVE_INFINITY,
+  corridorClearsSteve: true,
+};
 
 // ── Authored mode and permanent camera ownership ──────────────────────────
 assert.equal(
   resolveAuthoredViewMode({ view_mode: "third_person" }),
   "third_person",
-  "an authored third_person view must be honored",
 );
 assert.equal(resolveAuthoredViewMode({ view_mode: "banana" }), "isometric");
 assert.equal(isThirdPersonCameraActive("third_person", "explore"), true);
@@ -82,7 +186,7 @@ assert.equal(THIRD_PERSON_FACING_RING.length, 8);
   assert.deepEqual(
     intent,
     { forward: 1, turn: 1, pitch: 0, wait: false },
-    "the left touch joystick's synthesized diagonal drives forward and turn",
+    "the touch joystick's synthesized diagonal drives forward and turn",
   );
 }
 {
@@ -109,6 +213,31 @@ assert.equal(THIRD_PERSON_FACING_RING.length, 8);
     "period remains a wait alias",
   );
 }
+{
+  // Reproduce the frozen-hold event order: W remains physically down while A
+  // joins the chord and releases before repeat activation. The consumed set
+  // still de-duplicates keyup, but the live RAF resolver must keep W active.
+  const keyupDeduplication = new Set(["w", "a"]);
+  const heldAfterTurnRelease = new Set(["w"]);
+  assert.equal(
+    resolveHeldThirdPersonIntent(
+      heldAfterTurnRelease,
+      keyupDeduplication,
+    ).forward,
+    0,
+    "the second quick-chord keyup remains de-duplicated",
+  );
+  assert.equal(
+    resolveLiveHeldThirdPersonIntent(heldAfterTurnRelease).forward,
+    1,
+    "a physically held W remains live after quick A/D release",
+  );
+  assert.equal(
+    resolveLiveHeldThirdPersonIntent(new Set()).forward,
+    0,
+    "releasing W before the next frame cannot dispatch another step",
+  );
+}
 assert.equal(
   resolveHeldThirdPersonIntent(new Set(["q"]), new Set()).pitch,
   1,
@@ -120,7 +249,7 @@ assert.equal(
   "E lowers camera pitch",
 );
 
-// ── Fine-grid motion and turning ───────────────────────────────────────────
+// ── Fine-grid motion and authoritative turning ─────────────────────────────
 assert.deepEqual(thirdPersonStepVector([0, -1], 1), [0, -1]);
 assert.deepEqual(thirdPersonStepVector([0, -1], -1), [0, 1]);
 assert.deepEqual(thirdPersonStepVector([1, -1], 1), [1, -1]);
@@ -133,16 +262,14 @@ assert.deepEqual(
 assert.deepEqual(
   rotateThirdPersonFacing45([0, -1], 1),
   [1, -1],
-  "a right turn advances exactly 45 degrees",
+  "A/D turning advances authoritative facing by exactly 45 degrees",
 );
-
-// ── Continuous yaw and authoritative quantization ─────────────────────────
 for (const facing of THIRD_PERSON_FACING_RING) {
   const tuple: [number, number] = [facing[0], facing[1]];
   assert.deepEqual(
     quantizeYawToFacing(facingToThirdPersonYaw(tuple)),
     tuple,
-    `yaw must round-trip the authoritative facing ${tuple.join(":")}`,
+    `yaw must round-trip authoritative facing ${tuple.join(":")}`,
   );
 }
 assert.deepEqual(quantizeYawToFacing(Math.PI), [0, -1]);
@@ -150,10 +277,10 @@ assert.deepEqual(quantizeYawToFacing(0), [0, 1]);
 assert.deepEqual(quantizeYawToFacing(Math.PI / 2), [1, 0]);
 assert.equal(wrapThirdPersonYaw(Number.NaN), Math.PI);
 
+// ── Camera-only manual peek and pitch limits ───────────────────────────────
 {
-  const startYaw = facingToThirdPersonYaw([0, -1]);
   const look = applyThirdPersonLookDelta(
-    startYaw,
+    0,
     0,
     200,
     -40,
@@ -161,18 +288,44 @@ assert.equal(wrapThirdPersonYaw(Number.NaN), Math.PI);
     THIRD_PERSON_PITCH_DRAG_SENSITIVITY,
   );
   assert.ok(
-    look.yaw < startYaw,
-    "dragging right decreases engine yaw and turns the view right",
+    look.yawOffset < 0,
+    "dragging right peeks the view right without rotating Steve",
   );
-  assert.ok(look.pitch > 0, "dragging upward raises the view");
-  assert.notDeepEqual(
-    look.authoritativeFacing,
-    [0, -1],
-    "enough continuous yaw updates the quantized authoritative facing",
+  assert.ok(look.pitch > 0, "dragging upward raises the presentation view");
+  assert.deepEqual(
+    Object.keys(look).sort(),
+    ["pitch", "yawOffset"],
+    "manual look must not return authoritative facing or an absolute actor yaw",
+  );
+  assert.equal(
+    "authoritativeFacing" in look,
+    false,
+    "pointer look cannot mutate saved facing",
   );
 }
-
-// ── Pitch limits and keyboard adjustment ──────────────────────────────────
+assert.equal(
+  clampThirdPersonYawOffset(Number.NaN),
+  0,
+  "invalid peek yaw returns to the authoritative tether",
+);
+assert.equal(
+  clampThirdPersonYawOffset(Number.POSITIVE_INFINITY),
+  0,
+  "non-finite peek yaw cannot leak into the camera",
+);
+assert.equal(
+  clampThirdPersonYawOffset(Math.PI),
+  THIRD_PERSON_MAX_YAW_OFFSET_RADIANS,
+);
+assert.equal(
+  clampThirdPersonYawOffset(-Math.PI),
+  -THIRD_PERSON_MAX_YAW_OFFSET_RADIANS,
+);
+assertNear(
+  THIRD_PERSON_MAX_YAW_OFFSET_RADIANS,
+  (32 * Math.PI) / 180,
+  "open manual peek is capped at 32 degrees",
+);
 assert.equal(clampThirdPersonPitch(Number.NaN), 0);
 assert.equal(
   clampThirdPersonPitch(-Math.PI),
@@ -182,14 +335,19 @@ assert.equal(
   clampThirdPersonPitch(Math.PI),
   THIRD_PERSON_MAX_PITCH_RADIANS,
 );
-assert.ok(
-  THIRD_PERSON_MIN_PITCH_RADIANS > -Math.PI / 2 &&
-    THIRD_PERSON_MAX_PITCH_RADIANS < Math.PI / 2,
-  "pitch limits prevent inversion and an accidental overhead camera",
+assertNear(
+  THIRD_PERSON_MIN_PITCH_RADIANS,
+  (-14 * Math.PI) / 180,
+  "minimum pitch",
+);
+assertNear(
+  THIRD_PERSON_MAX_PITCH_RADIANS,
+  (20 * Math.PI) / 180,
+  "maximum pitch",
 );
 assert.equal(
-  applyThirdPersonKeyboardPitch(0, 1, 0.5),
-  THIRD_PERSON_KEY_PITCH_RATE_RADIANS_PER_SECOND * 0.5,
+  applyThirdPersonKeyboardPitch(0, 1, 0.25),
+  THIRD_PERSON_KEY_PITCH_RATE_RADIANS_PER_SECOND * 0.25,
   "Q pressure integrates at the authored pitch rate",
 );
 assert.equal(
@@ -197,40 +355,237 @@ assert.equal(
   THIRD_PERSON_MIN_PITCH_RADIANS,
   "held pitch input clamps at the lower limit",
 );
+assert.ok(
+  THIRD_PERSON_TURN_HOLD_START_MS > 300 &&
+    THIRD_PERSON_TURN_HOLD_START_MS > THIRD_PERSON_TURN_REPEAT_MS,
+  "an ordinary A/D tap commits one deliberate 45-degree turn",
+);
 
-// ── Camera profile and deliberate turn cadence ─────────────────────────────
-assert.equal(THIRD_PERSON_CHASE_DISTANCE, 4);
-assert.equal(THIRD_PERSON_CHASE_HEIGHT, 2.2);
-assert.equal(THIRD_PERSON_FOCUS_HEIGHT, 0.9);
-assert.equal(THIRD_PERSON_LOOK_AHEAD, 0.65);
-assert.ok(
-  THIRD_PERSON_FOV >= 55 && THIRD_PERSON_FOV <= 60,
-  "the chase view keeps the planned modern 55-60 degree FOV",
-);
-assert.ok(
-  THIRD_PERSON_TURN_HOLD_START_MS > 300,
-  "an ordinary key tap cannot repeat a 45-degree turn",
-);
-assert.ok(
-  THIRD_PERSON_TURN_HOLD_START_MS > THIRD_PERSON_TURN_REPEAT_MS,
+// ── Material fade, structural cells, and immersive architecture ───────────
+assert.equal(
+  resolveThirdPersonPlayerCameraOpacity(
+    THIRD_PERSON_PLAYER_FADE_START_DISTANCE,
+  ),
+  1,
+  "Steve remains opaque outside the emergency fade volume",
 );
 assert.equal(
-  isThirdPersonStructuralCameraCell(true, 0),
-  true,
-  "a LOS-blocking wall remains a camera blocker even without authored height",
+  resolveThirdPersonPlayerCameraOpacity(
+    THIRD_PERSON_PLAYER_FADE_END_DISTANCE,
+  ),
+  THIRD_PERSON_PLAYER_MIN_OPACITY,
+  "Steve only reaches minimum opacity after the lens enters his body",
+);
+assertNear(
+  resolveThirdPersonPlayerCameraOpacity(
+    (THIRD_PERSON_PLAYER_FADE_START_DISTANCE +
+      THIRD_PERSON_PLAYER_FADE_END_DISTANCE) /
+      2,
+  ),
+  (1 + THIRD_PERSON_PLAYER_MIN_OPACITY) / 2,
+  "the emergency fade eases smoothly",
+);
+assert.equal(resolveThirdPersonPlayerCameraOpacity(Number.NaN), 1);
+assert.equal(
+  resolveThirdPersonCameraBodyDistance([0, 1.2, 2], [0, 0, 0], 1.8),
+  2,
+  "body distance measures from Steve's vertical capsule segment",
+);
+assert.ok(
+  resolveThirdPersonCameraBodyDistance([0.1, 2.8, 0], [0, 0, 0], 1.8) >
+    THIRD_PERSON_PLAYER_FADE_START_DISTANCE,
+  "a camera above Steve's head remains outside the material-fade volume",
 );
 assert.equal(
-  isThirdPersonStructuralCameraCell(false, 1.25),
-  true,
-  "a tall cliff remains a camera blocker without LOS metadata",
+  resolveThirdPersonPlayerCameraOpacity(
+    resolveThirdPersonCameraBodyDistance([0, 1.2, 1.0], [0, 0, 0], 1.8),
+  ),
+  1,
+  "a normal-length boom keeps Steve fully opaque",
 );
+assert.ok(
+  resolveThirdPersonPlayerCameraOpacity(
+    resolveThirdPersonCameraBodyDistance([0, 1.2, 0.35], [0, 0, 0], 1.8),
+  ) < 1,
+  "a wall-shortened boom fades Steve so the forward view stays readable",
+);
+assert.equal(isThirdPersonStructuralCameraCell(true, 0), true);
+assert.equal(isThirdPersonStructuralCameraCell(false, 1.25), true);
 assert.equal(
   isThirdPersonStructuralCameraCell(false, 0),
   false,
   "flat pits, liquids, void, and hazards never become invisible camera walls",
 );
+assert.equal(IMMERSIVE_WALL_HEIGHT_SCALE, 1.5);
+assertNear(resolveImmersiveWallHeight(1.9, true), 2.85, "immersive wall height");
+assertNear(
+  resolveRuntimeObjectPlacementYOffset({
+    baseHeight: 0,
+    surfaceOffset: 0,
+    minY: 2.48,
+    ceilingAnchored: true,
+  }),
+  0,
+  "ceiling fixtures preserve their authored mounting height",
+);
+assertNear(
+  resolveRuntimeObjectPlacementYOffset({
+    baseHeight: 0,
+    surfaceOffset: 0,
+    minY: 2.48,
+  }),
+  -2.47,
+  "ordinary elevated geometry retains floor-normalized placement",
+);
+assert.ok(
+  !isWithinDistantArchitectureBand({
+    cell: [5, 0],
+    center: [0, 0],
+    detailRadius: 10,
+    architectureRadius: 22,
+  }) &&
+    isWithinDistantArchitectureBand({
+      cell: [15, 0],
+      center: [0, 0],
+      detailRadius: 10,
+      architectureRadius: 22,
+    }) &&
+    !isWithinDistantArchitectureBand({
+      cell: [24, 0],
+      center: [0, 0],
+      detailRadius: 10,
+      architectureRadius: 22,
+    }),
+  "immersive far architecture fills only the cheap field beyond full detail",
+);
+assert.equal(
+  isWithinImmersiveDirectionalWindow({
+    cell: [0, -21],
+    center: [0, 0],
+    forward: [0, -1],
+    radius: 10,
+    forwardBonus: IMMERSIVE_DETAIL_FORWARD_BONUS,
+  }),
+  true,
+  "third-person detail extends well beyond the core in the camera direction",
+);
+assert.equal(
+  isWithinImmersiveDirectionalWindow({
+    cell: [0, 21],
+    center: [0, 0],
+    forward: [0, -1],
+    radius: 10,
+    forwardBonus: IMMERSIVE_DETAIL_FORWARD_BONUS,
+  }),
+  false,
+  "forward detail does not double rear streaming cost",
+);
+assert.equal(
+  isWithinImmersiveDirectionalWindow({
+    cell: [22, -21],
+    center: [0, 0],
+    forward: [0, -1],
+    radius: 10,
+    forwardBonus: IMMERSIVE_DETAIL_FORWARD_BONUS,
+  }),
+  false,
+  "the forward stream stays inside its widening camera corridor",
+);
+assert.ok(
+  isWithinDistantArchitectureBand({
+    cell: [0, -44],
+    center: [0, 0],
+    detailRadius: 10,
+    architectureRadius: 22,
+    forward: [0, -1],
+    detailForwardBonus: IMMERSIVE_DETAIL_FORWARD_BONUS,
+    architectureForwardBonus: IMMERSIVE_ARCHITECTURE_FORWARD_BONUS,
+  }),
+  "cheap architecture continues beyond the extended detailed corridor",
+);
+assert.equal(
+  isWithinImmersiveDirectionalWindow({
+    cell: [16, 0],
+    center: [-24, 0],
+    forward: [1, 0],
+    radius: 10,
+    forwardBonus: IMMERSIVE_DETAIL_FORWARD_BONUS,
+  }),
+  true,
+  "the minimum detail preset reaches the opposite wall despite maximum chunk lag",
+);
+const architectureOuterRadius =
+  resolveImmersiveDirectionalWindowOuterRadius({
+    radius: 22,
+    forwardBonus: IMMERSIVE_ARCHITECTURE_FORWARD_BONUS,
+  });
+assert.ok(
+  architectureOuterRadius >=
+    Math.hypot(
+      22 + IMMERSIVE_ARCHITECTURE_FORWARD_BONUS,
+      22 * 0.62 + IMMERSIVE_ARCHITECTURE_FORWARD_BONUS * 0.22,
+    ),
+  "the void shield encloses the complete directional architecture wedge",
+);
+assert.equal(resolveImmersiveStreamSector(Math.PI), 8);
+assert.equal(
+  resolveImmersiveStreamSector(-Math.PI + 0.001, 8),
+  8,
+  "stream direction remains canonical and stable across the ±π seam",
+);
+assert.equal(
+  resolveImmersiveStreamSector(
+    IMMERSIVE_STREAM_SECTOR_SIZE / 2 +
+      (2 * Math.PI) / 180,
+    0,
+  ),
+  0,
+  "stream direction retains its sector inside the hysteresis band",
+);
+assert.equal(
+  resolveImmersiveStreamSector(
+    IMMERSIVE_STREAM_SECTOR_SIZE / 2 +
+      (4 * Math.PI) / 180,
+    0,
+  ),
+  1,
+  "stream direction advances after leaving the hysteresis band",
+);
+assert.equal(resolveImmersiveWallHeight(1.9, false), 1.9);
+assert.equal(IMMERSIVE_CEILING_HEIGHT, 2.85);
+assert.equal(isImmersiveCeilingView("first_person"), true);
+assert.equal(isImmersiveCeilingView("third_person"), true);
+assert.equal(isImmersiveCeilingView("isometric"), false);
 
-// ── Locked camera subject transfer ─────────────────────────────────────────
+// Third-person Backrooms play renders physical world truth instead of using
+// tactical perception as a visibility mask. Other views retain their existing
+// fog and current-perception presentation.
+assert.deepEqual(
+  resolveImmersiveVisibilityPresentationPolicy("third_person", true),
+  {
+    fogMaskEnabled: false,
+    gatePhysicalContent: false,
+    cullLightsToVisibleCells: false,
+  },
+);
+assert.deepEqual(
+  resolveImmersiveVisibilityPresentationPolicy("first_person", true),
+  {
+    fogMaskEnabled: true,
+    gatePhysicalContent: true,
+    cullLightsToVisibleCells: true,
+  },
+);
+assert.deepEqual(
+  resolveImmersiveVisibilityPresentationPolicy("isometric", false),
+  {
+    fogMaskEnabled: false,
+    gatePhysicalContent: true,
+    cullLightsToVisibleCells: true,
+  },
+);
+
+// ── Controlled camera subject transfer ─────────────────────────────────────
 {
   const player = {
     key: "player",
@@ -242,129 +597,861 @@ assert.equal(
     cell: [13, 8] as [number, number],
     facing: [1, -1] as [number, number],
   };
-
   assert.strictEqual(
     resolveThirdPersonCameraSubject(player, companion),
     companion,
-    "a commanded companion owns the chase camera during its controllable turn",
   );
-  assert.strictEqual(
-    resolveThirdPersonCameraSubject(player, null),
-    player,
-    "enemy/no-control turns return camera ownership to the protagonist",
-  );
-  assert.strictEqual(
-    resolveThirdPersonCameraSubject(player, undefined),
-    player,
-    "missing controlled-actor state must keep the camera on the protagonist",
-  );
+  assert.strictEqual(resolveThirdPersonCameraSubject(player, null), player);
+  assert.strictEqual(resolveThirdPersonCameraSubject(player, undefined), player);
 }
 
-// ── Chase pose and structural camera collision ─────────────────────────────
-{
-  const subject: [number, number] = [7.25, -3.5];
-  const subjectWorldY = 1.4;
-  for (const facing of THIRD_PERSON_FACING_RING) {
-    const tuple: [number, number] = [facing[0], facing[1]];
-    const yaw = facingToThirdPersonYaw(tuple);
-    const expectedForwardX = Math.sin(yaw);
-    const expectedForwardZ = Math.cos(yaw);
-    const camera = getInitialThirdPersonCameraPosition(
-      subject,
-      tuple,
-      subjectWorldY,
-      0,
-    );
-    const horizontalDx = camera[0] - subject[0];
-    const horizontalDz = camera[2] - subject[1];
-    assert.ok(
-      Math.abs(
-        Math.hypot(horizontalDx, horizontalDz) -
-          THIRD_PERSON_CHASE_DISTANCE,
-      ) < 0.000001,
-      `the ${tuple.join(":")} chase pose must preserve its boom distance`,
-    );
-    assert.ok(
-      Math.abs(
-        horizontalDx + expectedForwardX * THIRD_PERSON_CHASE_DISTANCE,
-      ) < 0.000001 &&
-        Math.abs(
-          horizontalDz + expectedForwardZ * THIRD_PERSON_CHASE_DISTANCE,
-        ) < 0.000001,
-      `the camera must begin directly behind ${tuple.join(":")}`,
-    );
-    assert.ok(
-      Math.abs(
-        camera[1] - (subjectWorldY + THIRD_PERSON_CHASE_HEIGHT),
-      ) < 0.000001,
-      "zero-pitch chase height must be independent of facing",
+// ── Fixed survival-horror profile table ────────────────────────────────────
+assert.deepEqual(THIRD_PERSON_OPEN_EXPLORE_PROFILE, {
+  back: 3.65,
+  right: 0.65,
+  eyeHeight: 1.64,
+  lookAhead: 1.3,
+  lookHeight: 1.3,
+  fov: 58,
+});
+assert.deepEqual(THIRD_PERSON_CORRIDOR_PROFILE, {
+  back: 2.3,
+  right: 0.75,
+  eyeHeight: 1.6,
+  lookAhead: 1.15,
+  lookHeight: 1.28,
+  fov: 62,
+});
+assert.deepEqual(THIRD_PERSON_WALL_BACKED_PROFILE, {
+  back: 0.15,
+  right: 0.95,
+  eyeHeight: 1.6,
+  lookAhead: 1.25,
+  lookHeight: 1.3,
+  fov: 68,
+});
+assert.deepEqual(THIRD_PERSON_OPEN_COMBAT_PROFILE, {
+  back: 4.4,
+  right: 0.45,
+  eyeHeight: 2.35,
+  lookAhead: 1.4,
+  lookHeight: 0.65,
+  fov: 58,
+});
+for (const profileName of ["explore", "combat"] as const) {
+  for (const spatialMode of ["open", "corridor", "wall_backed"] as const) {
+    assert.strictEqual(
+      resolveThirdPersonCameraProfile(profileName, spatialMode),
+      THIRD_PERSON_CAMERA_PROFILES[profileName][spatialMode],
+      `${profileName}/${spatialMode} resolves from the fixed profile table`,
     );
   }
 }
+assert.equal(
+  resolveThirdPersonCameraProfile("combat", "corridor").back,
+  THIRD_PERSON_CORRIDOR_PROFILE.back,
+  "constrained combat uses the safe corridor boom",
+);
+assert.equal(
+  resolveThirdPersonCameraProfile("combat", "wall_backed"),
+  THIRD_PERSON_WALL_BACKED_PROFILE,
+  "wall-backed combat never becomes an elevated overhead composition",
+);
 
+// ── Latched shoulder selection ─────────────────────────────────────────────
+assert.equal(THIRD_PERSON_SHOULDER_FALLBACK_ADVANTAGE, 0.25);
+assert.equal(THIRD_PERSON_SHOULDER_FALLBACK_SWITCH_MS, 250);
+assert.equal(THIRD_PERSON_SHOULDER_MIN_HOLD_MS, 900);
+assert.equal(THIRD_PERSON_SHOULDER_RETURN_ADVANTAGE, 0.45);
+assert.equal(THIRD_PERSON_SHOULDER_RETURN_SWITCH_MS, 700);
 {
-  const start: [number, number, number] = [0, 1, 0];
-  const end: [number, number, number] = [0, 1.5, 10];
-  const clearBlocker: ThirdPersonCameraBlocker = {
-    minX: 3,
-    maxX: 4,
-    minZ: 2,
-    maxZ: 3,
+  const rightObstructed = {
+    rightClearance: 0.4,
+    leftClearance: 1.2,
+    rightValid: false,
+    leftValid: true,
+    spatialMode: "corridor" as const,
   };
+  let state = advanceThirdPersonShoulderSelection(
+    createThirdPersonShoulderSelectionState(),
+    rightObstructed,
+    THIRD_PERSON_SHOULDER_FALLBACK_SWITCH_MS - 1,
+  );
   assert.equal(
-    resolveThirdPersonCameraCollisionFraction(
-      start,
-      end,
-      [clearBlocker],
-      0,
-    ),
+    state.shoulder,
     1,
-    "an off-axis structure must not shorten the chase boom",
+    "one obstructed frame cannot flip the default right shoulder",
+  );
+  assert.equal(state.challenger, -1);
+  state = advanceThirdPersonShoulderSelection(
+    state,
+    rightObstructed,
+    1,
+  );
+  assert.equal(
+    state.shoulder,
+    -1,
+    "250ms of sustained right obstruction selects the valid left fallback",
+  );
+  assert.equal(state.holdRemainingMs, THIRD_PERSON_SHOULDER_MIN_HOLD_MS);
+
+  const rightBarelyBetter = {
+    rightClearance: 1.44,
+    leftClearance: 1,
+    rightValid: true,
+    leftValid: true,
+    spatialMode: "corridor" as const,
+  };
+  state = advanceThirdPersonShoulderSelection(
+    state,
+    rightBarelyBetter,
+    THIRD_PERSON_SHOULDER_MIN_HOLD_MS,
+  );
+  assert.equal(state.shoulder, -1);
+  assert.equal(
+    state.challenger,
+    null,
+    "less than 0.45 cells of right advantage cannot challenge the fallback",
   );
 
-  const blocked: ThirdPersonCameraBlocker = {
-    minX: -0.5,
-    maxX: 0.5,
-    minY: 0,
-    maxY: 4,
-    minZ: 4,
-    maxZ: 5,
+  const rightClearlyBetter = {
+    ...rightBarelyBetter,
+    rightClearance:
+      rightBarelyBetter.leftClearance +
+      THIRD_PERSON_SHOULDER_RETURN_ADVANTAGE,
   };
-  assert.ok(
-    Math.abs(
-      resolveThirdPersonCameraCollisionFraction(
-        start,
-        end,
-        [blocked],
-        0,
-      ) - 0.4,
-    ) < 0.000001,
-    "a full-height wall must report the segment entry point",
+  state = advanceThirdPersonShoulderSelection(
+    state,
+    rightClearlyBetter,
+    THIRD_PERSON_SHOULDER_RETURN_SWITCH_MS - 1,
   );
-
-  const near: ThirdPersonCameraBlocker = {
-    minX: -0.5,
-    maxX: 0.5,
-    minZ: 2,
-    maxZ: 2.5,
-  };
-  const far: ThirdPersonCameraBlocker = {
-    minX: -0.5,
-    maxX: 0.5,
-    minZ: 7,
-    maxZ: 8,
-  };
-  assert.ok(
-    Math.abs(
-      resolveThirdPersonCameraCollisionFraction(
-        start,
-        end,
-        [far, near],
-        0,
-      ) - 0.2,
-    ) < 0.000001,
-    "collision resolution must select the nearest blocker regardless of order",
+  assert.equal(
+    state.shoulder,
+    -1,
+    "returning right requires the full 700ms preference window",
+  );
+  state = advanceThirdPersonShoulderSelection(
+    state,
+    rightClearlyBetter,
+    1,
+  );
+  assert.equal(
+    state.shoulder,
+    1,
+    "a sustained 0.45-cell advantage restores the default right shoulder",
   );
 }
 
-console.log("Third-person tank-control contract tests passed.");
+// A newly selected side is held for 900ms before preference-only challenges.
+{
+  const leftPreferred = {
+    rightClearance: 0.5,
+    leftClearance: 1,
+    rightValid: true,
+    leftValid: true,
+    spatialMode: "open" as const,
+  };
+  let state = advanceThirdPersonShoulderSelection(
+    createThirdPersonShoulderSelectionState(),
+    leftPreferred,
+    THIRD_PERSON_SHOULDER_FALLBACK_SWITCH_MS,
+  );
+  assert.equal(state.shoulder, -1);
+
+  const rightPreferred = {
+    rightClearance: 2,
+    leftClearance: 0.5,
+    rightValid: true,
+    leftValid: true,
+    spatialMode: "open" as const,
+  };
+  state = advanceThirdPersonShoulderSelection(
+    state,
+    rightPreferred,
+    THIRD_PERSON_SHOULDER_MIN_HOLD_MS - 1,
+  );
+  assert.equal(state.shoulder, -1);
+  assert.equal(state.challenger, null);
+  state = advanceThirdPersonShoulderSelection(state, rightPreferred, 1);
+  assert.equal(state.shoulder, -1);
+  assert.equal(
+    state.challenger,
+    1,
+    "the return timer starts only after the minimum hold fully elapses",
+  );
+}
+
+// ── Exact default-right poses and symmetric left fallback ──────────────────
+{
+  const subject: ThirdPersonCameraVec3 = [7.25, 1.4, -3.5];
+  const profileCases: readonly [
+    ThirdPersonCameraProfileName,
+    ThirdPersonSpatialMode,
+  ][] = [
+    ["explore", "open"],
+    ["explore", "corridor"],
+    ["explore", "wall_backed"],
+    ["combat", "open"],
+    ["combat", "corridor"],
+    ["combat", "wall_backed"],
+  ];
+
+  for (const [profileName, spatialMode] of profileCases) {
+    const cameraProfile = resolveThirdPersonCameraProfile(
+      profileName,
+      spatialMode,
+    );
+    for (const facing of THIRD_PERSON_FACING_RING) {
+      const yaw = facingToThirdPersonYaw(facing);
+      const forwardX = Math.sin(yaw);
+      const forwardZ = Math.cos(yaw);
+      const rightX = Math.cos(yaw);
+      const rightZ = -Math.sin(yaw);
+      const rightPose = resolveThirdPersonTargetPose({
+        subject,
+        facingYaw: yaw,
+        cameraProfile,
+        spatialMode,
+        floorY: subject[1],
+      });
+      const leftPose = resolveThirdPersonTargetPose({
+        subject,
+        facingYaw: yaw,
+        cameraProfile,
+        spatialMode,
+        floorY: subject[1],
+        shoulder: -1,
+      });
+      const eyeDx = rightPose.eye[0] - subject[0];
+      const eyeDz = rightPose.eye[2] - subject[2];
+      const lookDx = rightPose.look[0] - subject[0];
+      const lookDz = rightPose.look[2] - subject[2];
+      const centeredEye: ThirdPersonCameraVec3 = [
+        subject[0] - forwardX * cameraProfile.back,
+        subject[1] +
+          Math.min(
+            cameraProfile.eyeHeight,
+            THIRD_PERSON_MAX_EYE_HEIGHT_ABOVE_FLOOR,
+          ),
+        subject[2] - forwardZ * cameraProfile.back,
+      ];
+
+      assertNear(
+        -(eyeDx * forwardX + eyeDz * forwardZ),
+        cameraProfile.back,
+        `${profileName}/${spatialMode} back distance at ${facing.join(":")}`,
+      );
+      assertNear(
+        eyeDx * rightX + eyeDz * rightZ,
+        cameraProfile.right,
+        `${profileName}/${spatialMode} right shoulder at ${facing.join(":")}`,
+      );
+      assert.ok(
+        eyeDx * rightX + eyeDz * rightZ >= -EPSILON,
+        "the default/right pose remains on Steve's right-side plane",
+      );
+      assertNear(
+        (leftPose.eye[0] - subject[0]) * rightX +
+          (leftPose.eye[2] - subject[2]) * rightZ,
+        -cameraProfile.right,
+        `${profileName}/${spatialMode} left fallback at ${facing.join(":")}`,
+      );
+      assertVecNear(
+        [
+          (rightPose.eye[0] + leftPose.eye[0]) / 2,
+          (rightPose.eye[1] + leftPose.eye[1]) / 2,
+          (rightPose.eye[2] + leftPose.eye[2]) / 2,
+        ],
+        centeredEye,
+        `${profileName}/${spatialMode} shoulder symmetry at ${facing.join(":")}`,
+      );
+      assertNear(
+        rightPose.eye[1] - subject[1],
+        Math.min(
+          cameraProfile.eyeHeight,
+          THIRD_PERSON_MAX_EYE_HEIGHT_ABOVE_FLOOR,
+        ),
+        `${profileName}/${spatialMode} eye height`,
+      );
+      assertNear(
+        lookDx * forwardX + lookDz * forwardZ,
+        cameraProfile.lookAhead,
+        `${profileName}/${spatialMode} look ahead`,
+      );
+      assertNear(
+        lookDx * rightX + lookDz * rightZ,
+        0,
+        `${profileName}/${spatialMode} neutral look remains centered`,
+      );
+      assertNear(
+        rightPose.look[1] - subject[1],
+        cameraProfile.lookHeight,
+        `${profileName}/${spatialMode} look height`,
+      );
+      assertVecNear(
+        leftPose.look,
+        rightPose.look,
+        "shoulder fallback preserves the forward sightline",
+      );
+      assert.equal(rightPose.shoulder, 1);
+      assert.equal(leftPose.shoulder, -1);
+      assertNear(rightPose.rightOffset, cameraProfile.right, "right offset");
+      assertNear(leftPose.rightOffset, -cameraProfile.right, "left offset");
+      assert.equal(rightPose.fov, cameraProfile.fov);
+    }
+  }
+}
+
+// The default/right pose may collapse toward center without crossing left.
+{
+  const subject: ThirdPersonCameraVec3 = [0, 0, 0];
+  const rightScales = [-5, 0, 0.4, 1, 5];
+  const expectedOffsets = [0, 0, 0.26, 0.65, 0.65];
+  rightScales.forEach((rightOffsetScale, index) => {
+    const pose = resolveThirdPersonTargetPose({
+      subject,
+      facingYaw: 0,
+      cameraProfile: THIRD_PERSON_OPEN_EXPLORE_PROFILE,
+      spatialMode: "open",
+      rightOffsetScale,
+    });
+    assertNear(
+      pose.rightOffset,
+      expectedOffsets[index],
+      `collision shoulder scale ${rightOffsetScale}`,
+    );
+    assert.ok(
+      pose.eye[0] >= -EPSILON,
+      "collision correction cannot choose a left shoulder",
+    );
+  });
+}
+
+// Shoulder changes expose a continuous signed blend for a glide, not a cut.
+{
+  const subject: ThirdPersonCameraVec3 = [0, 0, 0];
+  const centered = resolveThirdPersonTargetPose({
+    subject,
+    facingYaw: 0,
+    cameraProfile: THIRD_PERSON_OPEN_EXPLORE_PROFILE,
+    spatialMode: "open",
+    shoulder: -1,
+    shoulderBlend: 0,
+  });
+  const halfwayLeft = resolveThirdPersonTargetPose({
+    subject,
+    facingYaw: 0,
+    cameraProfile: THIRD_PERSON_OPEN_EXPLORE_PROFILE,
+    spatialMode: "open",
+    shoulder: -1,
+    shoulderBlend: -0.5,
+  });
+  const left = resolveThirdPersonTargetPose({
+    subject,
+    facingYaw: 0,
+    cameraProfile: THIRD_PERSON_OPEN_EXPLORE_PROFILE,
+    spatialMode: "open",
+    shoulder: -1,
+  });
+  assertNear(centered.rightOffset, 0, "shoulder glide midpoint");
+  assertNear(
+    halfwayLeft.rightOffset,
+    -THIRD_PERSON_OPEN_EXPLORE_PROFILE.right / 2,
+    "shoulder glide halfway point",
+  );
+  assertNear(
+    left.rightOffset,
+    -THIRD_PERSON_OPEN_EXPLORE_PROFILE.right,
+    "left shoulder glide endpoint",
+  );
+  assert.ok(centered.eye[0] > halfwayLeft.eye[0]);
+  assert.ok(halfwayLeft.eye[0] > left.eye[0]);
+}
+
+// Manual peeking changes only the sightline, not the physical camera eye.
+{
+  const input = {
+    subject: [2, 0.25, -4] as ThirdPersonCameraVec3,
+    facingYaw: Math.PI / 4,
+    cameraProfile: THIRD_PERSON_OPEN_EXPLORE_PROFILE,
+    spatialMode: "open" as const,
+    floorY: 0.25,
+  };
+  const neutral = resolveThirdPersonTargetPose(input);
+  const peeked = resolveThirdPersonTargetPose({
+    ...input,
+    yawOffset: Math.PI,
+    pitchOffset: Math.PI,
+  });
+  assertVecNear(
+    peeked.eye,
+    neutral.eye,
+    "manual peek must leave the physical eye fixed",
+  );
+  assert.notDeepEqual(peeked.look, neutral.look);
+  assert.equal(peeked.tetherYaw, neutral.tetherYaw);
+  assertNear(peeked.yawOffset, THIRD_PERSON_OPEN_PEEK_YAW_LIMIT, "open peek yaw");
+  assertNear(peeked.pitchOffset, THIRD_PERSON_MAX_PEEK_PITCH, "peek pitch");
+
+  assertNear(
+    clampThirdPersonPeek("corridor", Math.PI, 0).yawOffset,
+    THIRD_PERSON_CORRIDOR_PEEK_YAW_LIMIT,
+    "corridor peek narrows to 22 degrees",
+  );
+  assertNear(
+    clampThirdPersonPeek("wall_backed", -Math.PI, 0).yawOffset,
+    -THIRD_PERSON_WALL_BACKED_PEEK_YAW_LIMIT,
+    "wall-backed peek narrows to 10 degrees",
+  );
+  assertNear(
+    clampThirdPersonPeek("open", 0, -Math.PI).pitchOffset,
+    THIRD_PERSON_MIN_PEEK_PITCH,
+    "downward peek is capped",
+  );
+}
+
+// Combat remains behind the active actor and below the immersive ceiling.
+{
+  const floorY = 5;
+  const combat = resolveThirdPersonTargetPose({
+    subject: [0, floorY, 0],
+    facingYaw: 0,
+    cameraProfile: THIRD_PERSON_OPEN_COMBAT_PROFILE,
+    spatialMode: "open",
+    floorY,
+  });
+  assertVecNear(combat.eye, [0.45, floorY + 2.35, -4.4], "open combat eye");
+  assertVecNear(combat.look, [0, floorY + 0.65, 1.4], "open combat look");
+  assert.ok(
+    combat.eye[1] <= floorY + THIRD_PERSON_MAX_EYE_HEIGHT_ABOVE_FLOOR,
+    "combat camera remains below the ceiling-safe eye cap",
+  );
+  const extremeHeight = resolveThirdPersonTargetPose({
+    subject: [0, floorY, 0],
+    facingYaw: 0,
+    cameraProfile: {
+      ...THIRD_PERSON_OPEN_COMBAT_PROFILE,
+      eyeHeight: 99,
+    },
+    spatialMode: "open",
+    floorY,
+  });
+  assert.equal(
+    extremeHeight.eye[1],
+    floorY + THIRD_PERSON_MAX_EYE_HEIGHT_ABOVE_FLOOR,
+    "even malformed combat profiles clamp below the 2.85-cell ceiling",
+  );
+  assert.ok(
+    THIRD_PERSON_MAX_EYE_HEIGHT_ABOVE_FLOOR < IMMERSIVE_CEILING_HEIGHT,
+  );
+}
+
+// ── Latched open/corridor/wall-backed hysteresis ───────────────────────────
+assert.equal(THIRD_PERSON_CORRIDOR_ENTER_CLEARANCE, 2.65);
+assert.equal(THIRD_PERSON_CORRIDOR_EXIT_CLEARANCE, 3.25);
+assert.equal(THIRD_PERSON_CORRIDOR_ENTER_MS, 180);
+assert.equal(THIRD_PERSON_CORRIDOR_EXIT_MS, 600);
+assert.equal(THIRD_PERSON_WALL_ENTER_CLEARANCE, 0.75);
+assert.equal(THIRD_PERSON_WALL_EXIT_CLEARANCE, 1.25);
+assert.equal(THIRD_PERSON_WALL_ENTER_MS, 120);
+assert.equal(THIRD_PERSON_WALL_EXIT_MS, 500);
+
+{
+  const constrained: ThirdPersonSpatialMeasurements = {
+    boomClearance: THIRD_PERSON_CORRIDOR_ENTER_CLEARANCE - 0.01,
+    rearClearance: 2,
+    corridorClearsSteve: true,
+  };
+  let state = advanceThirdPersonSpatialState(
+    createThirdPersonSpatialState(),
+    constrained,
+    THIRD_PERSON_CORRIDOR_ENTER_MS - 1,
+  );
+  assert.equal(state.mode, "open");
+  state = advanceThirdPersonSpatialState(state, constrained, 1);
+  assert.equal(
+    state.mode,
+    "corridor",
+    "corridor composition latches only after 180ms",
+  );
+
+  const openAgain: ThirdPersonSpatialMeasurements = {
+    ...clearMeasurements,
+    boomClearance: THIRD_PERSON_CORRIDOR_EXIT_CLEARANCE + 0.01,
+  };
+  state = advanceThirdPersonSpatialState(
+    state,
+    openAgain,
+    THIRD_PERSON_CORRIDOR_EXIT_MS - 1,
+  );
+  assert.equal(state.mode, "corridor");
+  state = advanceThirdPersonSpatialState(state, openAgain, 1);
+  assert.equal(
+    state.mode,
+    "open",
+    "open composition returns only after 600ms of sustained clearance",
+  );
+}
+
+{
+  const rearWall: ThirdPersonSpatialMeasurements = {
+    boomClearance: 2.8,
+    rearClearance: THIRD_PERSON_WALL_ENTER_CLEARANCE - 0.01,
+    corridorClearsSteve: true,
+  };
+  let state = advanceThirdPersonSpatialState(
+    createThirdPersonSpatialState("corridor"),
+    rearWall,
+    THIRD_PERSON_WALL_ENTER_MS - 1,
+  );
+  assert.equal(state.mode, "corridor");
+  state = advanceThirdPersonSpatialState(state, rearWall, 1);
+  assert.equal(
+    state.mode,
+    "wall_backed",
+    "wall-backed composition latches after 120ms",
+  );
+
+  const rearClear: ThirdPersonSpatialMeasurements = {
+    boomClearance: 2.8,
+    rearClearance: THIRD_PERSON_WALL_EXIT_CLEARANCE + 0.01,
+    corridorClearsSteve: true,
+  };
+  state = advanceThirdPersonSpatialState(
+    state,
+    rearClear,
+    THIRD_PERSON_WALL_EXIT_MS - 1,
+  );
+  assert.equal(state.mode, "wall_backed");
+  state = advanceThirdPersonSpatialState(state, rearClear, 1);
+  assert.equal(
+    state.mode,
+    "corridor",
+    "rear-wall exit returns to a safe corridor profile after 500ms",
+  );
+}
+
+{
+  const corridorIntersectsSteve: ThirdPersonSpatialMeasurements = {
+    boomClearance: 4,
+    rearClearance: 4,
+    corridorClearsSteve: false,
+  };
+  let state = advanceThirdPersonSpatialState(
+    createThirdPersonSpatialState(),
+    corridorIntersectsSteve,
+    THIRD_PERSON_WALL_ENTER_MS - 1,
+  );
+  assert.equal(state.mode, "open");
+  state = advanceThirdPersonSpatialState(state, corridorIntersectsSteve, 1);
+  assert.equal(
+    state.mode,
+    "wall_backed",
+    "an unsafe corridor pose enters the protected wall-backed composition",
+  );
+}
+
+// Threshold noise must reset timers instead of making the composition flicker.
+{
+  let state = createThirdPersonSpatialState();
+  for (let index = 0; index < 200; index += 1) {
+    state = advanceThirdPersonSpatialState(
+      state,
+      {
+        boomClearance:
+          THIRD_PERSON_CORRIDOR_ENTER_CLEARANCE +
+          (index % 2 === 0 ? -0.01 : 0.01),
+        rearClearance:
+          THIRD_PERSON_WALL_ENTER_CLEARANCE +
+          (index % 2 === 0 ? -0.01 : 0.01),
+        corridorClearsSteve: true,
+      },
+      16,
+    );
+  }
+  assert.equal(
+    state.mode,
+    "open",
+    "alternating clearance noise cannot accumulate an entry timer",
+  );
+}
+
+// Holding Steve against a wall for ten seconds produces one stable entry.
+{
+  const rearWall: ThirdPersonSpatialMeasurements = {
+    boomClearance: 0.3,
+    rearClearance: 0.2,
+    corridorClearsSteve: false,
+  };
+  let state = createThirdPersonSpatialState();
+  let wallEntries = 0;
+  let wallExits = 0;
+  for (let elapsed = 0; elapsed < 10_000; elapsed += 20) {
+    const previousMode = state.mode;
+    state = advanceThirdPersonSpatialState(state, rearWall, 20);
+    if (previousMode !== "wall_backed" && state.mode === "wall_backed") {
+      wallEntries += 1;
+    }
+    if (previousMode === "wall_backed" && state.mode !== "wall_backed") {
+      wallExits += 1;
+    }
+  }
+  assert.equal(wallEntries, 1);
+  assert.equal(wallExits, 0);
+  assert.equal(state.mode, "wall_backed");
+
+  const released: ThirdPersonSpatialMeasurements = {
+    boomClearance: 4,
+    rearClearance: 2,
+    corridorClearsSteve: true,
+  };
+  state = advanceThirdPersonSpatialState(
+    state,
+    released,
+    THIRD_PERSON_WALL_EXIT_MS - 1,
+  );
+  assert.equal(state.mode, "wall_backed");
+  state = advanceThirdPersonSpatialState(state, released, 1);
+  assert.notEqual(
+    state.mode,
+    "wall_backed",
+    "leaving the wall produces one delayed wall-state exit",
+  );
+}
+
+// While wall-backed, noisy relative clearance cannot relatch the shoulder or
+// perturb the spatial state as long as the selected side remains valid.
+{
+  let spatialState = createThirdPersonSpatialState("wall_backed");
+  let shoulderState = createThirdPersonShoulderSelectionState(-1);
+  for (let index = 0; index < 400; index += 1) {
+    spatialState = advanceThirdPersonSpatialState(
+      spatialState,
+      {
+        boomClearance:
+          index % 2 === 0
+            ? THIRD_PERSON_CORRIDOR_ENTER_CLEARANCE - 0.01
+            : THIRD_PERSON_CORRIDOR_EXIT_CLEARANCE + 0.01,
+        rearClearance:
+          index % 2 === 0
+            ? THIRD_PERSON_WALL_ENTER_CLEARANCE - 0.01
+            : THIRD_PERSON_WALL_ENTER_CLEARANCE + 0.01,
+        corridorClearsSteve: true,
+      },
+      25,
+    );
+    shoulderState = advanceThirdPersonShoulderSelection(
+      shoulderState,
+      {
+        rightClearance: index % 2 === 0 ? 2 : 0.5,
+        leftClearance: index % 2 === 0 ? 0.5 : 2,
+        rightValid: true,
+        leftValid: true,
+        spatialMode: spatialState.mode,
+      },
+      25,
+    );
+    assert.equal(spatialState.mode, "wall_backed");
+    assert.equal(shoulderState.shoulder, -1);
+    assert.equal(shoulderState.challenger, null);
+  }
+}
+
+// ── Nine-fine-tile corridor and repeated-corner continuity ─────────────────
+{
+  // Nine fine cells are three world cells. With the rig's 0.16 camera radius
+  // and 0.10 structural padding, valid camera centers remain within ±1.24.
+  const paddedCorridorHalfWidth = 1.5 - 0.16 - 0.1;
+  const straightPose = resolveThirdPersonTargetPose({
+    subject: [0, 0, 0],
+    facingYaw: 0,
+    cameraProfile: THIRD_PERSON_CORRIDOR_PROFILE,
+    spatialMode: "corridor",
+  });
+  assert.ok(
+    Math.abs(straightPose.eye[0]) <= paddedCorridorHalfWidth,
+    "the fixed-right corridor pose fits a nine-fine-tile hallway",
+  );
+  assert.ok(
+    Math.hypot(straightPose.eye[0], straightPose.eye[2]) > 0.78,
+    "the corridor pose remains outside Steve's exclusion capsule",
+  );
+
+  let cameraState = createThirdPersonCameraStepState({
+    subject: [0, 0, 0],
+    facingYaw: 0,
+    cameraProfile: THIRD_PERSON_CORRIDOR_PROFILE,
+    spatialMode: "corridor",
+  });
+  const turnTargets = [
+    Math.PI / 2,
+    Math.PI,
+    -Math.PI / 2,
+    0,
+    Math.PI / 2,
+    Math.PI,
+    -Math.PI / 2,
+    0,
+  ];
+  const deltaSeconds = 1 / 60;
+  for (const targetYaw of turnTargets) {
+    for (let frame = 0; frame < 45; frame += 1) {
+      const previous = cameraState;
+      cameraState = stepThirdPersonCamera(
+        cameraState,
+        {
+          subject: [0, 0, 0],
+          facingYaw: targetYaw,
+          cameraProfile: THIRD_PERSON_CORRIDOR_PROFILE,
+          spatialMode: "corridor",
+        },
+        deltaSeconds,
+      );
+      const yawStep = Math.abs(
+        wrapThirdPersonCameraYaw(
+          cameraState.tetherYaw - previous.tetherYaw,
+        ),
+      );
+      assert.ok(
+        yawStep <= THIRD_PERSON_MAX_TETHER_YAW_RATE * deltaSeconds + EPSILON,
+        "a corridor turn may rotate at no more than 180 degrees per second",
+      );
+      const rightX = Math.cos(cameraState.tetherYaw);
+      const rightZ = -Math.sin(cameraState.tetherYaw);
+      const eyeDx = cameraState.eye[0] - cameraState.subject[0];
+      const eyeDz = cameraState.eye[2] - cameraState.subject[2];
+      assert.ok(
+        eyeDx * rightX + eyeDz * rightZ >= -EPSILON,
+        "the unswitched default shoulder remains right through repeated turns",
+      );
+      assertFiniteVec(cameraState.eye, "corner eye remains finite");
+      assertFiniteVec(cameraState.look, "corner look remains finite");
+      assert.ok(
+        vecDistance(previous.eye, cameraState.eye) <
+          THIRD_PERSON_CORRIDOR_PROFILE.back,
+        "corner motion glides instead of cutting to the opposite heading",
+      );
+    }
+  }
+}
+
+// ── One-integrator follow, profile smoothing, and snap boundaries ──────────
+{
+  let state = createThirdPersonCameraStepState({
+    subject: [0, 0, 0],
+    facingYaw: 0,
+    cameraProfile: THIRD_PERSON_OPEN_EXPLORE_PROFILE,
+    spatialMode: "open",
+  });
+  const movedSubject: ThirdPersonCameraVec3 = [1 / 3, 0, 0];
+  state = stepThirdPersonCamera(
+    state,
+    {
+      subject: movedSubject,
+      facingYaw: 0,
+      cameraProfile: THIRD_PERSON_OPEN_EXPLORE_PROFILE,
+      spatialMode: "open",
+    },
+    1 / 60,
+  );
+  assert.ok(
+    vecDistance(state.subject, movedSubject) <=
+      THIRD_PERSON_SUBJECT_MAX_LAG + EPSILON,
+    "the camera subject never drags beyond the emergency catch-up clamp",
+  );
+
+  const beforeProfileChange = state;
+  state = stepThirdPersonCamera(
+    state,
+    {
+      subject: movedSubject,
+      facingYaw: 0,
+      cameraProfile: THIRD_PERSON_CORRIDOR_PROFILE,
+      spatialMode: "corridor",
+    },
+    1 / 60,
+  );
+  assert.ok(
+    state.fov > beforeProfileChange.fov &&
+      state.fov < THIRD_PERSON_CORRIDOR_PROFILE.fov,
+    "a spatial-state change smooths FOV instead of snapping",
+  );
+  assert.ok(
+    state.cameraProfile.back < beforeProfileChange.cameraProfile.back &&
+      state.cameraProfile.back > THIRD_PERSON_CORRIDOR_PROFILE.back,
+    "a spatial-state change smooths boom length instead of snapping",
+  );
+
+  const snapped = stepThirdPersonCamera(
+    state,
+    {
+      subject: [20, 0, 0],
+      facingYaw: Math.PI,
+      cameraProfile: THIRD_PERSON_OPEN_COMBAT_PROFILE,
+      spatialMode: "open",
+      snap: true,
+    },
+    1 / 60,
+  );
+  const expectedSnap = resolveThirdPersonTargetPose({
+    subject: [20, 0, 0],
+    facingYaw: Math.PI,
+    cameraProfile: THIRD_PERSON_OPEN_COMBAT_PROFILE,
+    spatialMode: "open",
+  });
+  assertVecNear(
+    snapped.eye,
+    expectedSnap.eye,
+    "explicit map/owner/teleport snaps remain exact",
+  );
+  assert.equal(snapped.fov, THIRD_PERSON_OPEN_COMBAT_PROFILE.fov);
+}
+
+// Equivalent elapsed time must produce nearly identical presentation at
+// 20/30/60Hz, while every intermediate profile change remains monotonic.
+{
+  const simulate = (hz: 20 | 30 | 60): ThirdPersonCameraStepState => {
+    let state = createThirdPersonCameraStepState({
+      subject: [0, 0, 0],
+      facingYaw: 0,
+      cameraProfile: THIRD_PERSON_OPEN_EXPLORE_PROFILE,
+      spatialMode: "open",
+    });
+    let previousFov = state.fov;
+    for (let frame = 0; frame < hz; frame += 1) {
+      state = stepThirdPersonCamera(
+        state,
+        {
+          subject: [1 / 3, 0, 0],
+          facingYaw: Math.PI / 2,
+          cameraProfile: THIRD_PERSON_CORRIDOR_PROFILE,
+          spatialMode: "corridor",
+        },
+        1 / hz,
+      );
+      assert.ok(state.fov >= previousFov - EPSILON);
+      assert.ok(state.fov <= THIRD_PERSON_CORRIDOR_PROFILE.fov + EPSILON);
+      assert.ok(
+        vecDistance(state.subject, [1 / 3, 0, 0]) <=
+          THIRD_PERSON_SUBJECT_MAX_LAG + EPSILON,
+      );
+      previousFov = state.fov;
+    }
+    return state;
+  };
+  const at20 = simulate(20);
+  const at30 = simulate(30);
+  const at60 = simulate(60);
+  assertVecNear(at20.eye, at30.eye, "20/30Hz final eye", 0.02);
+  assertVecNear(at30.eye, at60.eye, "30/60Hz final eye", 0.02);
+  assertVecNear(at20.look, at60.look, "20/60Hz final look", 0.02);
+  assertNear(at20.fov, at60.fov, "20/60Hz final FOV", 0.001);
+  assertNear(
+    at20.tetherYaw,
+    at60.tetherYaw,
+    "20/60Hz final tether yaw",
+    0.02,
+  );
+}
+
+console.log("Fixed-shoulder third-person camera contract tests passed.");

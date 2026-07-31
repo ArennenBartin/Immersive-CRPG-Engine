@@ -12,6 +12,7 @@ import {
   resolveAuthoredViewMode,
   resolveFirstPersonPitchTarget,
   resolveHeldFirstPersonIntent,
+  resolveLiveHeldFirstPersonIntent,
   rotateFacing45,
 } from "../src/utils/firstPersonControls";
 import {
@@ -117,6 +118,23 @@ assert.deepEqual(normalizeFirstPersonFacing(null), [0, -1], "missing facing defa
   const intent = resolveHeldFirstPersonIntent(new Set(["w", "z"]), new Set(["w"]));
   assert.equal(intent.forward, 0, "consumed tap keys stay inert until release");
   assert.equal(intent.wait, true, "wait aliases still resolve in first person");
+}
+{
+  const keyupDeduplication = new Set(["w", "d"]);
+  const heldAfterTurnRelease = new Set(["w"]);
+  assert.equal(
+    resolveHeldFirstPersonIntent(
+      heldAfterTurnRelease,
+      keyupDeduplication,
+    ).forward,
+    0,
+    "first-person quick-chord keyup remains de-duplicated",
+  );
+  assert.equal(
+    resolveLiveHeldFirstPersonIntent(heldAfterTurnRelease).forward,
+    1,
+    "first-person held W also remains live after a quick turn release",
+  );
 }
 
 // Shift converts the A/D turn into a strafe, keeping lateral movement

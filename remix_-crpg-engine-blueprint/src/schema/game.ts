@@ -479,6 +479,13 @@ export const ObjectPlacementSchema = z.object({
   object_id: z.string(),
   cell: z.tuple([z.number(), z.number()]),
   facing: z.tuple([z.number(), z.number()]),
+  // Runtime manipulation may place props on top of one another. These fields
+  // remain optional so authored maps and old saves retain their existing
+  // shape; renderers use the height offset while collision treats the stack
+  // as one shared horizontal footprint.
+  height_offset: z.number().finite().optional(),
+  stack_index: z.number().int().nonnegative().optional(),
+  stack_root_key: z.string().min(1).optional(),
   collision_mode: z.enum(["inherit", "none"]).optional(),
   dialogue_id: z.string().optional(),
   blueprint_id: z.string().optional(),
@@ -531,6 +538,9 @@ export const EntitySchema = z.object({
   id: z.string(),
   display_name: z.string(),
   sprite_id: z.string().optional(),
+  // Optional 3D character model from the object library. The sprite remains
+  // the 2D representation and the loading/error fallback in 3D.
+  model_object_id: z.string().optional(),
   dialogue_id: z.string().optional(),
   // Optional dialogue used when this entity is in the party and the player
   // uses "Talk to Party". Falls back to dialogue_id when unset.
@@ -545,6 +555,19 @@ export const EntitySchema = z.object({
   defense: z.number().default(1),
   speed: z.number().default(10),
   xp_reward: z.number().optional(),
+  // Optional wall-clock pursuit for horror/action encounters. Disabled
+  // entities continue to advance only with the ordinary player-driven
+  // simulation. Play pauses these pulses while modal input is blocking; when
+  // active, one pulse may move several fine cells and may resolve an adjacent
+  // strike.
+  independent_movement: z
+    .object({
+      enabled: z.boolean().default(false),
+      interval_ms: z.number().int().min(180).max(5000).default(650),
+      activation_radius: z.number().min(1).max(60).default(18),
+      steps_per_pulse: z.number().int().min(1).max(3).default(1),
+    })
+    .optional(),
   sensory_profile: SensoryProfileSchema.optional(),
   // Ability ids this entity can use. Party members cast these on their
   // combat turns (the player picks the target).

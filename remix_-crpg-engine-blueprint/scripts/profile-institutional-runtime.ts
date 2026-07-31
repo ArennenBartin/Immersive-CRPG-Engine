@@ -135,8 +135,9 @@ const saveAtTick = (tick: number): PlaySave => ({
   clock_minutes: tick,
 });
 
-// A new clock value forces a physical-world rebuild. These samples expose the
-// actual large-map cost rather than reporting only a warmed cache hit.
+// Distinct clock values model ordinary movement-time advancement. Viewer
+// visibility should reuse its structural world until doors, geometry, or
+// active optical fields change instead of rebuilding all cells for the clock.
 const coldVisibility = sample(15, (index) =>
   createImmersiveViewerVisibilityFromV1(
     gamePackage,

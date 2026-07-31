@@ -71,6 +71,7 @@ import {
   getV1ControlledCombatant,
   dispatchV1UnlockContainer,
   getV1NearbyHostiles,
+  getRuntimeMapGrid,
   getV1SkillRangeCells,
   getV1SkillTargetCells,
   dispatchV1Wait,
@@ -126,6 +127,7 @@ import {
   evaluateCondition,
   evaluateImmersiveWorldStateForSave,
   expandGamePackageToFine,
+  FINE_HALF_EXTENT,
   FINE_PER_MACRO,
   areAdjacentMacro,
   coordKey,
@@ -138,6 +140,7 @@ import {
   macroCoord,
   macroOfFine,
   parseFineCoordKey,
+  resolveV1IndependentPursuitTarget,
   sameMacroCoord,
   scaleMacroDistanceToFine,
 } from "../src/engine-core";
@@ -148,8 +151,23 @@ import {
 } from "../src/schema/game";
 import { resolvePlayModeMap } from "../src/utils/playModeMap";
 import {
+  getPlayerCarriedObject,
+  placePlayerCarriedObject,
+} from "../src/utils/contextualObjectActions";
+import { placementOriginKey } from "../src/utils/objectFootprint";
+import {
+  LARGE_PLAY_MAP_CELL_THRESHOLD,
   getNormalizedMovementRepeatIntervalMs,
+  isLargePlayMap,
   resolveHeldMovementIntent,
+  resolveLiveHeldMovementIntent,
+  resolvePlayArchitectureRadiusMacro,
+  resolvePlayDprCap,
+  resolvePlayFrameIntervalMs,
+  resolvePlayPointLightBudget,
+  resolvePlayRenderRadiusMacro,
+  shouldDispatchHeldInputRepeat,
+  shouldPreserveHeldInputOnCombatStart,
   shouldDriveDemandFrames,
 } from "../src/utils/playInput";
 import {
@@ -170,6 +188,7 @@ import {
   unwrapGamePackageV1,
   unwrapPlaySaveV1,
 } from "../src/schema/v2";
+import type { MapData } from "../src/schema/game";
 import type { PlaySave } from "../src/schema/save";
 import { entityStateKey } from "../src/utils/entityState";
 import {
@@ -185,6 +204,15 @@ import {
 import {
   resolveActorSpriteBrightness,
   resolveAuthoritativeLightRenderMetrics,
+  resolveAuthoritativePointLightIntensity,
+  BACKROOMS_LEVEL_ZERO_PLAY_AMBIENT_LIGHT,
+  PRESENTATION_ROOM_LIGHT_ACTIVATION_RADIUS,
+  PRESENTATION_ROOM_LIGHT_FILL_STRENGTH,
+  PRESENTATION_ROOM_LIGHT_RADIUS,
+  PRESENTATION_ROOM_POINT_LIGHT_INTENSITY,
+  resolvePlayerCarriedLightWorldPosition,
+  resolvePresentationRoomLightContribution,
+  selectLocalPresentationRoomLights,
 } from "../src/utils/lightRendering";
 import { useFxStore } from "../src/store/fxStore";
 import {
@@ -258,6 +286,13 @@ console.log("engine-core: Play input cadence + demand frames");
       !quickChordIntent.wait,
     "consumed chord keys remain inert until every participating key releases",
   );
+  const liveHeldIntent = resolveLiveHeldMovementIntent(new Set(["w"]));
+  ok(
+    liveHeldIntent.ax === 0 &&
+      liveHeldIntent.az === -1 &&
+      !liveHeldIntent.wait,
+    "the live RAF path keeps a surviving held key active after chord keyup",
+  );
   const waitChordIntent = resolveHeldMovementIntent(
     new Set(["z", "arrowright"]),
     new Set(),
@@ -265,6 +300,96 @@ console.log("engine-core: Play input cadence + demand frames");
   ok(
     waitChordIntent.wait && waitChordIntent.ax === 1,
     "wait remains explicit when a direction is held in the same quick chord",
+  );
+  ok(
+    shouldDispatchHeldInputRepeat({
+      inCombat: false,
+      enemyNearby: true,
+      locomotionHeld: true,
+    }) &&
+      shouldDispatchHeldInputRepeat({
+        inCombat: true,
+        enemyNearby: true,
+        locomotionHeld: false,
+      }) &&
+      !shouldDispatchHeldInputRepeat({
+        inCombat: false,
+        enemyNearby: true,
+        locomotionHeld: false,
+      }),
+    "nearby enemies never freeze held locomotion while non-locomotion repeats retain their guard",
+  );
+  ok(
+    shouldPreserveHeldInputOnCombatStart({
+      previousTurnId: null,
+      nextTurnId: "player",
+    }) &&
+      !shouldPreserveHeldInputOnCombatStart({
+        previousTurnId: null,
+        nextTurnId: "ent_companion",
+      }) &&
+      !shouldPreserveHeldInputOnCombatStart({
+        previousTurnId: "ent_companion",
+        nextTurnId: "player",
+      }),
+    "spotting preserves Steve's held movement while real combat actor switches still flush carried input",
+  );
+
+  const negativeOriginMap: MapData = {
+    id: "negative_origin_streaming_contract",
+    display_name: "Negative-origin streaming contract",
+    width: 66,
+    height: 1,
+    spawns: [{ id: "spawn", cell: [-45, -7], facing: [1, 0] }],
+    cells: [
+      {
+        x: -45,
+        y: 0,
+        z: -7,
+        active: true,
+        walkable: true,
+        blocks_los: false,
+        height: 0,
+        visual_height: 0,
+        surface_tag: "none",
+      },
+      {
+        x: 20,
+        y: 0,
+        z: -7,
+        active: true,
+        walkable: true,
+        blocks_los: false,
+        height: 0,
+        visual_height: 0,
+        surface_tag: "none",
+      },
+    ],
+    props: [],
+    custom_object_placements: [],
+    entity_placements: [],
+    item_placements: [],
+    container_placements: [],
+    triggers: [],
+    exits: [],
+  };
+  const negativeGrid = getRuntimeMapGrid(negativeOriginMap);
+  const beforeTrueBoundaryCell = fineCenterOfMacro([-14, -7]);
+  const afterTrueBoundaryCell = fineCenterOfMacro([-13, -7]);
+  const beforeTrueBoundary = negativeGrid.sectorOfFine(
+    beforeTrueBoundaryCell[0],
+    beforeTrueBoundaryCell[1],
+  );
+  const afterTrueBoundary = negativeGrid.sectorOfFine(
+    afterTrueBoundaryCell[0],
+    afterTrueBoundaryCell[1],
+  );
+  ok(
+    beforeTrueBoundary[0] === 0 &&
+      afterTrueBoundary[0] === 1 &&
+      beforeTrueBoundary[1] === 0 &&
+      afterTrueBoundary[1] === 0,
+    "large-map streaming sectors follow negative authored bounds instead of a zero-origin division",
   );
 
   const demandTruthTable = [
@@ -322,6 +447,99 @@ console.log("engine-core: Play input cadence + demand frames");
       ({ input, expected }) => shouldDriveDemandFrames(input) === expected,
     ),
     "the bounded demand-frame clock runs for every visible play scene",
+  );
+  ok(
+    !isLargePlayMap(LARGE_PLAY_MAP_CELL_THRESHOLD - 1) &&
+      isLargePlayMap(LARGE_PLAY_MAP_CELL_THRESHOLD) &&
+      resolvePlayRenderRadiusMacro(
+        "high",
+        LARGE_PLAY_MAP_CELL_THRESHOLD - 1,
+      ) === 12 &&
+      resolvePlayRenderRadiusMacro(
+        "high",
+        LARGE_PLAY_MAP_CELL_THRESHOLD,
+      ) === 10 &&
+      resolvePlayRenderRadiusMacro(
+        "ultra",
+        LARGE_PLAY_MAP_CELL_THRESHOLD,
+      ) === 12 &&
+      resolvePlayArchitectureRadiusMacro(
+        "high",
+        LARGE_PLAY_MAP_CELL_THRESHOLD - 1,
+      ) === 26 &&
+      resolvePlayArchitectureRadiusMacro(
+        "high",
+        LARGE_PLAY_MAP_CELL_THRESHOLD,
+      ) === 22 &&
+      resolvePlayArchitectureRadiusMacro(
+        "high",
+        LARGE_PLAY_MAP_CELL_THRESHOLD,
+      ) >
+        resolvePlayRenderRadiusMacro(
+          "high",
+          LARGE_PLAY_MAP_CELL_THRESHOLD,
+        ),
+    "large maps retain a wide cheap architecture field around a capped detail window",
+  );
+  ok(
+    resolvePlayDprCap(
+      "high",
+      1.75,
+      LARGE_PLAY_MAP_CELL_THRESHOLD - 1,
+    ) === 1.75 &&
+      resolvePlayDprCap(
+        "high",
+        1.75,
+        LARGE_PLAY_MAP_CELL_THRESHOLD,
+      ) === 1.25 &&
+      resolvePlayDprCap(
+        "performance",
+        1.05,
+        LARGE_PLAY_MAP_CELL_THRESHOLD,
+      ) === 1 &&
+      resolvePlayPointLightBudget(
+        "ultra",
+        8,
+        LARGE_PLAY_MAP_CELL_THRESHOLD - 1,
+      ) === 8 &&
+      resolvePlayPointLightBudget(
+        "ultra",
+        8,
+        LARGE_PLAY_MAP_CELL_THRESHOLD,
+      ) === 6 &&
+      resolvePlayPointLightBudget(
+        "high",
+        7,
+        LARGE_PLAY_MAP_CELL_THRESHOLD,
+      ) === 5,
+    "large maps cap pixel density and nearby physical-light cost",
+  );
+  ok(
+    Math.abs(
+      resolvePlayFrameIntervalMs(
+        "balanced",
+        LARGE_PLAY_MAP_CELL_THRESHOLD - 1,
+      ) -
+        1000 / 45,
+    ) <
+      0.000001 &&
+      Math.abs(
+        resolvePlayFrameIntervalMs(
+          "ultra",
+          LARGE_PLAY_MAP_CELL_THRESHOLD - 1,
+        ) -
+          1000 / 60,
+      ) <
+        0.000001 &&
+      Math.abs(
+        resolvePlayFrameIntervalMs(
+          "balanced",
+          LARGE_PLAY_MAP_CELL_THRESHOLD,
+        ) -
+          1000 / 30,
+      ) <
+        0.000001,
+    "compact maps submit smooth camera frames while large maps retain conservative pacing",
   );
 }
 
@@ -2878,6 +3096,159 @@ console.log("engine-core: v1 package/save grid adapter");
     movementOnlyAdjacentEnemy.ok && movementOnlyAdjacentEnemy.save.playerStats.hp === 24,
     "movement-only enemy micro-pulses do not multiply full-action attacks",
   );
+  const independentPulsePackage = {
+    ...fineFootprintPackage,
+    entities: fineFootprintPackage.entities.map((entity) =>
+      entity.id === "ent_training_bot"
+        ? {
+            ...entity,
+            independent_movement: {
+              enabled: true,
+              interval_ms: 620,
+              activation_radius: 22,
+              steps_per_pulse: 1,
+            },
+          }
+        : entity,
+    ),
+  } as typeof gamePackage;
+  const combatPursuitTarget = resolveV1IndependentPursuitTarget(
+    makeSave([0, 0], {
+      in_combat: true,
+      clock_minutes: 120,
+      entity_states: {
+        [botStage6Key]: {
+          cell: [6, 0],
+          hp: 12,
+          alertness: "searching",
+          perception_tracks_live_target: false,
+          perception_memory_expires_at_tick: 10,
+        },
+      },
+    }),
+    botStage6Key,
+    demoMap.id,
+  );
+  ok(
+    combatPursuitTarget?.tracksLiveTarget === true &&
+      combatPursuitTarget.targetActorId === "player" &&
+      combatPursuitTarget.cell[0] === 0 &&
+      combatPursuitTarget.cell[1] === 0,
+    "independently scheduled enemies retain the live combat target after exploration memory expires",
+  );
+  const explorationPursuit = dispatchV1EnemyPulse({
+    gamePackage: independentPulsePackage,
+    save: makeSave([0, 0], {
+      entity_states: {
+        [botStage6Key]: {
+          cell: [6, 0],
+          hp: 12,
+          alertness: "combat",
+          alert_score: 0.0484,
+        },
+      },
+    }),
+    actorIds: [botStage6Key],
+    movementSteps: 1,
+    allowAttack: true,
+    independentMovement: true,
+  });
+  const explorationPursuitCell =
+    explorationPursuit.save.entity_states?.[botStage6Key]?.cell;
+  ok(
+    explorationPursuit.ok &&
+      Boolean(explorationPursuitCell) &&
+      Math.abs((explorationPursuitCell?.[0] || 0) - 6) +
+        Math.abs(explorationPursuitCell?.[1] || 0) ===
+        1,
+    "valid low-score sight alerts let independent enemies pursue between player actions",
+  );
+  const rememberedPursuit = dispatchV1EnemyPulse({
+    gamePackage: independentPulsePackage,
+    save: makeSave([0, 0], {
+      clock_minutes: 10,
+      entity_states: {
+        [botStage6Key]: {
+          cell: [6, 0],
+          hp: 12,
+          alertness: "searching",
+          alert_score: 0.4,
+          perception_tracks_live_target: false,
+          last_known_position: [6, -6],
+          investigation_target_cell: [6, -6],
+          last_evidence_tick: 10,
+          perception_memory_expires_at_tick: 100,
+        },
+      },
+    }),
+    actorIds: [botStage6Key],
+    movementSteps: 1,
+    allowAttack: true,
+    independentMovement: true,
+  });
+  const rememberedPursuitCell =
+    rememberedPursuit.save.entity_states?.[botStage6Key]?.cell;
+  ok(
+    rememberedPursuit.ok &&
+      rememberedPursuitCell?.[0] === 6 &&
+      rememberedPursuitCell?.[1] === -1,
+    "searching independent enemies follow remembered evidence instead of Steve's hidden live cell",
+  );
+  const staleAdjacentPursuit = dispatchV1EnemyPulse({
+    gamePackage: independentPulsePackage,
+    save: makeSave([0, 0], {
+      clock_minutes: 10,
+      entity_states: {
+        [botStage6Key]: {
+          cell: [3, 0],
+          hp: 12,
+          alertness: "searching",
+          alert_score: 0.4,
+          perception_tracks_live_target: false,
+          last_known_position: [3, 0],
+          investigation_target_cell: [3, 0],
+          last_evidence_tick: 10,
+          perception_memory_expires_at_tick: 100,
+        },
+      },
+    }),
+    actorIds: [botStage6Key],
+    movementSteps: 1,
+    allowAttack: true,
+    independentMovement: true,
+  });
+  ok(
+    staleAdjacentPursuit.ok &&
+      staleAdjacentPursuit.save.playerStats.hp === 24,
+    "an enemy adjacent only to stale evidence searches locally without attacking the hidden player",
+  );
+  const explorationStrike = dispatchV1MeleeAttack({
+    gamePackage: independentPulsePackage,
+    save: makeSave([0, 0], {
+      entity_states: {
+        [botStage6Key]: { cell: [3, 0], hp: 12 },
+      },
+    }),
+    actorId: "player",
+    targetId: botStage6Key,
+  });
+  const independentRetaliation = dispatchV1EnemyPulse({
+    gamePackage: independentPulsePackage,
+    save: explorationStrike.save,
+    actorIds: [botStage6Key],
+    movementSteps: 1,
+    allowAttack: true,
+    independentMovement: true,
+  });
+  ok(
+    explorationStrike.ok &&
+      explorationStrike.save.entity_states?.[botStage6Key]?.alertness ===
+        "combat" &&
+      independentRetaliation.ok &&
+      independentRetaliation.save.playerStats.hp <
+        explorationStrike.save.playerStats.hp,
+    "attacking an independent hostile alerts it and permits a real-time retaliation",
+  );
   const secondPulseIndex = demoMap.entity_placements.length;
   const secondPulseKey = entityStateKey(demoMap.id, "ent_training_bot", secondPulseIndex);
   const crowdedPulsePackage = {
@@ -3300,6 +3671,42 @@ console.log("engine-core: v1 package/save grid adapter");
   });
   ok(!intoNpc.ok && intoNpc.reason === "occupied", "v1 adapter rejects occupied entity cells");
 
+  const throughExplorationFollower = dispatchV1MoveEntity({
+    gamePackage,
+    save: makeSave([0, 6], {
+      party_members: ["ent_companion"],
+      entity_states: {
+        ent_companion: { cell: [0, 5], hp: 20 },
+      },
+    }),
+    dx: 0,
+    dy: -1,
+  });
+  ok(
+    throughExplorationFollower.ok &&
+      throughExplorationFollower.save.player.cell[1] === 5,
+    "v1 exploration movement ignores follower catch-up occupancy",
+  );
+
+  const intoCombatPartyMember = dispatchV1MoveEntity({
+    gamePackage,
+    save: makeSave([0, 6], {
+      party_members: ["ent_companion"],
+      entity_states: {
+        ent_companion: { cell: [0, 5], hp: 20 },
+      },
+      in_combat: true,
+      combat_queue: ["player", "ent_companion"],
+      active_turn_id: "player",
+    }),
+    dx: 0,
+    dy: -1,
+  });
+  ok(
+    !intoCombatPartyMember.ok && intoCombatPartyMember.reason === "occupied",
+    "v1 combat movement preserves party-member occupancy",
+  );
+
   const door = demoMap.custom_object_placements.find(
     (placement) => placement.object_id === "obj_p_door",
   )!;
@@ -3325,6 +3732,164 @@ console.log("engine-core: v1 package/save grid adapter");
 
   const fineDoorPackage = expandGamePackageToFine(gamePackage);
   const fineDoorMap = fineDoorPackage.maps.find((map) => map.id === demoMap.id)!;
+  const cornerStart = fineCenterOfMacro([0, 0]);
+  const horizontalSweepBlocker: [number, number] = [
+    cornerStart[0] + FINE_HALF_EXTENT + 1,
+    cornerStart[1] - FINE_HALF_EXTENT,
+  ];
+  const verticalSweepBlocker: [number, number] = [
+    cornerStart[0] - FINE_HALF_EXTENT,
+    cornerStart[1] + FINE_HALF_EXTENT + 1,
+  ];
+  const destinationWallCell: [number, number] = [
+    cornerStart[0] + FINE_HALF_EXTENT + 1,
+    cornerStart[1],
+  ];
+  const cornerTestPackage = (
+    blockedCells: [number, number][],
+  ): typeof fineDoorPackage => {
+    const blocked = new Set(
+      blockedCells.map(([x, z]) => fineCoordKey(x, z)),
+    );
+    return {
+      ...fineDoorPackage,
+      maps: fineDoorPackage.maps.map((map) =>
+        map.id === demoMap.id
+          ? {
+              ...map,
+              cells: map.cells.map((cell) =>
+                blocked.has(fineCoordKey(cell.x, cell.z))
+                  ? {
+                      ...cell,
+                      walkable: false,
+                      blocks_los: true,
+                      visual_height: 1.6,
+                      object_id: "obj_wall_block",
+                    }
+                  : cell,
+              ),
+            }
+          : map,
+      ),
+    };
+  };
+  const aroundOneCorner = dispatchV1MoveEntity({
+    gamePackage: cornerTestPackage([horizontalSweepBlocker]),
+    save: makeSave([cornerStart[0], cornerStart[1]]),
+    dx: 1,
+    dy: 1,
+  });
+  ok(
+    aroundOneCorner.ok,
+    "a diagonal footprint may cut around one blocked corner when the other sweep lane is open",
+  );
+  const throughPinchedCorner = dispatchV1MoveEntity({
+    gamePackage: cornerTestPackage([
+      horizontalSweepBlocker,
+      verticalSweepBlocker,
+    ]),
+    save: makeSave([cornerStart[0], cornerStart[1]]),
+    dx: 1,
+    dy: 1,
+    allowCornerAssist: true,
+  });
+  ok(
+    !throughPinchedCorner.ok &&
+      throughPinchedCorner.reason === "blocked" &&
+      !throughPinchedCorner.cornerAssisted,
+    "a diagonal footprint cannot squeeze through a corner with both sweep lanes blocked",
+  );
+  const throughDestinationWall = dispatchV1MoveEntity({
+    gamePackage: cornerTestPackage([destinationWallCell]),
+    save: makeSave([cornerStart[0], cornerStart[1]]),
+    dx: 1,
+    dy: 1,
+  });
+  ok(
+    !throughDestinationWall.ok && throughDestinationWall.reason === "blocked",
+    "corner cutting never permits a footprint to enter a full wall",
+  );
+
+  const cardinalCornerAssist = dispatchV1MoveEntity({
+    gamePackage: cornerTestPackage([horizontalSweepBlocker]),
+    save: makeSave([cornerStart[0], cornerStart[1]]),
+    dx: 1,
+    dy: 0,
+    allowCornerAssist: true,
+  });
+  ok(
+    cardinalCornerAssist.ok &&
+      cardinalCornerAssist.cornerAssisted &&
+      !cardinalCornerAssist.doorwayAssisted &&
+      cardinalCornerAssist.resolvedDelta[0] === 0 &&
+      cardinalCornerAssist.resolvedDelta[1] === 1 &&
+      cardinalCornerAssist.save.player.cell[0] === cornerStart[0] &&
+      cardinalCornerAssist.save.player.cell[1] === cornerStart[1] + 1 &&
+      cardinalCornerAssist.save.player.facing[0] === 1 &&
+      cardinalCornerAssist.save.player.facing[1] === 0,
+    "a cardinal move grazing the extreme edge of a wall aligns one fine cell away while preserving intended facing",
+  );
+  const afterCardinalCornerAssist = dispatchV1MoveEntity({
+    gamePackage: cornerTestPackage([horizontalSweepBlocker]),
+    save: cardinalCornerAssist.save,
+    dx: 1,
+    dy: 0,
+    allowCornerAssist: true,
+  });
+  ok(
+    afterCardinalCornerAssist.ok &&
+      !afterCardinalCornerAssist.cornerAssisted &&
+      afterCardinalCornerAssist.save.player.cell[0] === cornerStart[0] + 1 &&
+      afterCardinalCornerAssist.save.player.cell[1] === cornerStart[1] + 1,
+    "held forward movement clears the wall edge normally after one corner-alignment step",
+  );
+
+  const diagonalEdgeBlocker: [number, number] = [
+    cornerStart[0] + FINE_HALF_EXTENT + 1,
+    cornerStart[1] + FINE_HALF_EXTENT + 1,
+  ];
+  const diagonalCornerAssist = dispatchV1MoveEntity({
+    gamePackage: cornerTestPackage([diagonalEdgeBlocker]),
+    save: makeSave([cornerStart[0], cornerStart[1]]),
+    dx: 1,
+    dy: 1,
+    allowCornerAssist: true,
+  });
+  ok(
+    diagonalCornerAssist.ok &&
+      diagonalCornerAssist.cornerAssisted &&
+      diagonalCornerAssist.resolvedDelta[0] === 1 &&
+      diagonalCornerAssist.resolvedDelta[1] === 0 &&
+      diagonalCornerAssist.save.player.cell[0] === cornerStart[0] + 1 &&
+      diagonalCornerAssist.save.player.cell[1] === cornerStart[1] &&
+      diagonalCornerAssist.save.player.facing[0] === 1 &&
+      diagonalCornerAssist.save.player.facing[1] === 1,
+    "angled movement that catches a wall corner glides along a requested axis without changing intended facing",
+  );
+
+  const fullLeadingWall = ([-1, 0, 1] as const).map(
+    (offset) =>
+      [
+        cornerStart[0] + FINE_HALF_EXTENT + 1,
+        cornerStart[1] + offset,
+      ] as [number, number],
+  );
+  const intoFullLeadingWall = dispatchV1MoveEntity({
+    gamePackage: cornerTestPackage(fullLeadingWall),
+    save: makeSave([cornerStart[0], cornerStart[1]]),
+    dx: 1,
+    dy: 0,
+    allowCornerAssist: true,
+  });
+  ok(
+    !intoFullLeadingWall.ok &&
+      intoFullLeadingWall.reason === "blocked" &&
+      !intoFullLeadingWall.cornerAssisted &&
+      intoFullLeadingWall.save.player.cell[0] === cornerStart[0] &&
+      intoFullLeadingWall.save.player.cell[1] === cornerStart[1],
+    "corner assistance never drifts sideways along a full wall face",
+  );
+
   const fineDoor = fineDoorMap.custom_object_placements.find(
     (placement) => placement.object_id === "obj_p_door",
   )!;
@@ -3521,10 +4086,13 @@ console.log("engine-core: v1 package/save grid adapter");
     dx: 1,
     dy: 0,
     allowDoorwayAssist: true,
+    allowCornerAssist: true,
   });
   ok(
-    !isolatedObstacleMove.ok && !isolatedObstacleMove.doorwayAssisted,
-    "doorway funneling does not slide the player around an isolated blocking object",
+    !isolatedObstacleMove.ok &&
+      !isolatedObstacleMove.doorwayAssisted &&
+      !isolatedObstacleMove.cornerAssisted,
+    "movement assists do not slide the player around an isolated blocking object",
   );
 
   const objectById = new Map(gamePackage.object_library.map((object) => [object.id, object]));
@@ -3600,9 +4168,35 @@ console.log("engine-core: v1 package/save grid adapter");
   ok(
     Math.abs(lightRenderMetrics.worldRadius - 14 / 3) < 0.000001 &&
       lightRenderMetrics.pointDistance === lightRenderMetrics.worldRadius &&
-      lightRenderMetrics.poolRadius === lightRenderMetrics.worldRadius &&
-      lightRenderMetrics.decay === 1,
-    "authoritative 3D light cutoff and pool preserve the simulation's literal radius",
+      lightRenderMetrics.poolRadius < lightRenderMetrics.worldRadius &&
+      lightRenderMetrics.poolRadius <= 1.1 &&
+      lightRenderMetrics.decay === 2,
+    "authoritative 3D light preserves the simulation cutoff while limiting the fake pool to a local contact glow",
+  );
+  ok(
+    resolveAuthoritativePointLightIntensity(0) === 0 &&
+      resolveAuthoritativePointLightIntensity(-1) === 0 &&
+      resolveAuthoritativePointLightIntensity(1) === 7 &&
+      resolveAuthoritativePointLightIntensity(2) === 7 &&
+      resolveAuthoritativePointLightIntensity(0.6) >
+        resolveAuthoritativePointLightIntensity(0.2),
+    "authoritative source intensity maps monotonically to useful physical scene-light energy",
+  );
+  const forwardCarriedLight = resolvePlayerCarriedLightWorldPosition(
+    [4, 0.2, -3],
+    0,
+  );
+  const rightFacingCarriedLight = resolvePlayerCarriedLightWorldPosition(
+    [4, 0.2, -3],
+    Math.PI / 2,
+  );
+  ok(
+    forwardCarriedLight[0] > 4 &&
+      forwardCarriedLight[1] > 1.2 &&
+      forwardCarriedLight[2] > -3 &&
+      rightFacingCarriedLight[0] > 4 &&
+      rightFacingCarriedLight[2] < -3,
+    "player-carried light stays outside the model at a forward right-hand offset for every facing",
   );
   ok(
     Math.abs(resolveActorSpriteBrightness(0) - 0.3) < 0.000001 &&
@@ -3611,6 +4205,65 @@ console.log("engine-core: v1 package/save grid adapter");
       Math.abs(resolveActorSpriteBrightness(2) - 1) < 0.000001 &&
       resolveActorSpriteBrightness(0.64) > resolveActorSpriteBrightness(0.16),
     "actor sprite lighting shades the whole billboard from its authoritative foot-cell illumination with a darkness floor",
+  );
+  ok(
+    resolvePresentationRoomLightContribution([2, 2], [[2, 2]]) ===
+        PRESENTATION_ROOM_LIGHT_FILL_STRENGTH &&
+      resolvePresentationRoomLightContribution([6, 2], [[2, 2]]) > 0 &&
+      PRESENTATION_ROOM_LIGHT_RADIUS >= 7 &&
+      PRESENTATION_ROOM_POINT_LIGHT_INTENSITY >= 4 &&
+      PRESENTATION_ROOM_POINT_LIGHT_INTENSITY <= 7 &&
+      resolvePresentationRoomLightContribution([20, 20], [[2, 2]]) === 0 &&
+      resolvePresentationRoomLightContribution(
+        [2, 2],
+        [[20, 20], [2, 2]],
+      ) === PRESENTATION_ROOM_LIGHT_FILL_STRENGTH,
+    "permanent room fixtures keep a restrained local actor fill while physical inverse-square lights shape the room",
+  );
+  ok(
+    BACKROOMS_LEVEL_ZERO_PLAY_AMBIENT_LIGHT > 0.05 &&
+      BACKROOMS_LEVEL_ZERO_PLAY_AMBIENT_LIGHT <= 0.1,
+    "Level Zero uses a restrained visual ambient floor without changing mechanical ambient",
+  );
+  const selectedRoomLights = selectLocalPresentationRoomLights(
+    [
+      { key: "overhead", position: [-6, 2.6, -6] as const },
+      { key: "near-west", position: [-7, 2.6, 0] as const },
+      { key: "near-north", position: [0, 2.6, -7] as const },
+      { key: "far", position: [6, 2.6, 6] as const },
+    ],
+    [-6, -6],
+    5,
+  );
+  ok(
+    PRESENTATION_ROOM_LIGHT_ACTIVATION_RADIUS >
+      PRESENTATION_ROOM_LIGHT_RADIUS &&
+      selectedRoomLights.length === 3 &&
+      selectedRoomLights[0]?.key === "overhead" &&
+      selectedRoomLights.some((light) => light.key === "near-west") &&
+      selectedRoomLights.some((light) => light.key === "near-north") &&
+      selectedRoomLights.every((light) => light.key !== "far"),
+    "room-light activation follows the actor, keeps every locally contributing fixture, and culls only physically distant fixtures",
+  );
+  const selectedForwardRoomLights = selectLocalPresentationRoomLights(
+    [
+      { key: "local", position: [0, 2.6, 0] as const },
+      { key: "local-side", position: [2, 2.6, 1] as const },
+      { key: "ahead-near", position: [0, 2.6, -9] as const },
+      { key: "ahead-far", position: [1, 2.6, -17] as const },
+      { key: "behind", position: [0, 2.6, 9] as const },
+      { key: "far-side", position: [16, 2.6, -12] as const },
+    ],
+    [0, 0],
+    4,
+    { forward: [0, -1] },
+  );
+  ok(
+    selectedForwardRoomLights[0]?.key === "local" &&
+      selectedForwardRoomLights.some((light) => light.key === "ahead-near") &&
+      selectedForwardRoomLights.some((light) => light.key === "ahead-far") &&
+      selectedForwardRoomLights.every((light) => light.key !== "far-side"),
+    "room-light selection reserves local fixtures and spends remaining physical lights down the camera-facing corridor",
   );
 
   const world = createV1GridWorld({ gamePackage, save: makeSave([0, 6]) });
@@ -4064,6 +4717,80 @@ console.log("engine-core: v1 package/save grid adapter");
         instance.location.type === "hand_slot",
     ),
     "kernel snapshot places carried objects in an actor hand holder",
+  );
+
+  const stackedTop = {
+    ...crate,
+    id: "test_stack_top",
+    cell: [crate.cell[0] + 5, crate.cell[1]] as [number, number],
+  };
+  const stackPackage = {
+    ...gamePackage,
+    maps: gamePackage.maps.map((map) =>
+      map.id === demoMap.id
+        ? {
+            ...map,
+            custom_object_placements: [
+              ...(map.custom_object_placements || []),
+              stackedTop,
+            ],
+          }
+        : map,
+    ),
+  };
+  const baseStackKey = placementOriginKey(crate);
+  const topStackKey = placementOriginKey(stackedTop);
+  const holdingTop = makeSave([crate.cell[0] - 1, crate.cell[1]], {
+    map_deltas: {
+      [demoMap.id]: {
+        carried_objects: {
+          [topStackKey]: {
+            object_id: stackedTop.object_id,
+            actor_ids: ["player"],
+            cell: stackedTop.cell,
+          },
+        },
+      },
+    },
+  });
+  ok(
+    getPlayerCarriedObject(holdingTop, demoMap.id)?.key === topStackKey,
+    "contextual interaction resolves the object in Steve's hands",
+  );
+  const stackedSave = placePlayerCarriedObject(holdingTop, {
+    mapId: demoMap.id,
+    placementKey: topStackKey,
+    cell: [crate.cell[0], crate.cell[1]],
+    facing: [1, 0],
+    stackRootKey: baseStackKey,
+    stackIndex: 1,
+    heightOffset: 0.72,
+  });
+  ok(
+    !stackedSave.map_deltas?.[demoMap.id]?.carried_objects?.[topStackKey] &&
+      stackedSave.map_deltas?.[demoMap.id]?.moved_objects?.[topStackKey]
+        ?.stack_root_key === baseStackKey,
+    "placing a carried prop records a persistent vertical stack",
+  );
+  const pushStack = dispatchV1PushObject({
+    gamePackage: stackPackage,
+    save: stackedSave,
+    x: crate.cell[0],
+    y: crate.cell[1],
+    dx: 1,
+    dy: 0,
+  });
+  ok(
+    pushStack.ok &&
+      pushStack.save.map_deltas?.[demoMap.id]?.moved_objects?.[baseStackKey]
+        ?.cell[0] ===
+        crate.cell[0] + 1 &&
+      pushStack.save.map_deltas?.[demoMap.id]?.moved_objects?.[topStackKey]
+        ?.cell[0] ===
+        crate.cell[0] + 1 &&
+      pushStack.save.map_deltas?.[demoMap.id]?.moved_objects?.[topStackKey]
+        ?.height_offset === 0.72,
+    "pushing a stacked prop moves the whole stack and preserves its height",
   );
 
   // change_map command.
@@ -5046,6 +5773,7 @@ console.log("engine-core: v1 package/save grid adapter");
     save: sightAlert.save,
     threatRadius: 0,
     chaseRadius: 8,
+    requireAlert: true,
   });
   ok(
     sightStarted.ok &&
@@ -5112,6 +5840,79 @@ console.log("engine-core: v1 package/save grid adapter");
       enemyMove.save.entity_states?.[botKey]?.behavior_intent?.action === "attack" &&
       enemyMove.save.entity_states?.[botKey]?.behavior_intent_log?.length === 1,
     "enemy_turn records its shared-arbiter combat intent",
+  );
+
+  // A hostile inside a U-shaped dead end must initially move away from the
+  // player to escape. Greedy distance reduction oscillates at the closed end;
+  // route-first pursuit chooses the corridor exit.
+  const culDeSacBlocked = new Set<string>();
+  for (let x = -5; x <= 0; x += 1) {
+    culDeSacBlocked.add(fineCoordKey(x, -2));
+    culDeSacBlocked.add(fineCoordKey(x, 2));
+  }
+  for (let z = -2; z <= 2; z += 1) {
+    culDeSacBlocked.add(fineCoordKey(0, z));
+  }
+  const culDeSacCells = [];
+  for (let x = -11; x <= 11; x += 1) {
+    for (let z = -11; z <= 11; z += 1) {
+      culDeSacCells.push({
+        x,
+        y: 0,
+        z,
+        active: true,
+        walkable: !culDeSacBlocked.has(fineCoordKey(x, z)),
+        terrain: "stone",
+        height: 0,
+        visual_height: culDeSacBlocked.has(fineCoordKey(x, z)) ? 1.6 : 0,
+        blocks_los: culDeSacBlocked.has(fineCoordKey(x, z)),
+      });
+    }
+  }
+  const culDeSacPackage = {
+    ...fineFootprintPackage,
+    maps: fineFootprintPackage.maps.map((map) =>
+      map.id === demoMap.id
+        ? {
+            ...map,
+            cells: culDeSacCells,
+            entity_placements: [
+              {
+                entity_id: "ent_training_bot",
+                cell: [-3, 0] as [number, number],
+                facing: [1, 0] as [number, number],
+              },
+            ],
+            custom_object_placements: [],
+            container_placements: [],
+          }
+        : map,
+    ),
+  } as typeof fineFootprintPackage;
+  const culDeSacBotKey = entityStateKey(demoMap.id, "ent_training_bot", 0);
+  const culDeSacChase = dispatchV1EnemyTurn({
+    gamePackage: culDeSacPackage,
+    save: makeSave([7, 0], {
+      in_combat: true,
+      combat_queue: ["player"],
+      active_turn_id: "player",
+      entity_states: {
+        [culDeSacBotKey]: {
+          cell: [-3, 0],
+          facing: [1, 0],
+          hp: 12,
+        },
+      },
+    }),
+    actorId: culDeSacBotKey,
+    advanceTurn: false,
+    movementSteps: 1,
+    allowAttack: false,
+  });
+  ok(
+    culDeSacChase.ok &&
+      culDeSacChase.save.entity_states?.[culDeSacBotKey]?.cell?.[0] === -4,
+    "corridor pursuit routes away from a closed branch instead of oscillating toward the player",
   );
 
   const enemyAttack = dispatchV1EnemyTurn({

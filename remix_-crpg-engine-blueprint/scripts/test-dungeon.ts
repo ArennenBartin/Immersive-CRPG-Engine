@@ -27,6 +27,8 @@ import {
   INSTITUTIONAL_RUIN_RECIPE_ID,
   INSTITUTIONAL_RUIN_SINGLE_MAP_RECIPE_ID,
   INSTITUTIONAL_RUIN_ROOM_TEMPLATES,
+  INSTITUTIONAL_RUIN_THEME,
+  INSTITUTIONAL_RUIN_THEME_ID,
   installInstitutionalRuinGeneratorContent,
 } from "../src/dungeonGen/presets/institutionalRuin";
 import {
@@ -178,6 +180,33 @@ console.log("dungeon: single-map preset is open-only while legacy defaults remai
     reinstalled.dungeon_recipes.find((entry) => entry.id === INSTITUTIONAL_RUIN_SINGLE_MAP_RECIPE_ID)?.name,
     "Authored Single-Map Variant",
     "starter installation must not overwrite an edited v2 recipe",
+  );
+  const legacyLightingPackage = structuredClone(fixturePackage);
+  const legacyLightingTheme = legacyLightingPackage.dungeon_themes.find(
+    (theme) => theme.id === INSTITUTIONAL_RUIN_THEME_ID,
+  )!;
+  legacyLightingTheme.population.roomLightObjectIds = [];
+  legacyLightingPackage.object_library =
+    legacyLightingPackage.object_library.filter(
+      (object) =>
+        !INSTITUTIONAL_RUIN_THEME.population.roomLightObjectIds.includes(
+          object.id,
+        ),
+    );
+  const lightingUpgraded = installInstitutionalRuinGeneratorContent(
+    legacyLightingPackage,
+  );
+  assert.deepEqual(
+    lightingUpgraded.dungeon_themes.find(
+      (theme) => theme.id === INSTITUTIONAL_RUIN_THEME_ID,
+    )?.population.roomLightObjectIds,
+    INSTITUTIONAL_RUIN_THEME.population.roomLightObjectIds,
+    "reinstalling the preset must fill the legacy empty room-light list",
+  );
+  assert.ok(
+    INSTITUTIONAL_RUIN_THEME.population.roomLightObjectIds.every((objectId) =>
+      lightingUpgraded.object_library.some((object) => object.id === objectId)),
+    "reinstalling the preset must add the missing ceiling fixture object",
   );
   assert.equal(
     reinstalled.dungeon_recipes.filter((entry) => entry.id === INSTITUTIONAL_RUIN_SINGLE_MAP_RECIPE_ID).length,
@@ -549,6 +578,30 @@ console.log("dungeon: legacy multi-floor generation remains deterministic and pa
   assert.ok(authoredChemistry.some((chemistry) => (chemistry.fuel ?? 0) > 0),
     "the default recipe must author a flammable-debris hazard pattern");
   const theme = fixture.gamePackage.dungeon_themes.find((entry) => entry.id === fixture.recipe.themeId)!;
+  const roomLightObjectIds = new Set(theme.population.roomLightObjectIds);
+  const roomLightPlacements = first.maps.flatMap((map) =>
+    map.custom_object_placements.filter((placement) =>
+      roomLightObjectIds.has(placement.object_id)));
+  assert.ok(
+    roomLightPlacements.length >= (first.graph?.nodes.length || 0),
+    "every generated room must receive at least one permanent ceiling light",
+  );
+  assert.ok(
+    roomLightPlacements.every((placement) => placement.collision_mode === "none"),
+    "overhead room lights must never consume movement space",
+  );
+  assert.ok(
+    [...roomLightObjectIds].every((objectId) => {
+      const definition = fixture.gamePackage.object_library.find(
+        (candidate) => candidate.id === objectId,
+      );
+      return Boolean(
+        definition?.tags.includes("presentation_room_light") &&
+        definition.tags.includes("light_ceiling"),
+      );
+    }),
+    "institutional room fixtures must use the optimized ceiling-light presentation contract",
+  );
   assert.ok(first.maps.some((map) => map.custom_object_placements.some((placement) =>
     placement.object_id === theme.architecture.pushableObjectId && placement.collision_mode !== "none")),
   "the default recipe must place a normal pushable manipulation object");

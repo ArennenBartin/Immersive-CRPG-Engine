@@ -225,11 +225,13 @@ export const DungeonThemeProfileSchema = z.object({
     hazardProfileIds: z.array(NonEmptyIdSchema).default([]),
     rewardProfileIds: z.array(NonEmptyIdSchema).default([]),
     narrativeProfileIds: z.array(NonEmptyIdSchema).default([]),
+    roomLightObjectIds: z.array(NonEmptyIdSchema).default([]),
   }).default({
     encounterProfileIds: [],
     hazardProfileIds: [],
     rewardProfileIds: [],
     narrativeProfileIds: [],
+    roomLightObjectIds: [],
   }),
   keyItemPool: z.array(DungeonWeightedRefSchema).default([]),
   rewardItemPool: z.array(DungeonWeightedRefSchema).default([]),

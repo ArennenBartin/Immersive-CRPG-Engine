@@ -4,6 +4,10 @@
 // into the fine-cell world at load. Never author fine coordinates.
 
 import type { CellData, GamePackage } from "../../schema/game";
+import {
+  BACKROOMS_LEVEL_ZERO_LIGHT_OBJECT_ID,
+  INSTITUTIONAL_CEILING_LIGHT_OBJECT_ID,
+} from "../../schema/presets";
 import { PEOPLE_HORROR_SPRITES, peopleHorrorSpriteId } from "../animatedSprites";
 
 export type MapData = GamePackage["maps"][number];
@@ -150,6 +154,148 @@ export const prop = (
   cellPos: [number, number],
   facing: [number, number] = [0, 1],
 ): ObjectPlacementData => ({ object_id, cell: cellPos, facing });
+
+const QA_CEILING_LIGHT_CELLS_PER_FIXTURE = 36;
+const QA_CEILING_LIGHT_MAX_FIXTURES = 8;
+const QA_CEILING_LIGHT_OBJECT_IDS = new Set([
+  INSTITUTIONAL_CEILING_LIGHT_OBJECT_ID,
+  BACKROOMS_LEVEL_ZERO_LIGHT_OBJECT_ID,
+]);
+
+const qaCeilingEligibleCells = (map: MapData): [number, number][] => {
+  const walkable = map.cells
+    .filter((entry) => entry.active !== false && entry.walkable)
+    .map((entry) => [entry.x, entry.z] as [number, number]);
+  const walkableKeys = new Set(walkable.map(([x, z]) => key(x, z)));
+  const buffered = walkable.filter(([x, z]) =>
+    walkableKeys.has(key(x + 1, z)) &&
+    walkableKeys.has(key(x - 1, z)) &&
+    walkableKeys.has(key(x, z + 1)) &&
+    walkableKeys.has(key(x, z - 1)),
+  );
+  return buffered.length ? buffered : walkable;
+};
+
+/**
+ * Gives every QA room the same low-cost ceiling-light presentation used by
+ * generated institutional rooms. The actual ceiling surface is derived by the
+ * 3D renderer from every active walkable cell; these ordinary collision-free
+ * placements supply the matching fluorescent fixtures and physical scene
+ * light without becoming simulation/perception stimuli.
+ */
+export const withQaRoomCeilingArchitecture = (map: MapData): MapData => {
+  const walkableCount = map.cells.filter(
+    (entry) => entry.active !== false && entry.walkable,
+  ).length;
+  if (walkableCount === 0) return map;
+
+  let normalizedExistingFixture = false;
+  const normalizedPlacements = map.custom_object_placements.map((placement) => {
+    if (
+      !QA_CEILING_LIGHT_OBJECT_IDS.has(placement.object_id) ||
+      placement.collision_mode === "none"
+    ) {
+      return placement;
+    }
+    normalizedExistingFixture = true;
+    return { ...placement, collision_mode: "none" as const };
+  });
+  const normalizedMap = normalizedExistingFixture
+    ? { ...map, custom_object_placements: normalizedPlacements }
+    : map;
+
+  const targetCount = Math.max(
+    1,
+    Math.min(
+      QA_CEILING_LIGHT_MAX_FIXTURES,
+      Math.ceil(walkableCount / QA_CEILING_LIGHT_CELLS_PER_FIXTURE),
+    ),
+  );
+  const existing = normalizedMap.custom_object_placements.filter(
+    (placement) => QA_CEILING_LIGHT_OBJECT_IDS.has(placement.object_id),
+  );
+  if (existing.length >= targetCount) return normalizedMap;
+
+  const candidates = qaCeilingEligibleCells(normalizedMap);
+  if (!candidates.length) return normalizedMap;
+  const center = candidates.reduce(
+    (sum, [x, z]) => [sum[0] + x, sum[1] + z] as [number, number],
+    [0, 0] as [number, number],
+  );
+  center[0] /= candidates.length;
+  center[1] /= candidates.length;
+
+  const selected = existing.map(
+    (placement) => [placement.cell[0], placement.cell[1]] as [number, number],
+  );
+  const unavailable = new Set(selected.map(([x, z]) => key(x, z)));
+  const needed = targetCount - selected.length;
+
+  for (let index = 0; index < needed; index += 1) {
+    const remaining = candidates.filter(([x, z]) => !unavailable.has(key(x, z)));
+    if (!remaining.length) break;
+    remaining.sort((left, right) => {
+      const score = (candidate: [number, number]) => {
+        if (!selected.length) {
+          return -(
+            (candidate[0] - center[0]) ** 2 +
+            (candidate[1] - center[1]) ** 2
+          );
+        }
+        return Math.min(
+          ...selected.map(
+            (anchor) =>
+              (candidate[0] - anchor[0]) ** 2 +
+              (candidate[1] - anchor[1]) ** 2,
+          ),
+        );
+      };
+      return (
+        score(right) - score(left) ||
+        left[1] - right[1] ||
+        left[0] - right[0]
+      );
+    });
+    const chosen = remaining[0];
+    selected.push(chosen);
+    unavailable.add(key(chosen[0], chosen[1]));
+  }
+
+  const usedIds = new Set(
+    normalizedMap.custom_object_placements
+      .map((placement) => placement.id)
+      .filter((id): id is string => Boolean(id)),
+  );
+  const additions = selected
+    .slice(existing.length)
+    .map(([x, z], index): ObjectPlacementData => {
+      const baseId = `qa_ceiling_light_${map.id}_${x}_${z}`;
+      let id = baseId;
+      let suffix = 2;
+      while (usedIds.has(id)) {
+        id = `${baseId}_${suffix}`;
+        suffix += 1;
+      }
+      usedIds.add(id);
+      return {
+        id,
+        object_id: INSTITUTIONAL_CEILING_LIGHT_OBJECT_ID,
+        cell: [x, z],
+        facing: [0, 1],
+        collision_mode: "none",
+      };
+    });
+
+  return additions.length
+    ? {
+        ...normalizedMap,
+        custom_object_placements: [
+          ...normalizedMap.custom_object_placements,
+          ...additions,
+        ],
+      }
+    : normalizedMap;
+};
 
 // A button/valve/lever: a visible object plus an interact trigger on its tile.
 // Pressing Act while facing (or standing on) the tile fires the cutscene.
@@ -374,7 +520,9 @@ export interface QaWing {
 }
 
 export const mergeWings = (wings: QaWing[]): Required<QaWing> => ({
-  maps: wings.flatMap((wing) => wing.maps),
+  maps: wings
+    .flatMap((wing) => wing.maps)
+    .map(withQaRoomCeilingArchitecture),
   entities: wings.flatMap((wing) => wing.entities || []),
   keywords: wings.flatMap((wing) => wing.keywords || []),
   dynamicTopics: wings.flatMap((wing) => wing.dynamicTopics || []),
