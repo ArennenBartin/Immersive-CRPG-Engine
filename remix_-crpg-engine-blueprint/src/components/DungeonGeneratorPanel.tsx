@@ -32,6 +32,11 @@ import {
   installInstitutionalRuinGeneratorContent,
 } from "../dungeonGen/presets/institutionalRuin";
 import {
+  createLevel0ProofRecipe,
+  installLevel0ProofGeneratorContent,
+  LEVEL0_PROOF_RECIPE_ID,
+} from "../dungeonGen/presets/level0Proof";
+import {
   applyDungeonPackageBake,
   planDungeonPackageBake,
   type ApplyDungeonPackageBakeOptions,
@@ -402,6 +407,22 @@ export function DungeonGeneratorPanel() {
       || installed.dungeon_recipes.find((candidate) => candidate.id === "institutional_ruin_v1")
       || installed.dungeon_recipes[0]
       || createInstitutionalRuinSingleMapRecipe();
+    setSourceRecipeId(recipe.id);
+    setRecipeDraft(cloneRecipe(recipe));
+    clearLocalGeneration();
+    setGenerationError(null);
+  };
+
+  // TEMPORARY — Backrooms plan, Phase 1. Installs the disposable Level 0
+  // proof preset so its topology and materials can be walked in Play mode.
+  // Remove alongside src/dungeonGen/presets/level0Proof.ts once the semantic
+  // Backrooms generator lands.
+  const installLevel0ProofContent = () => {
+    const installed = installLevel0ProofGeneratorContent(gamePackage);
+    if (JSON.stringify(installed) !== JSON.stringify(gamePackage)) setGamePackage(installed);
+    const recipe = installed.dungeon_recipes.find(
+      (candidate) => candidate.id === LEVEL0_PROOF_RECIPE_ID,
+    ) || createLevel0ProofRecipe();
     setSourceRecipeId(recipe.id);
     setRecipeDraft(cloneRecipe(recipe));
     clearLocalGeneration();
@@ -793,6 +814,13 @@ export function DungeonGeneratorPanel() {
               Install / update single-map starter
             </button>
           )}
+          <button
+            onClick={installLevel0ProofContent}
+            title="Temporary Phase 1 proof preset: doorless Level 0 rooms, no required encounters."
+            className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm font-medium text-amber-200 hover:bg-amber-500/20"
+          >
+            Install Backrooms L0 proof
+          </button>
           <button
             onClick={() => setHistoryOpen((value) => !value)}
             className={`flex items-center gap-2 rounded-md px-3 py-2 text-sm ${historyOpen ? "bg-neutral-800 text-white" : "text-neutral-400 hover:bg-neutral-900"}`}
