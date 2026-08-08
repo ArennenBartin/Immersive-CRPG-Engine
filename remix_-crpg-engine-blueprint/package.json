@@ -39,6 +39,7 @@
     "test:studio-play": "tsx scripts/test-studio-play-contract.ts",
     "test:encounter-contract": "tsx scripts/test-encounter-contract.ts",
     "test:entity-state": "tsx scripts/test-entity-state.ts",
+    "test:backrooms-baseline": "tsx scripts/test-backrooms-baseline.ts",
     "test:dungeon": "tsx scripts/test-dungeon.ts",
     "test:dungeon-quality": "tsx scripts/test-dungeon-quality-worker.ts",
     "test:all": "npm run test:engine && npm run test:horror-combat && npm run test:perception && npm run test:hearing-stealth && npm run test:memory-vision && npm run test:first-person && npm run test:third-person && npm run test:model-animation && npm run test:animation-authoring && npm run test:keyword-dialogue && npm run test:chemistry && npm run test:collision-fit && npm run test:state && npm run test:suite && npm run test:package-roundtrip && npm run test:map-contract && npm run test:map-validator && npm run test:save-roundtrip && npm run test:persistence-succession && npm run test:fracture-crawl-legacy && npm run test:fracture-dungeon && npm run test:phase11 && npm run test:studio-runtime-support && npm run test:studio-play && npm run test:encounter-contract && npm run test:entity-state && npm run test:dungeon && npm run test:dungeon-quality",
