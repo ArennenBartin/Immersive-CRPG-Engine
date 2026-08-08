@@ -82,7 +82,7 @@ assert.equal(
   resolveAuthoredViewMode({ view_mode: "third_person" }),
   "third_person",
 );
-assert.equal(isThirdPersonCameraActive("third_person", "open"), true);
+assert.equal(isThirdPersonCameraActive("third_person", "explore"), true);
 
 // Free movement is continuous rather than grid-stepped, and it survives combat
 // only while the map is in horror_realtime. Level 0 authors that mode, so a
@@ -121,7 +121,10 @@ assert.ok(
 // Camera yaw is continuous and derived from the authoritative heading, so
 // generated content is free to face props at arbitrary angles without
 // desynchronizing the camera from the grid.
-const spawnYaw = facingToThirdPersonYaw(spawn.facing);
+const spawnYaw = facingToThirdPersonYaw([
+  Number(spawn.facing[0]),
+  Number(spawn.facing[1]),
+]);
 assert.ok(
   Number.isFinite(spawnYaw),
   "the third-person camera must resolve a finite yaw from the spawn facing",
