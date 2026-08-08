@@ -1,0 +1,538 @@
+{
+  "kit_id": "lonely_street_basement",
+  "version": 1,
+  "units": "meters",
+  "grid_snap_m": 0.5,
+  "reference": "/var/folders/n1/1jljpf893dl40g04323t9d340000gn/T/codex-clipboard-d73ab759-2a7d-4cc7-a448-412d363a9147.png",
+  "assets": [
+    {
+      "id": "lonely_basement_shell",
+      "filename": "basement-shell.glb",
+      "url": "/models/environment/lonely-street-basement/basement-shell.glb",
+      "category": "structure",
+      "scene_location_blender": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scene_cell_engine": [
+        0,
+        0
+      ],
+      "triangles": 3420,
+      "mesh_count": 4,
+      "materials": [
+        "MAT_Concrete_Weathered",
+        "MAT_Wood_Charred",
+        "MAT_Wood_DarkStained"
+      ],
+      "bounds": [
+        10.16,
+        8.16,
+        4.74
+      ],
+      "bytes": 359108
+    },
+    {
+      "id": "lonely_basement_staircase",
+      "filename": "basement-staircase.glb",
+      "url": "/models/environment/lonely-street-basement/basement-staircase.glb",
+      "category": "structure",
+      "scene_location_blender": [
+        3.55,
+        0.15,
+        0.0
+      ],
+      "scene_cell_engine": [
+        4,
+        0
+      ],
+      "triangles": 3132,
+      "mesh_count": 2,
+      "materials": [
+        "MAT_Wood_Charred",
+        "MAT_Wood_DarkStained"
+      ],
+      "bounds": [
+        1.86,
+        5.9841,
+        3.6597
+      ],
+      "bytes": 276244
+    },
+    {
+      "id": "lonely_basement_stair_door",
+      "filename": "basement-stair-door.glb",
+      "url": "/models/environment/lonely-street-basement/basement-stair-door.glb",
+      "category": "door",
+      "scene_location_blender": [
+        3.55,
+        3.78,
+        2.52
+      ],
+      "scene_cell_engine": [
+        4,
+        -4
+      ],
+      "triangles": 1088,
+      "mesh_count": 4,
+      "materials": [
+        "MAT_Metal_DirtyEnamel",
+        "MAT_Metal_DullChrome",
+        "MAT_Paper_Aged",
+        "MAT_Wood_DarkStained"
+      ],
+      "bounds": [
+        1.36,
+        0.265,
+        2.2
+      ],
+      "bytes": 184440
+    },
+    {
+      "id": "lonely_basement_drum_kit",
+      "filename": "basement-drum-kit.glb",
+      "url": "/models/environment/lonely-street-basement/basement-drum-kit.glb",
+      "category": "prop",
+      "scene_location_blender": [
+        -3.05,
+        -1.25,
+        0.0
+      ],
+      "scene_cell_engine": [
+        -3,
+        1
+      ],
+      "triangles": 2652,
+      "mesh_count": 4,
+      "materials": [
+        "MAT_Fabric_DirtyDrumHead",
+        "MAT_Metal_DrumBurgundy",
+        "MAT_Metal_DullChrome",
+        "MAT_Metal_OxidizedCopper"
+      ],
+      "bounds": [
+        2.8695,
+        1.2904,
+        1.6248
+      ],
+      "bytes": 192016
+    },
+    {
+      "id": "lonely_basement_drum_stool",
+      "filename": "basement-drum-stool.glb",
+      "url": "/models/environment/lonely-street-basement/basement-drum-stool.glb",
+      "category": "furniture",
+      "scene_location_blender": [
+        -1.35,
+        -1.7,
+        0.0
+      ],
+      "scene_cell_engine": [
+        -1,
+        2
+      ],
+      "triangles": 460,
+      "mesh_count": 2,
+      "materials": [
+        "MAT_Metal_DullChrome",
+        "MAT_Rubber_SootBlack"
+      ],
+      "bounds": [
+        0.549,
+        0.5489,
+        0.58
+      ],
+      "bytes": 33396
+    },
+    {
+      "id": "lonely_basement_washer",
+      "filename": "basement-washer.glb",
+      "url": "/models/environment/lonely-street-basement/basement-washer.glb",
+      "category": "furniture",
+      "scene_location_blender": [
+        -1.55,
+        3.32,
+        0.0
+      ],
+      "scene_cell_engine": [
+        -2,
+        -3
+      ],
+      "triangles": 456,
+      "mesh_count": 3,
+      "materials": [
+        "MAT_Metal_DirtyEnamel",
+        "MAT_Metal_DullChrome",
+        "MAT_Rubber_SootBlack"
+      ],
+      "bounds": [
+        0.9,
+        0.815,
+        0.9925
+      ],
+      "bytes": 60412
+    },
+    {
+      "id": "lonely_basement_dryer",
+      "filename": "basement-dryer.glb",
+      "url": "/models/environment/lonely-street-basement/basement-dryer.glb",
+      "category": "furniture",
+      "scene_location_blender": [
+        -0.58,
+        3.32,
+        0.0
+      ],
+      "scene_cell_engine": [
+        -1,
+        -3
+      ],
+      "triangles": 564,
+      "mesh_count": 2,
+      "materials": [
+        "MAT_Metal_DirtyEnamel",
+        "MAT_Rubber_SootBlack"
+      ],
+      "bounds": [
+        0.9,
+        0.815,
+        0.96
+      ],
+      "bytes": 64636
+    },
+    {
+      "id": "lonely_basement_fridge",
+      "filename": "basement-fridge.glb",
+      "url": "/models/environment/lonely-street-basement/basement-fridge.glb",
+      "category": "furniture",
+      "scene_location_blender": [
+        1.15,
+        3.35,
+        0.0
+      ],
+      "scene_cell_engine": [
+        1,
+        -3
+      ],
+      "triangles": 972,
+      "mesh_count": 3,
+      "materials": [
+        "MAT_Metal_DirtyEnamel",
+        "MAT_Metal_DullChrome",
+        "MAT_Paper_Aged"
+      ],
+      "bounds": [
+        1.02,
+        0.845,
+        1.98
+      ],
+      "bytes": 122616
+    },
+    {
+      "id": "lonely_basement_storage_shelf",
+      "filename": "basement-storage-shelf.glb",
+      "url": "/models/environment/lonely-street-basement/basement-storage-shelf.glb",
+      "category": "furniture",
+      "scene_location_blender": [
+        -4.02,
+        3.35,
+        0.0
+      ],
+      "scene_cell_engine": [
+        -4,
+        -3
+      ],
+      "triangles": 1584,
+      "mesh_count": 5,
+      "materials": [
+        "MAT_Metal_DullChrome",
+        "MAT_Paper_Cardboard",
+        "MAT_Paper_Label",
+        "MAT_Plastic_DetergentRed",
+        "MAT_Wood_DarkStained"
+      ],
+      "bounds": [
+        1.18,
+        0.52,
+        1.8925
+      ],
+      "bytes": 195196
+    },
+    {
+      "id": "lonely_basement_laundry_basket",
+      "filename": "basement-laundry-basket.glb",
+      "url": "/models/environment/lonely-street-basement/basement-laundry-basket.glb",
+      "category": "prop",
+      "scene_location_blender": [
+        -1.18,
+        3.18,
+        0.98
+      ],
+      "scene_cell_engine": [
+        -1,
+        -3
+      ],
+      "triangles": 1116,
+      "mesh_count": 3,
+      "materials": [
+        "MAT_Fabric_RugBurgundy",
+        "MAT_Paper_Cardboard",
+        "MAT_Rubber_SootBlack"
+      ],
+      "bounds": [
+        0.76,
+        0.4475,
+        0.72
+      ],
+      "bytes": 110788
+    },
+    {
+      "id": "lonely_basement_detergents",
+      "filename": "basement-detergents.glb",
+      "url": "/models/environment/lonely-street-basement/basement-detergents.glb",
+      "category": "decor",
+      "scene_location_blender": [
+        -0.95,
+        3.05,
+        1.02
+      ],
+      "scene_cell_engine": [
+        -1,
+        -3
+      ],
+      "triangles": 636,
+      "mesh_count": 5,
+      "materials": [
+        "MAT_Paper_Label",
+        "MAT_Plastic_DetergentBlue",
+        "MAT_Plastic_DetergentCream",
+        "MAT_Plastic_DetergentRed",
+        "MAT_Rubber_SootBlack"
+      ],
+      "bounds": [
+        0.96,
+        0.434,
+        0.39
+      ],
+      "bytes": 46080
+    },
+    {
+      "id": "lonely_basement_box_stack",
+      "filename": "basement-box-stack.glb",
+      "url": "/models/environment/lonely-street-basement/basement-box-stack.glb",
+      "category": "decor",
+      "scene_location_blender": [
+        1.2,
+        3.28,
+        2.0
+      ],
+      "scene_cell_engine": [
+        1,
+        -3
+      ],
+      "triangles": 648,
+      "mesh_count": 2,
+      "materials": [
+        "MAT_Paper_Aged",
+        "MAT_Paper_Cardboard"
+      ],
+      "bounds": [
+        1.0328,
+        0.5235,
+        0.89
+      ],
+      "bytes": 97040
+    },
+    {
+      "id": "lonely_basement_paint_cans",
+      "filename": "basement-paint-cans.glb",
+      "url": "/models/environment/lonely-street-basement/basement-paint-cans.glb",
+      "category": "decor",
+      "scene_location_blender": [
+        4.05,
+        -1.95,
+        0.0
+      ],
+      "scene_cell_engine": [
+        4,
+        2
+      ],
+      "triangles": 1104,
+      "mesh_count": 3,
+      "materials": [
+        "MAT_Metal_DirtyEnamel",
+        "MAT_Metal_DullChrome",
+        "MAT_Paper_Label"
+      ],
+      "bounds": [
+        0.9347,
+        0.411,
+        0.3504
+      ],
+      "bytes": 98828
+    },
+    {
+      "id": "lonely_basement_pipes",
+      "filename": "basement-pipes.glb",
+      "url": "/models/environment/lonely-street-basement/basement-pipes.glb",
+      "category": "structure",
+      "scene_location_blender": [
+        -4.82,
+        1.25,
+        0.0
+      ],
+      "scene_cell_engine": [
+        -5,
+        -1
+      ],
+      "triangles": 624,
+      "mesh_count": 2,
+      "materials": [
+        "MAT_Metal_DullChrome",
+        "MAT_Metal_OxidizedCopper"
+      ],
+      "bounds": [
+        1.33,
+        0.11,
+        2.25
+      ],
+      "bytes": 39252
+    },
+    {
+      "id": "lonely_basement_bad_luck_poster",
+      "filename": "basement-bad-luck-poster.glb",
+      "url": "/models/environment/lonely-street-basement/basement-bad-luck-poster.glb",
+      "category": "decor",
+      "scene_location_blender": [
+        -4.88,
+        0.65,
+        0.95
+      ],
+      "scene_cell_engine": [
+        -5,
+        -1
+      ],
+      "triangles": 9132,
+      "mesh_count": 2,
+      "materials": [
+        "MAT_Ink_PosterBlack",
+        "MAT_Paper_Aged"
+      ],
+      "bounds": [
+        0.7625,
+        0.9211,
+        1.2003
+      ],
+      "bytes": 276560
+    },
+    {
+      "id": "lonely_basement_floor_debris",
+      "filename": "basement-floor-debris.glb",
+      "url": "/models/environment/lonely-street-basement/basement-floor-debris.glb",
+      "category": "decor",
+      "scene_location_blender": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "scene_cell_engine": [
+        0,
+        0
+      ],
+      "triangles": 676,
+      "mesh_count": 3,
+      "materials": [
+        "MAT_Paper_Aged",
+        "MAT_Plastic_DetergentRed",
+        "MAT_Rubber_SootBlack"
+      ],
+      "bounds": [
+        4.9361,
+        4.6568,
+        0.158
+      ],
+      "bytes": 71112
+    },
+    {
+      "id": "lonely_basement_bare_bulb",
+      "filename": "basement-bare-bulb.glb",
+      "url": "/models/environment/lonely-street-basement/basement-bare-bulb.glb",
+      "category": "lighting",
+      "scene_location_blender": [
+        -1.3,
+        0.45,
+        2.6
+      ],
+      "scene_cell_engine": [
+        -1,
+        0
+      ],
+      "triangles": 420,
+      "mesh_count": 3,
+      "materials": [
+        "MAT_Emissive_BulbWarm",
+        "MAT_Metal_DullChrome",
+        "MAT_Rubber_SootBlack"
+      ],
+      "bounds": [
+        0.1773,
+        0.18,
+        0.62
+      ],
+      "bytes": 33692
+    },
+    {
+      "id": "lonely_basement_stair_sconce",
+      "filename": "basement-stair-sconce.glb",
+      "url": "/models/environment/lonely-street-basement/basement-stair-sconce.glb",
+      "category": "lighting",
+      "scene_location_blender": [
+        3.55,
+        3.65,
+        4.28
+      ],
+      "scene_cell_engine": [
+        4,
+        -4
+      ],
+      "triangles": 432,
+      "mesh_count": 2,
+      "materials": [
+        "MAT_Emissive_BulbWarm",
+        "MAT_Metal_DullChrome"
+      ],
+      "bounds": [
+        0.3,
+        0.255,
+        0.26
+      ],
+      "bytes": 34528
+    }
+  ],
+  "staged_scene": {
+    "id": "lonely_basement_staged",
+    "filename": "lonely-street-basement-staged.glb",
+    "url": "/models/environment/lonely-street-basement/lonely-street-basement-staged.glb",
+    "triangles": 29116,
+    "bytes": 1861304,
+    "room_dimensions_m": [
+      10.0,
+      8.0,
+      2.6
+    ]
+  },
+  "validation": {
+    "status": "PASS",
+    "object_count": 90,
+    "mesh_count": 54,
+    "asset_count": 18,
+    "total_triangles": 29116,
+    "triangle_budget": 75000,
+    "material_count": 18,
+    "default_names": [],
+    "unapplied_scale": [],
+    "invalid_mesh_names": [],
+    "invalid_material_names": []
+  },
+  "collision_policy": "Simple source proxies are retained in COL_Collision; engine runtime uses fitted placement metadata."
+}

@@ -1,0 +1,815 @@
+{
+  "status": "PASS",
+  "asset_count": 18,
+  "checks": [
+    {
+      "id": "lonely_basement_shell",
+      "filename": "basement-shell.glb",
+      "glb_magic": "glTF",
+      "expected": {
+        "mesh_count": 4,
+        "triangles": 3420,
+        "bounds": [
+          10.16,
+          8.16,
+          4.74
+        ],
+        "materials": [
+          "MAT_Concrete_Weathered",
+          "MAT_Wood_Charred",
+          "MAT_Wood_DarkStained"
+        ],
+        "bytes": 359108
+      },
+      "actual": {
+        "mesh_count": 4,
+        "triangles": 3420,
+        "bounds": [
+          10.16,
+          8.16,
+          4.74
+        ],
+        "min": [
+          -5.08,
+          -4.08,
+          -0.14
+        ],
+        "max": [
+          5.08,
+          4.08,
+          4.6
+        ],
+        "materials": [
+          "MAT_Concrete_Weathered",
+          "MAT_Wood_Charred",
+          "MAT_Wood_DarkStained"
+        ],
+        "bytes": 359108
+      }
+    },
+    {
+      "id": "lonely_basement_staircase",
+      "filename": "basement-staircase.glb",
+      "glb_magic": "glTF",
+      "expected": {
+        "mesh_count": 2,
+        "triangles": 3132,
+        "bounds": [
+          1.86,
+          5.9841,
+          3.6597
+        ],
+        "materials": [
+          "MAT_Wood_Charred",
+          "MAT_Wood_DarkStained"
+        ],
+        "bytes": 276244
+      },
+      "actual": {
+        "mesh_count": 2,
+        "triangles": 3132,
+        "bounds": [
+          1.86,
+          5.9841,
+          3.6597
+        ],
+        "min": [
+          -0.93,
+          -2.6641,
+          0.0
+        ],
+        "max": [
+          0.93,
+          3.32,
+          3.6597
+        ],
+        "materials": [
+          "MAT_Wood_Charred",
+          "MAT_Wood_DarkStained"
+        ],
+        "bytes": 276244
+      }
+    },
+    {
+      "id": "lonely_basement_stair_door",
+      "filename": "basement-stair-door.glb",
+      "glb_magic": "glTF",
+      "expected": {
+        "mesh_count": 4,
+        "triangles": 1088,
+        "bounds": [
+          1.36,
+          0.265,
+          2.2
+        ],
+        "materials": [
+          "MAT_Metal_DirtyEnamel",
+          "MAT_Metal_DullChrome",
+          "MAT_Paper_Aged",
+          "MAT_Wood_DarkStained"
+        ],
+        "bytes": 184440
+      },
+      "actual": {
+        "mesh_count": 4,
+        "triangles": 1088,
+        "bounds": [
+          1.36,
+          0.265,
+          2.2
+        ],
+        "min": [
+          -0.68,
+          -0.165,
+          -0.01
+        ],
+        "max": [
+          0.68,
+          0.1,
+          2.19
+        ],
+        "materials": [
+          "MAT_Metal_DirtyEnamel",
+          "MAT_Metal_DullChrome",
+          "MAT_Paper_Aged",
+          "MAT_Wood_DarkStained"
+        ],
+        "bytes": 184440
+      }
+    },
+    {
+      "id": "lonely_basement_drum_kit",
+      "filename": "basement-drum-kit.glb",
+      "glb_magic": "glTF",
+      "expected": {
+        "mesh_count": 4,
+        "triangles": 2652,
+        "bounds": [
+          2.8695,
+          1.2904,
+          1.6248
+        ],
+        "materials": [
+          "MAT_Fabric_DirtyDrumHead",
+          "MAT_Metal_DrumBurgundy",
+          "MAT_Metal_DullChrome",
+          "MAT_Metal_OxidizedCopper"
+        ],
+        "bytes": 192016
+      },
+      "actual": {
+        "mesh_count": 4,
+        "triangles": 2652,
+        "bounds": [
+          2.8695,
+          1.2904,
+          1.6248
+        ],
+        "min": [
+          -1.4097,
+          -0.4601,
+          0.0
+        ],
+        "max": [
+          1.4598,
+          0.8302,
+          1.6248
+        ],
+        "materials": [
+          "MAT_Fabric_DirtyDrumHead",
+          "MAT_Metal_DrumBurgundy",
+          "MAT_Metal_DullChrome",
+          "MAT_Metal_OxidizedCopper"
+        ],
+        "bytes": 192016
+      }
+    },
+    {
+      "id": "lonely_basement_drum_stool",
+      "filename": "basement-drum-stool.glb",
+      "glb_magic": "glTF",
+      "expected": {
+        "mesh_count": 2,
+        "triangles": 460,
+        "bounds": [
+          0.549,
+          0.5489,
+          0.58
+        ],
+        "materials": [
+          "MAT_Metal_DullChrome",
+          "MAT_Rubber_SootBlack"
+        ],
+        "bytes": 33396
+      },
+      "actual": {
+        "mesh_count": 2,
+        "triangles": 460,
+        "bounds": [
+          0.549,
+          0.5489,
+          0.58
+        ],
+        "min": [
+          -0.279,
+          -0.2744,
+          0.06
+        ],
+        "max": [
+          0.27,
+          0.2744,
+          0.64
+        ],
+        "materials": [
+          "MAT_Metal_DullChrome",
+          "MAT_Rubber_SootBlack"
+        ],
+        "bytes": 33396
+      }
+    },
+    {
+      "id": "lonely_basement_washer",
+      "filename": "basement-washer.glb",
+      "glb_magic": "glTF",
+      "expected": {
+        "mesh_count": 3,
+        "triangles": 456,
+        "bounds": [
+          0.9,
+          0.815,
+          0.9925
+        ],
+        "materials": [
+          "MAT_Metal_DirtyEnamel",
+          "MAT_Metal_DullChrome",
+          "MAT_Rubber_SootBlack"
+        ],
+        "bytes": 60412
+      },
+      "actual": {
+        "mesh_count": 3,
+        "triangles": 456,
+        "bounds": [
+          0.9,
+          0.815,
+          0.9925
+        ],
+        "min": [
+          -0.45,
+          -0.455,
+          0.0
+        ],
+        "max": [
+          0.45,
+          0.36,
+          0.9925
+        ],
+        "materials": [
+          "MAT_Metal_DirtyEnamel",
+          "MAT_Metal_DullChrome",
+          "MAT_Rubber_SootBlack"
+        ],
+        "bytes": 60412
+      }
+    },
+    {
+      "id": "lonely_basement_dryer",
+      "filename": "basement-dryer.glb",
+      "glb_magic": "glTF",
+      "expected": {
+        "mesh_count": 2,
+        "triangles": 564,
+        "bounds": [
+          0.9,
+          0.815,
+          0.96
+        ],
+        "materials": [
+          "MAT_Metal_DirtyEnamel",
+          "MAT_Rubber_SootBlack"
+        ],
+        "bytes": 64636
+      },
+      "actual": {
+        "mesh_count": 2,
+        "triangles": 564,
+        "bounds": [
+          0.9,
+          0.815,
+          0.96
+        ],
+        "min": [
+          -0.45,
+          -0.455,
+          0.0
+        ],
+        "max": [
+          0.45,
+          0.36,
+          0.96
+        ],
+        "materials": [
+          "MAT_Metal_DirtyEnamel",
+          "MAT_Rubber_SootBlack"
+        ],
+        "bytes": 64636
+      }
+    },
+    {
+      "id": "lonely_basement_fridge",
+      "filename": "basement-fridge.glb",
+      "glb_magic": "glTF",
+      "expected": {
+        "mesh_count": 3,
+        "triangles": 972,
+        "bounds": [
+          1.02,
+          0.845,
+          1.98
+        ],
+        "materials": [
+          "MAT_Metal_DirtyEnamel",
+          "MAT_Metal_DullChrome",
+          "MAT_Paper_Aged"
+        ],
+        "bytes": 122616
+      },
+      "actual": {
+        "mesh_count": 3,
+        "triangles": 972,
+        "bounds": [
+          1.02,
+          0.845,
+          1.98
+        ],
+        "min": [
+          -0.51,
+          -0.475,
+          0.0
+        ],
+        "max": [
+          0.51,
+          0.37,
+          1.98
+        ],
+        "materials": [
+          "MAT_Metal_DirtyEnamel",
+          "MAT_Metal_DullChrome",
+          "MAT_Paper_Aged"
+        ],
+        "bytes": 122616
+      }
+    },
+    {
+      "id": "lonely_basement_storage_shelf",
+      "filename": "basement-storage-shelf.glb",
+      "glb_magic": "glTF",
+      "expected": {
+        "mesh_count": 5,
+        "triangles": 1584,
+        "bounds": [
+          1.18,
+          0.52,
+          1.8925
+        ],
+        "materials": [
+          "MAT_Metal_DullChrome",
+          "MAT_Paper_Cardboard",
+          "MAT_Paper_Label",
+          "MAT_Plastic_DetergentRed",
+          "MAT_Wood_DarkStained"
+        ],
+        "bytes": 195196
+      },
+      "actual": {
+        "mesh_count": 5,
+        "triangles": 1584,
+        "bounds": [
+          1.18,
+          0.52,
+          1.8925
+        ],
+        "min": [
+          -0.59,
+          -0.26,
+          0.0
+        ],
+        "max": [
+          0.59,
+          0.26,
+          1.8925
+        ],
+        "materials": [
+          "MAT_Metal_DullChrome",
+          "MAT_Paper_Cardboard",
+          "MAT_Paper_Label",
+          "MAT_Plastic_DetergentRed",
+          "MAT_Wood_DarkStained"
+        ],
+        "bytes": 195196
+      }
+    },
+    {
+      "id": "lonely_basement_laundry_basket",
+      "filename": "basement-laundry-basket.glb",
+      "glb_magic": "glTF",
+      "expected": {
+        "mesh_count": 3,
+        "triangles": 1116,
+        "bounds": [
+          0.76,
+          0.4475,
+          0.72
+        ],
+        "materials": [
+          "MAT_Fabric_RugBurgundy",
+          "MAT_Paper_Cardboard",
+          "MAT_Rubber_SootBlack"
+        ],
+        "bytes": 110788
+      },
+      "actual": {
+        "mesh_count": 3,
+        "triangles": 1116,
+        "bounds": [
+          0.76,
+          0.4475,
+          0.72
+        ],
+        "min": [
+          -0.39,
+          -0.2375,
+          0.0
+        ],
+        "max": [
+          0.37,
+          0.21,
+          0.72
+        ],
+        "materials": [
+          "MAT_Fabric_RugBurgundy",
+          "MAT_Paper_Cardboard",
+          "MAT_Rubber_SootBlack"
+        ],
+        "bytes": 110788
+      }
+    },
+    {
+      "id": "lonely_basement_detergents",
+      "filename": "basement-detergents.glb",
+      "glb_magic": "glTF",
+      "expected": {
+        "mesh_count": 5,
+        "triangles": 636,
+        "bounds": [
+          0.96,
+          0.434,
+          0.39
+        ],
+        "materials": [
+          "MAT_Paper_Label",
+          "MAT_Plastic_DetergentBlue",
+          "MAT_Plastic_DetergentCream",
+          "MAT_Plastic_DetergentRed",
+          "MAT_Rubber_SootBlack"
+        ],
+        "bytes": 46080
+      },
+      "actual": {
+        "mesh_count": 5,
+        "triangles": 636,
+        "bounds": [
+          0.96,
+          0.434,
+          0.39
+        ],
+        "min": [
+          -0.48,
+          -0.224,
+          0.0
+        ],
+        "max": [
+          0.48,
+          0.21,
+          0.39
+        ],
+        "materials": [
+          "MAT_Paper_Label",
+          "MAT_Plastic_DetergentBlue",
+          "MAT_Plastic_DetergentCream",
+          "MAT_Plastic_DetergentRed",
+          "MAT_Rubber_SootBlack"
+        ],
+        "bytes": 46080
+      }
+    },
+    {
+      "id": "lonely_basement_box_stack",
+      "filename": "basement-box-stack.glb",
+      "glb_magic": "glTF",
+      "expected": {
+        "mesh_count": 2,
+        "triangles": 648,
+        "bounds": [
+          1.0328,
+          0.5235,
+          0.89
+        ],
+        "materials": [
+          "MAT_Paper_Aged",
+          "MAT_Paper_Cardboard"
+        ],
+        "bytes": 97040
+      },
+      "actual": {
+        "mesh_count": 2,
+        "triangles": 648,
+        "bounds": [
+          1.0328,
+          0.5235,
+          0.89
+        ],
+        "min": [
+          -0.5193,
+          -0.2617,
+          0.0
+        ],
+        "max": [
+          0.5136,
+          0.2618,
+          0.89
+        ],
+        "materials": [
+          "MAT_Paper_Aged",
+          "MAT_Paper_Cardboard"
+        ],
+        "bytes": 97040
+      }
+    },
+    {
+      "id": "lonely_basement_paint_cans",
+      "filename": "basement-paint-cans.glb",
+      "glb_magic": "glTF",
+      "expected": {
+        "mesh_count": 3,
+        "triangles": 1104,
+        "bounds": [
+          0.9347,
+          0.411,
+          0.3504
+        ],
+        "materials": [
+          "MAT_Metal_DirtyEnamel",
+          "MAT_Metal_DullChrome",
+          "MAT_Paper_Label"
+        ],
+        "bytes": 98828
+      },
+      "actual": {
+        "mesh_count": 3,
+        "triangles": 1104,
+        "bounds": [
+          0.9347,
+          0.411,
+          0.3504
+        ],
+        "min": [
+          -0.4276,
+          -0.191,
+          0.0
+        ],
+        "max": [
+          0.5071,
+          0.22,
+          0.3504
+        ],
+        "materials": [
+          "MAT_Metal_DirtyEnamel",
+          "MAT_Metal_DullChrome",
+          "MAT_Paper_Label"
+        ],
+        "bytes": 98828
+      }
+    },
+    {
+      "id": "lonely_basement_pipes",
+      "filename": "basement-pipes.glb",
+      "glb_magic": "glTF",
+      "expected": {
+        "mesh_count": 2,
+        "triangles": 624,
+        "bounds": [
+          1.33,
+          0.11,
+          2.25
+        ],
+        "materials": [
+          "MAT_Metal_DullChrome",
+          "MAT_Metal_OxidizedCopper"
+        ],
+        "bytes": 39252
+      },
+      "actual": {
+        "mesh_count": 2,
+        "triangles": 624,
+        "bounds": [
+          1.33,
+          0.11,
+          2.25
+        ],
+        "min": [
+          -0.08,
+          -0.055,
+          0.1
+        ],
+        "max": [
+          1.25,
+          0.055,
+          2.35
+        ],
+        "materials": [
+          "MAT_Metal_DullChrome",
+          "MAT_Metal_OxidizedCopper"
+        ],
+        "bytes": 39252
+      }
+    },
+    {
+      "id": "lonely_basement_bad_luck_poster",
+      "filename": "basement-bad-luck-poster.glb",
+      "glb_magic": "glTF",
+      "expected": {
+        "mesh_count": 2,
+        "triangles": 9132,
+        "bounds": [
+          0.7625,
+          0.9211,
+          1.2003
+        ],
+        "materials": [
+          "MAT_Ink_PosterBlack",
+          "MAT_Paper_Aged"
+        ],
+        "bytes": 276560
+      },
+      "actual": {
+        "mesh_count": 2,
+        "triangles": 9132,
+        "bounds": [
+          0.7625,
+          0.9211,
+          1.2003
+        ],
+        "min": [
+          -0.3916,
+          -0.4605,
+          -0.6001
+        ],
+        "max": [
+          0.3709,
+          0.4605,
+          0.6001
+        ],
+        "materials": [
+          "MAT_Ink_PosterBlack",
+          "MAT_Paper_Aged"
+        ],
+        "bytes": 276560
+      }
+    },
+    {
+      "id": "lonely_basement_floor_debris",
+      "filename": "basement-floor-debris.glb",
+      "glb_magic": "glTF",
+      "expected": {
+        "mesh_count": 3,
+        "triangles": 676,
+        "bounds": [
+          4.9361,
+          4.6568,
+          0.158
+        ],
+        "materials": [
+          "MAT_Paper_Aged",
+          "MAT_Plastic_DetergentRed",
+          "MAT_Rubber_SootBlack"
+        ],
+        "bytes": 71112
+      },
+      "actual": {
+        "mesh_count": 3,
+        "triangles": 676,
+        "bounds": [
+          4.9361,
+          4.6568,
+          0.158
+        ],
+        "min": [
+          -2.1111,
+          -3.295,
+          0.007
+        ],
+        "max": [
+          2.825,
+          1.3618,
+          0.165
+        ],
+        "materials": [
+          "MAT_Paper_Aged",
+          "MAT_Plastic_DetergentRed",
+          "MAT_Rubber_SootBlack"
+        ],
+        "bytes": 71112
+      }
+    },
+    {
+      "id": "lonely_basement_bare_bulb",
+      "filename": "basement-bare-bulb.glb",
+      "glb_magic": "glTF",
+      "expected": {
+        "mesh_count": 3,
+        "triangles": 420,
+        "bounds": [
+          0.1773,
+          0.18,
+          0.62
+        ],
+        "materials": [
+          "MAT_Emissive_BulbWarm",
+          "MAT_Metal_DullChrome",
+          "MAT_Rubber_SootBlack"
+        ],
+        "bytes": 33692
+      },
+      "actual": {
+        "mesh_count": 3,
+        "triangles": 420,
+        "bounds": [
+          0.1773,
+          0.18,
+          0.62
+        ],
+        "min": [
+          -0.0886,
+          -0.09,
+          -0.62
+        ],
+        "max": [
+          0.0886,
+          0.09,
+          0.0
+        ],
+        "materials": [
+          "MAT_Emissive_BulbWarm",
+          "MAT_Metal_DullChrome",
+          "MAT_Rubber_SootBlack"
+        ],
+        "bytes": 33692
+      }
+    },
+    {
+      "id": "lonely_basement_stair_sconce",
+      "filename": "basement-stair-sconce.glb",
+      "glb_magic": "glTF",
+      "expected": {
+        "mesh_count": 2,
+        "triangles": 432,
+        "bounds": [
+          0.3,
+          0.255,
+          0.26
+        ],
+        "materials": [
+          "MAT_Emissive_BulbWarm",
+          "MAT_Metal_DullChrome"
+        ],
+        "bytes": 34528
+      },
+      "actual": {
+        "mesh_count": 2,
+        "triangles": 432,
+        "bounds": [
+          0.3,
+          0.255,
+          0.26
+        ],
+        "min": [
+          -0.15,
+          -0.22,
+          -0.13
+        ],
+        "max": [
+          0.15,
+          0.035,
+          0.13
+        ],
+        "materials": [
+          "MAT_Emissive_BulbWarm",
+          "MAT_Metal_DullChrome"
+        ],
+        "bytes": 34528
+      }
+    }
+  ],
+  "failures": []
+}

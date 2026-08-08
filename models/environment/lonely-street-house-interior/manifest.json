@@ -1,0 +1,315 @@
+{
+  "kit_id": "lonely_street_house_interior",
+  "version": 1,
+  "units": "meters",
+  "grid_snap_m": 0.5,
+  "reference": "/var/folders/n1/1jljpf893dl40g04323t9d340000gn/T/codex-clipboard-aac0ec2a-a442-44be-a93d-b48882c14f24.png",
+  "assets": [
+    {
+      "id": "lonely_house_interior_shell",
+      "filename": "house-interior-shell.glb",
+      "url": "/models/environment/lonely-street-house-interior/house-interior-shell.glb",
+      "triangles": 780,
+      "mesh_count": 5,
+      "materials": [
+        "MAT_DarkWood",
+        "MAT_GrimyPlaster",
+        "MAT_SootBlack",
+        "MAT_WornFloorboards"
+      ],
+      "bounds": [
+        8.13,
+        4.93,
+        3.065
+      ]
+    },
+    {
+      "id": "lonely_house_worn_door_frame",
+      "filename": "worn-door-frame.glb",
+      "url": "/models/environment/lonely-street-house-interior/worn-door-frame.glb",
+      "triangles": 324,
+      "mesh_count": 1,
+      "materials": [
+        "MAT_DarkWood"
+      ],
+      "bounds": [
+        0.15,
+        1.25,
+        2.195
+      ]
+    },
+    {
+      "id": "lonely_house_worn_door",
+      "filename": "worn-door.glb",
+      "url": "/models/environment/lonely-street-house-interior/worn-door.glb",
+      "triangles": 1196,
+      "mesh_count": 3,
+      "materials": [
+        "MAT_DarkWood",
+        "MAT_OxidizedMetal",
+        "MAT_SootBlack"
+      ],
+      "bounds": [
+        0.21,
+        0.95,
+        2.04
+      ]
+    },
+    {
+      "id": "lonely_house_curtained_window",
+      "filename": "curtained-window.glb",
+      "url": "/models/environment/lonely-street-house-interior/curtained-window.glb",
+      "triangles": 1936,
+      "mesh_count": 4,
+      "materials": [
+        "MAT_DarkWood",
+        "MAT_DirtyCurtainPlaid",
+        "MAT_OxidizedMetal",
+        "MAT_SmokyGlass"
+      ],
+      "bounds": [
+        0.2482,
+        1.95,
+        1.4803
+      ]
+    },
+    {
+      "id": "lonely_house_plaid_sofa",
+      "filename": "plaid-sofa.glb",
+      "url": "/models/environment/lonely-street-house-interior/plaid-sofa.glb",
+      "triangles": 1364,
+      "mesh_count": 4,
+      "materials": [
+        "MAT_DarkBlanket",
+        "MAT_DarkWood",
+        "MAT_FadedBurgundyFabric",
+        "MAT_WornPlaid"
+      ],
+      "bounds": [
+        2.56,
+        1.059,
+        1.3009
+      ]
+    },
+    {
+      "id": "lonely_house_area_rug",
+      "filename": "worn-area-rug.glb",
+      "url": "/models/environment/lonely-street-house-interior/worn-area-rug.glb",
+      "triangles": 108,
+      "mesh_count": 1,
+      "materials": [
+        "MAT_WornRug"
+      ],
+      "bounds": [
+        3.15,
+        2.15,
+        0.036
+      ]
+    },
+    {
+      "id": "lonely_house_coffee_table",
+      "filename": "scarred-coffee-table.glb",
+      "url": "/models/environment/lonely-street-house-interior/scarred-coffee-table.glb",
+      "triangles": 648,
+      "mesh_count": 1,
+      "materials": [
+        "MAT_DarkWood"
+      ],
+      "bounds": [
+        1.55,
+        0.72,
+        0.54
+      ]
+    },
+    {
+      "id": "lonely_house_side_table",
+      "filename": "side-table.glb",
+      "url": "/models/environment/lonely-street-house-interior/side-table.glb",
+      "triangles": 648,
+      "mesh_count": 1,
+      "materials": [
+        "MAT_DarkWood"
+      ],
+      "bounds": [
+        0.72,
+        0.6,
+        0.555
+      ]
+    },
+    {
+      "id": "lonely_house_dirty_fridge",
+      "filename": "dirty-fridge.glb",
+      "url": "/models/environment/lonely-street-house-interior/dirty-fridge.glb",
+      "triangles": 864,
+      "mesh_count": 5,
+      "materials": [
+        "MAT_AgedPaper",
+        "MAT_DirtyEnamel",
+        "MAT_FictionalPosterGreen",
+        "MAT_FictionalPosterRed",
+        "MAT_OxidizedMetal"
+      ],
+      "bounds": [
+        0.96,
+        0.7325,
+        1.9
+      ]
+    },
+    {
+      "id": "lonely_house_worn_stove",
+      "filename": "worn-stove.glb",
+      "url": "/models/environment/lonely-street-house-interior/worn-stove.glb",
+      "triangles": 956,
+      "mesh_count": 4,
+      "materials": [
+        "MAT_DirtyCurtainPlaid",
+        "MAT_DirtyEnamel",
+        "MAT_OxidizedMetal",
+        "MAT_SootBlack"
+      ],
+      "bounds": [
+        0.88,
+        0.765,
+        0.9875
+      ]
+    },
+    {
+      "id": "lonely_house_kitchen_cabinets",
+      "filename": "dark-kitchen-cabinets.glb",
+      "url": "/models/environment/lonely-street-house-interior/dark-kitchen-cabinets.glb",
+      "triangles": 1896,
+      "mesh_count": 3,
+      "materials": [
+        "MAT_DarkWood",
+        "MAT_OxidizedMetal",
+        "MAT_SootBlack"
+      ],
+      "bounds": [
+        1.67,
+        0.73,
+        2.11
+      ]
+    },
+    {
+      "id": "lonely_house_bookcase",
+      "filename": "packed-bookcase.glb",
+      "url": "/models/environment/lonely-street-house-interior/packed-bookcase.glb",
+      "triangles": 3888,
+      "mesh_count": 5,
+      "materials": [
+        "MAT_AgedPaper",
+        "MAT_DarkWood",
+        "MAT_FictionalPosterGreen",
+        "MAT_FictionalPosterRed",
+        "MAT_SootBlack"
+      ],
+      "bounds": [
+        0.5587,
+        1.54,
+        2.08
+      ]
+    },
+    {
+      "id": "lonely_house_narrow_dresser",
+      "filename": "narrow-dresser.glb",
+      "url": "/models/environment/lonely-street-house-interior/narrow-dresser.glb",
+      "triangles": 792,
+      "mesh_count": 2,
+      "materials": [
+        "MAT_DarkWood",
+        "MAT_OxidizedMetal"
+      ],
+      "bounds": [
+        0.78,
+        0.555,
+        1.1
+      ]
+    },
+    {
+      "id": "lonely_house_clutter_clusters",
+      "filename": "house-clutter-clusters.glb",
+      "url": "/models/environment/lonely-street-house-interior/house-clutter-clusters.glb",
+      "triangles": 2156,
+      "mesh_count": 10,
+      "materials": [
+        "MAT_AgedPaper",
+        "MAT_BrownGlass",
+        "MAT_DarkWood",
+        "MAT_DirtyCurtainPlaid",
+        "MAT_DirtyEnamel",
+        "MAT_FictionalPosterGreen",
+        "MAT_FictionalPosterRed",
+        "MAT_OxidizedMetal",
+        "MAT_SootBlack",
+        "MAT_StainedCeramic"
+      ],
+      "bounds": [
+        6.6563,
+        3.204,
+        2.11
+      ]
+    },
+    {
+      "id": "lonely_house_table_lamp",
+      "filename": "table-lamp.glb",
+      "url": "/models/environment/lonely-street-house-interior/table-lamp.glb",
+      "triangles": 420,
+      "mesh_count": 3,
+      "materials": [
+        "MAT_LampShade",
+        "MAT_OxidizedMetal",
+        "MAT_WarmBulb"
+      ],
+      "bounds": [
+        0.54,
+        0.54,
+        0.73
+      ]
+    },
+    {
+      "id": "lonely_house_bare_bulb",
+      "filename": "bare-ceiling-bulb.glb",
+      "url": "/models/environment/lonely-street-house-interior/bare-ceiling-bulb.glb",
+      "triangles": 360,
+      "mesh_count": 3,
+      "materials": [
+        "MAT_OxidizedMetal",
+        "MAT_SootBlack",
+        "MAT_WarmBulb"
+      ],
+      "bounds": [
+        0.32,
+        0.32,
+        0.38
+      ]
+    },
+    {
+      "id": "lonely_house_under_cabinet_light",
+      "filename": "under-cabinet-light.glb",
+      "url": "/models/environment/lonely-street-house-interior/under-cabinet-light.glb",
+      "triangles": 216,
+      "mesh_count": 2,
+      "materials": [
+        "MAT_SootBlack",
+        "MAT_WarmBulb"
+      ],
+      "bounds": [
+        0.56,
+        0.1525,
+        0.07
+      ]
+    }
+  ],
+  "staged_room": {
+    "id": "lonely_house_interior_staged",
+    "filename": "lonely-street-house-interior-staged.glb",
+    "url": "/models/environment/lonely-street-house-interior/lonely-street-house-interior-staged.glb",
+    "triangles": 18552,
+    "room_dimensions_m": [
+      8.0,
+      4.8,
+      2.85
+    ]
+  },
+  "collision_policy": "Simple proxies remain in the source blend; runtime collision is authored in engine metadata."
+}
