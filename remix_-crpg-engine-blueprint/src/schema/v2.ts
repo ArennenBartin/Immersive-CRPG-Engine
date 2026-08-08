@@ -164,9 +164,15 @@ const cloneSaveV1 = (save: PlaySave): PlaySave => ({
     ...save.player,
     cell: [...save.player.cell] as [number, number],
     facing: [...save.player.facing] as [number, number],
-    fine_position: save.player.fine_position
-      ? ([...save.player.fine_position] as [number, number])
-      : undefined,
+    // Absent free-movement positions must stay absent rather than becoming an
+    // own key holding `undefined`. JSON drops undefined on the way out, so an
+    // explicit key made the clone differ from its own serialized form and broke
+    // save round-trip equality.
+    ...(save.player.fine_position
+      ? {
+          fine_position: [...save.player.fine_position] as [number, number],
+        }
+      : {}),
   },
   playerStats: { ...save.playerStats },
   level: save.level,
@@ -255,9 +261,15 @@ export const buildSaveRuntimeV2 = (save: PlaySave): SaveRuntimeV2 => ({
     ...save.player,
     cell: [...save.player.cell] as [number, number],
     facing: [...save.player.facing] as [number, number],
-    fine_position: save.player.fine_position
-      ? ([...save.player.fine_position] as [number, number])
-      : undefined,
+    // Absent free-movement positions must stay absent rather than becoming an
+    // own key holding `undefined`. JSON drops undefined on the way out, so an
+    // explicit key made the clone differ from its own serialized form and broke
+    // save round-trip equality.
+    ...(save.player.fine_position
+      ? {
+          fine_position: [...save.player.fine_position] as [number, number],
+        }
+      : {}),
   },
   progression: {
     level: save.level,
