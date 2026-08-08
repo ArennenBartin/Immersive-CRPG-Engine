@@ -307,6 +307,8 @@ export const bakeDungeonMaps = (
         bounds: { width: floor.width, height: floor.depth },
         cells: [...cells.values()],
         spawns: spawnsByMap.get(floor.mapId)!,
+        ambientLight: input.theme.ambientLight,
+        presentationAmbientLight: input.theme.presentationAmbientLight,
         placements: { objects, entities, items, containers },
         triggers,
         exits,

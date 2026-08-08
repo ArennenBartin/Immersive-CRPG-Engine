@@ -233,6 +233,12 @@ export const DungeonThemeProfileSchema = z.object({
     narrativeProfileIds: [],
     roomLightObjectIds: [],
   }),
+  // Optional authored lighting for the baked map. Themes that omit these keep
+  // producing maps with no lighting keys, so existing dungeons are unchanged.
+  // A theme sets them when the setting is lit by its own architecture rather
+  // than by what the player carries.
+  ambientLight: FiniteNumberSchema.min(0).max(1).optional(),
+  presentationAmbientLight: FiniteNumberSchema.min(0).max(1).optional(),
   keyItemPool: z.array(DungeonWeightedRefSchema).default([]),
   rewardItemPool: z.array(DungeonWeightedRefSchema).default([]),
   chemistryMaterialIds: z.array(NonEmptyIdSchema).default([]),

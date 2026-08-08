@@ -13985,7 +13985,15 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             }
             ambientLight={
               backroomsLevelZeroActive
-                ? BACKROOMS_LEVEL_ZERO_PLAY_AMBIENT_LIGHT
+                ? // The Backrooms palette is detected from floor cells, so it
+                  // also catches generated Level 0 maps. Those carry a
+                  // deliberate lighting intent from their theme, and a
+                  // uniformly lit Level 0 is a different place from the dark
+                  // authored QA wing. Honor an explicit presentation ambient
+                  // when one exists; maps that set none (the authored wing
+                  // included) keep the established constant exactly.
+                  activeMap.presentation_ambient_light ??
+                  BACKROOMS_LEVEL_ZERO_PLAY_AMBIENT_LIGHT
                 : activeMap.presentation_ambient_light ??
                   activeMap.ambient_light ??
                   0.08

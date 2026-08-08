@@ -54,6 +54,13 @@ export interface MapBuildInput {
   props?: unknown[];
   generationSockets?: MapGenerationSocketData[];
   metadata?: MapBuildGenerationMetadata;
+  // Optional authored lighting. Generators that say nothing here keep emitting
+  // maps without these keys, exactly as before, and the runtime applies its
+  // own defaults. A generator only sets them when its theme has a deliberate
+  // lighting intent — a uniformly lit interior, for example, rather than a
+  // dark ruin lit only by its own fixtures.
+  ambientLight?: number;
+  presentationAmbientLight?: number;
 }
 
 export interface MapBuildIssue {
@@ -203,6 +210,14 @@ export const buildMap = (input: MapBuildInput): MapData => {
     triggers: input.triggers ?? [],
     exits: input.exits ?? [],
     generation,
+    // Omitted rather than set to undefined so a map built without lighting
+    // intent serializes identically to one built before these fields existed.
+    ...(input.ambientLight === undefined
+      ? {}
+      : { ambient_light: input.ambientLight }),
+    ...(input.presentationAmbientLight === undefined
+      ? {}
+      : { presentation_ambient_light: input.presentationAmbientLight }),
   };
 
   const parsed = MapDataSchema.safeParse(candidate);
