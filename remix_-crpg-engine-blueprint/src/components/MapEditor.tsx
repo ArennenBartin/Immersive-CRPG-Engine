@@ -5,8 +5,11 @@ import {
   OrthographicCamera,
   PerspectiveCamera,
 } from "@react-three/drei";
-import { useEngineStore } from "../store/engineStore";
-import { usePlayStore } from "../store/playStore";
+import {
+  persistEngineWorkspaceNow,
+  useEngineStore,
+} from "../store/engineStore";
+import { flushPlayAutosave, usePlayStore } from "../store/playStore";
 import { GameRenderer3D } from "./GameRenderer3D";
 import {
   MapData,
@@ -54,7 +57,10 @@ import {
 } from "../utils/mapAuthoring";
 import { basicTheme } from "../utils/basicTheme";
 import { validateOrdinaryMap } from "../engine-core/mapReadinessValidator";
+import { expandMapToFine } from "../engine-core/fineWorld";
 import { normalizeJamMapElevations } from "../utils/legacyJamCompatibility";
+import { dedupeFineTerrainCellsFor3D } from "../utils/renderSpace";
+import { openPlaytestWindow } from "../utils/playtestWindow";
 // Side-effect: registers stamps with the DSL registry.
 import { STAMP_PRESETS } from "../utils/basicStamps";
 import {
@@ -78,6 +84,55 @@ type MapProblem = {
   message: string;
 };
 
+type EditorPlacementFocus = { x: number; y: number; z: number };
+
+function resolveMapEditorEntityFocus(
+  map: MapData,
+  placement: EntityPlacementData,
+  groundCellByCoord: Map<string, CellData>,
+): EditorPlacementFocus {
+  const authoredX = Number(placement.cell[0] || 0);
+  const authoredZ = Number(placement.cell[1] || 0);
+  const anchor = placement.presentation_anchor;
+
+  if (anchor) {
+    const objectPlacement = map.custom_object_placements.find(
+      (candidate) => candidate.id === anchor.object_placement_id,
+    );
+    if (objectPlacement) {
+      const [localX = 0, localY = 0, localZ = 0] = anchor.local_position;
+      const facing = objectPlacement.facing || [0, 1];
+      const rotationY = Math.atan2(facing[0] || 0, facing[1] || 1);
+      const cosine = Math.cos(rotationY);
+      const sine = Math.sin(rotationY);
+      const anchorFloorY = Number(
+        groundCellByCoord.get(
+          `${objectPlacement.cell[0]}:${objectPlacement.cell[1]}`,
+        )?.y || 0,
+      );
+
+      return {
+        x: objectPlacement.cell[0] + cosine * localX + sine * localZ,
+        z: objectPlacement.cell[1] - sine * localX + cosine * localZ,
+        y:
+          anchorFloorY +
+          Number(objectPlacement.height_offset || 0) +
+          localY +
+          1.05,
+      };
+    }
+  }
+
+  const floorY = Number(
+    groundCellByCoord.get(`${authoredX}:${authoredZ}`)?.y || 0,
+  );
+  return {
+    x: authoredX + Number(placement.presentation_offset?.[0] || 0),
+    z: authoredZ + Number(placement.presentation_offset?.[1] || 0),
+    y: floorY + Number(placement.height_offset || 0) + 1.05,
+  };
+}
+
 const EMOTIONAL_PROFILE_AXES = [
   { key: "valence", label: "Val" },
   { key: "arousal", label: "Aro" },
@@ -93,7 +148,6 @@ export function MapEditor() {
     deleteMap,
     updateMap,
     updateSettings,
-    setMode,
     selectedMapId,
     setSelectedMapId,
   } = useEngineStore();
@@ -104,6 +158,7 @@ export function MapEditor() {
   );
   const [activeMap, setActiveMap] = useState<MapData | null>(null);
   const [pendingDeleteMapId, setPendingDeleteMapId] = useState<string | null>(null);
+  const [isLaunchingPlaytest, setIsLaunchingPlaytest] = useState(false);
   const activeGroundCellByCoord = React.useMemo(() => {
     const cells = new Map<string, CellData>();
     activeMap?.cells.forEach((cell) => {
@@ -116,6 +171,20 @@ export function MapEditor() {
   const activeCellIndexByCoord = React.useMemo(() =>
     new Map((activeMap?.cells || []).map((cell, index) => [`${cell.x}:${cell.y || 0}:${cell.z}`, index])),
   [activeMap?.cells]);
+  const editorVisualMap = React.useMemo(() => {
+    if (!activeMap || !(activeMap.fine_cell_overrides?.length || 0)) {
+      return activeMap;
+    }
+
+    // Authored maps remain macro-based, but their fine-cell overrides are real
+    // geometry in Play. Materialize only the preview cells here so Studio shows
+    // the same narrow partitions without changing editor coordinates or saves.
+    const expanded = expandMapToFine(activeMap);
+    return {
+      ...activeMap,
+      cells: dedupeFineTerrainCellsFor3D(expanded.cells),
+    };
+  }, [activeMap]);
 
   useEffect(() => {
     const map = gamePackage.maps.find((m) => m.id === activeMapId) || null;
@@ -214,7 +283,52 @@ export function MapEditor() {
   const [editorRenderCenter, setEditorRenderCenter] =
     useState<[number, number]>([0, 0]);
   const [editorRenderRadius, setEditorRenderRadius] = useState(64);
+  const [editorCameraMode, setEditorCameraMode] =
+    useState<"overview" | "interior">("overview");
+  const [editorCameraTargetY, setEditorCameraTargetY] = useState(0);
+  const [editorCameraRevision, setEditorCameraRevision] = useState(0);
   const [hoverCell, setHoverCell] = useState<{ x: number; z: number } | null>(null);
+
+  const selectedPlacementFocus = React.useMemo(() => {
+    if (!activeMap || !selection) return null;
+
+    if (selection.kind === "entity") {
+      const entityPlacement = activeMap.entity_placements[selection.index];
+      return entityPlacement
+        ? resolveMapEditorEntityFocus(
+            activeMap,
+            entityPlacement,
+            activeGroundCellByCoord,
+          )
+        : null;
+    }
+
+    const collection = selection.kind === "trigger"
+        ? activeMap.triggers
+        : selection.kind === "exit"
+          ? activeMap.exits
+          : selection.kind === "item"
+            ? activeMap.item_placements
+            : selection.kind === "container"
+              ? activeMap.container_placements
+              : activeMap.generation_sockets;
+    const placement = collection?.[selection.index] as unknown as
+      | { cell?: [number?, number?, ...unknown[]] }
+      | undefined;
+    if (!placement?.cell) return null;
+
+    const authoredX = Number(placement.cell[0] || 0);
+    const authoredZ = Number(placement.cell[1] || 0);
+    const floorY = Number(
+      activeGroundCellByCoord.get(`${authoredX}:${authoredZ}`)?.y || 0,
+    );
+
+    return {
+      x: authoredX,
+      z: authoredZ,
+      y: floorY + 0.45,
+    };
+  }, [activeGroundCellByCoord, activeMap, selection]);
 
   useEffect(() => {
     if (!activeMap) return;
@@ -223,7 +337,25 @@ export function MapEditor() {
     setEditorRenderRadius(
       Math.min(72, Math.max(32, Math.max(activeMap.width, activeMap.height))),
     );
+    setEditorCameraMode("overview");
+    setEditorCameraTargetY(0);
+    setEditorCameraRevision((revision) => revision + 1);
   }, [activeMap?.id]);
+
+  const handleFocusSelectedPlacement = () => {
+    if (!selectedPlacementFocus) return;
+    setTopDown(false);
+    setEditorRenderCenter([selectedPlacementFocus.x, selectedPlacementFocus.z]);
+    setEditorCameraTargetY(selectedPlacementFocus.y);
+    setEditorCameraMode("interior");
+    setEditorCameraRevision((revision) => revision + 1);
+  };
+
+  const handleResetEditorCamera = () => {
+    setEditorCameraMode("overview");
+    setEditorCameraTargetY(0);
+    setEditorCameraRevision((revision) => revision + 1);
+  };
 
   useEffect(() => {
     if (
@@ -507,6 +639,7 @@ export function MapEditor() {
             newPlacements.splice(existingIdx, 1); // toggle: remove if already exists
           } else {
             newPlacements.push({
+              id: `object_placement_${Date.now()}`,
               object_id: placementObjectId,
               cell: [x, z],
               facing: [0, 1],
@@ -525,7 +658,11 @@ export function MapEditor() {
             newEntities.splice(existingIdx, 1);
             setSelection(null);
           } else {
-            newEntities.push({ entity_id: placementEntityId, cell: [x, z] });
+            newEntities.push({
+              id: `entity_placement_${Date.now()}`,
+              entity_id: placementEntityId,
+              cell: [x, z],
+            });
             setSelection({ kind: "entity", index: newEntities.length - 1 });
           }
           updateMap(activeMap.id, { entity_placements: newEntities });
@@ -612,9 +749,26 @@ export function MapEditor() {
     ) {
       return;
     }
-    setSelectedMapId(activeMap.id);
-    resetRun();
-    setMode("play");
+    setIsLaunchingPlaytest(true);
+    void openPlaytestWindow({
+      mapId: activeMap.id,
+      prepare: async () => {
+        setSelectedMapId(activeMap.id);
+        resetRun();
+        flushPlayAutosave();
+        await persistEngineWorkspaceNow();
+      },
+    })
+      .then((opened) => {
+        if (!opened) {
+          window.alert("The playtest tab was blocked. Allow popups for this site and try again.");
+        }
+      })
+      .catch((error) => {
+        console.error("Could not open map playtest", error);
+        window.alert("The playtest could not be prepared. Your authored map is unchanged.");
+      })
+      .finally(() => setIsLaunchingPlaytest(false));
   };
 
   const handleValidateReachability = () => {
@@ -932,12 +1086,27 @@ export function MapEditor() {
             <span className="hidden sm:inline">{topDown ? "Top-down" : "Iso"}</span>
           </button>
           <button
-            onClick={() => orbitRef.current?.reset?.()}
+            onClick={handleResetEditorCamera}
             className="p-2 text-neutral-400 hover:bg-neutral-800 hover:text-white rounded-md transition-colors flex items-center gap-1.5 px-3 text-sm font-medium"
-            title="Fit / reset camera"
+            title="Return to the overview camera"
           >
             <Move className="w-4 h-4" />
             <span className="hidden sm:inline">Fit</span>
+          </button>
+          <button
+            onClick={handleFocusSelectedPlacement}
+            disabled={!selectedPlacementFocus}
+            className={`p-2 rounded-md transition-colors flex items-center gap-1.5 px-3 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-30 ${
+              editorCameraMode === "interior"
+                ? "bg-cyan-600/25 text-cyan-300"
+                : "text-neutral-400 hover:bg-neutral-800 hover:text-white"
+            }`}
+            title={selectedPlacementFocus
+              ? "Move the camera inside and focus the selected placement"
+              : "Select an entity or placement in the Inspector to focus it"}
+          >
+            <MousePointer className="w-4 h-4" />
+            <span className="hidden sm:inline">Focus</span>
           </button>
           {/* Lint overlay: paint validator warnings on the map. */}
           <button
@@ -959,10 +1128,13 @@ export function MapEditor() {
           </button>
           <button
             onClick={handleTestPlay}
-            className="flex items-center gap-2 bg-green-600/20 text-green-400 hover:bg-green-600/30 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors"
+            disabled={isLaunchingPlaytest}
+            className="flex items-center gap-2 bg-green-600/20 text-green-400 hover:bg-green-600/30 disabled:cursor-wait disabled:opacity-60 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors"
           >
             <Play className="w-4 h-4 fill-current" />
-            <span className="hidden sm:inline">Play map</span>
+            <span className="hidden sm:inline">
+              {isLaunchingPlaytest ? "Opening…" : "Play map"}
+            </span>
           </button>
         </div>
 
@@ -1006,12 +1178,19 @@ export function MapEditor() {
             />
           ) : (
             <PerspectiveCamera
+              key={`perspective-${editorCameraRevision}`}
               makeDefault
-              position={[
-                editorRenderCenter[0] + 18,
-                24,
-                editorRenderCenter[1] + 18,
-              ]}
+              position={editorCameraMode === "interior"
+                ? [
+                    editorRenderCenter[0] + 2.2,
+                    editorCameraTargetY + 1.35,
+                    editorRenderCenter[1] + 2.2,
+                  ]
+                : [
+                    editorRenderCenter[0] + 18,
+                    24,
+                    editorRenderCenter[1] + 18,
+                  ]}
               fov={45}
             />
           )}
@@ -1019,7 +1198,7 @@ export function MapEditor() {
           <ambientLight intensity={0.24} />
           <directionalLight position={[10, 20, 10]} intensity={0.68} castShadow />
           <GameRenderer3D
-            map={activeMap}
+            map={editorVisualMap || activeMap}
             gridSpace="macro"
             playerPos={
               activeMap.spawns[0]?.cell as [number, number] | undefined
@@ -1036,6 +1215,54 @@ export function MapEditor() {
             renderCenter={editorRenderCenter}
             renderRadius={editorRenderRadius}
           />
+          <group>
+            {activeMap.entity_placements.map((placement, index) => {
+              const focus = resolveMapEditorEntityFocus(
+                activeMap,
+                placement,
+                activeGroundCellByCoord,
+              );
+              const selected =
+                selection?.kind === "entity" && selection.index === index;
+              return (
+                <group
+                  key={placement.id || `${placement.entity_id}_${index}`}
+                  position={[focus.x, focus.y, focus.z]}
+                >
+                  <mesh
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setSelection({ kind: "entity", index });
+                      setInspectorOpen(true);
+                    }}
+                  >
+                    <sphereGeometry args={[0.72, 12, 10]} />
+                    <meshBasicMaterial
+                      color="#67e8f9"
+                      transparent
+                      opacity={selected ? 0.07 : 0}
+                      depthWrite={false}
+                    />
+                  </mesh>
+                  {selected && (
+                    <mesh
+                      position={[0, -1.02, 0]}
+                      rotation={[-Math.PI / 2, 0, 0]}
+                      raycast={() => null}
+                    >
+                      <torusGeometry args={[0.48, 0.055, 8, 24]} />
+                      <meshBasicMaterial
+                        color="#67e8f9"
+                        depthTest={false}
+                        transparent
+                        opacity={0.9}
+                      />
+                    </mesh>
+                  )}
+                </group>
+              );
+            })}
+          </group>
           <group>
             {(activeMap.generation_sockets ?? []).map((socket, index) => {
               const selected = selection?.kind === "generation_socket" && selection.index === index;
@@ -1121,19 +1348,25 @@ export function MapEditor() {
               </mesh>
             )}
           <OrbitControls
-            key={topDown ? "top" : "iso"}
+            key={`${topDown ? "top" : editorCameraMode}-${editorCameraRevision}`}
             ref={orbitRef}
-            target={[editorRenderCenter[0], 0, editorRenderCenter[1]]}
+            target={[
+              editorRenderCenter[0],
+              topDown ? 0 : editorCameraTargetY,
+              editorRenderCenter[1],
+            ]}
             enableRotate={!topDown}
+            screenSpacePanning={!topDown}
             maxPolarAngle={Math.PI / 2.2}
-            minDistance={2}
+            minDistance={editorCameraMode === "interior" && !topDown ? 0.25 : 2}
             maxDistance={Math.max(80, Math.max(activeMap.width, activeMap.height) * 2)}
             onChange={() => {
               const controls = orbitRef.current;
               if (!controls?.target || !controls?.object) return;
+              const targetPrecision = editorCameraMode === "interior" ? 100 : 1;
               const nextCenter: [number, number] = [
-                Math.round(controls.target.x),
-                Math.round(controls.target.z),
+                Math.round(controls.target.x * targetPrecision) / targetPrecision,
+                Math.round(controls.target.z * targetPrecision) / targetPrecision,
               ];
               setEditorRenderCenter((current) =>
                 current[0] === nextCenter[0] && current[1] === nextCenter[1]
@@ -1588,7 +1821,11 @@ function MapPlacementInspector({
     if (!entity_id) return;
     const entity_placements = [
       ...(map.entity_placements || []),
-      { entity_id, cell: defaultCell } as EntityPlacementData,
+      {
+        id: `entity_placement_${Date.now()}`,
+        entity_id,
+        cell: defaultCell,
+      } as EntityPlacementData,
     ];
     updateMap({ entity_placements });
     setSelection({ kind: "entity", index: entity_placements.length - 1 });
@@ -1989,6 +2226,52 @@ function EntityPlacementEditor({
   onChange: (placement: EntityPlacementData) => void;
   onDelete: () => void;
 }) {
+  const anchoredObjectPlacements = map.custom_object_placements.filter(
+    (candidate) => Boolean(candidate.id),
+  );
+  const presentationAnchor = placement.presentation_anchor;
+  const anchorLocalPosition = presentationAnchor?.local_position as
+    | [number, number, number]
+    | undefined;
+
+  const selectPresentationAnchor = (objectPlacementId: string) => {
+    if (!objectPlacementId) {
+      onChange({ ...placement, presentation_anchor: undefined });
+      return;
+    }
+
+    const objectPlacement = anchoredObjectPlacements.find(
+      (candidate) => candidate.id === objectPlacementId,
+    );
+    if (!objectPlacement) return;
+
+    const worldX =
+      placement.cell[0] + (placement.presentation_offset?.[0] ?? 0);
+    const worldZ =
+      placement.cell[1] + (placement.presentation_offset?.[1] ?? 0);
+    const deltaX = worldX - objectPlacement.cell[0];
+    const deltaZ = worldZ - objectPlacement.cell[1];
+    const objectFacing = objectPlacement.facing || [0, 1];
+    const rotationY = Math.atan2(objectFacing[0], objectFacing[1]);
+    const cosine = Math.cos(rotationY);
+    const sine = Math.sin(rotationY);
+
+    onChange({
+      ...placement,
+      presentation_offset: undefined,
+      height_offset: undefined,
+      presentation_anchor: {
+        object_placement_id: objectPlacementId,
+        local_position: [
+          cosine * deltaX - sine * deltaZ,
+          placement.height_offset ?? 0,
+          sine * deltaX + cosine * deltaZ,
+        ],
+        lock_to_anchor: true,
+      },
+    });
+  };
+
   const updateSchedule = (index: number, updates: any) => {
     const schedule = [...(placement.schedule || [])];
     schedule[index] = { ...schedule[index], ...updates };
@@ -2005,6 +2288,137 @@ function EntityPlacementEditor({
         ))}
       </InspectorSelect>
       <CellInputs cell={asCell(placement.cell)} onChange={(cell) => onChange({ ...placement, cell })} />
+      <FacingInputs
+        facing={asCell(placement.facing, [0, 1])}
+        onChange={(facing) => onChange({ ...placement, facing })}
+      />
+      <InspectorSelect
+        label="Movement collision"
+        value={placement.collision_mode ?? (presentationAnchor ? "none" : "solid")}
+        onChange={(collision_mode) =>
+          onChange({
+            ...placement,
+            collision_mode: collision_mode as "solid" | "none",
+          })
+        }
+      >
+        <option value="solid">Solid body</option>
+        <option value="none">None (interaction only)</option>
+      </InspectorSelect>
+      <InspectorSelect
+        label="Furniture / prop anchor"
+        value={presentationAnchor?.object_placement_id || ""}
+        onChange={selectPresentationAnchor}
+      >
+        <option value="">None (free-standing)</option>
+        {anchoredObjectPlacements.map((objectPlacement) => {
+          const object = gamePackage.object_library.find(
+            (candidate: any) => candidate.id === objectPlacement.object_id,
+          );
+          return (
+            <option key={objectPlacement.id} value={objectPlacement.id}>
+              {object?.display_name || objectPlacement.object_id} — {objectPlacement.id}
+            </option>
+          );
+        })}
+      </InspectorSelect>
+      {presentationAnchor && anchorLocalPosition ? (
+        <div className="space-y-2 rounded border border-amber-900/60 bg-amber-950/20 p-2">
+          <p className="text-[10px] leading-relaxed text-amber-200/70">
+            This visual pose follows the selected prop. The entity cell above
+            stays authoritative for interaction and navigation.
+          </p>
+          <label className="flex items-center gap-2 text-[11px] text-amber-100/80">
+            <input
+              type="checkbox"
+              checked={presentationAnchor.lock_to_anchor === true}
+              onChange={(event) =>
+                onChange({
+                  ...placement,
+                  presentation_anchor: {
+                    ...presentationAnchor,
+                    lock_to_anchor: event.target.checked,
+                  },
+                })
+              }
+            />
+            Keep attached during play
+          </label>
+          <div className="grid grid-cols-3 gap-2">
+            {(["X", "Y", "Z"] as const).map((axis, axisIndex) => (
+              <InspectorNumber
+                key={axis}
+                label={`Anchor ${axis}`}
+                value={anchorLocalPosition[axisIndex]}
+                step={0.01}
+                onChange={(value) => {
+                  const local_position = [...anchorLocalPosition] as [
+                    number,
+                    number,
+                    number,
+                  ];
+                  local_position[axisIndex] = value;
+                  onChange({
+                    ...placement,
+                    presentation_anchor: {
+                      ...presentationAnchor,
+                      local_position,
+                    },
+                  });
+                }}
+              />
+            ))}
+          </div>
+        </div>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 gap-2">
+            <InspectorNumber
+              label="Visual offset X"
+              value={placement.presentation_offset?.[0] ?? 0}
+              step={0.01}
+              onChange={(x) => {
+                const next: [number, number] = [
+                  x,
+                  placement.presentation_offset?.[1] ?? 0,
+                ];
+                onChange({
+                  ...placement,
+                  presentation_offset:
+                    next[0] === 0 && next[1] === 0 ? undefined : next,
+                });
+              }}
+            />
+            <InspectorNumber
+              label="Visual offset Z"
+              value={placement.presentation_offset?.[1] ?? 0}
+              step={0.01}
+              onChange={(z) => {
+                const next: [number, number] = [
+                  placement.presentation_offset?.[0] ?? 0,
+                  z,
+                ];
+                onChange({
+                  ...placement,
+                  presentation_offset:
+                    next[0] === 0 && next[1] === 0 ? undefined : next,
+                });
+              }}
+            />
+          </div>
+          <InspectorNumber
+            label="Visual height offset"
+            value={placement.height_offset ?? 0}
+            step={0.01}
+            onChange={(height_offset) =>
+              onChange({
+                ...placement,
+                height_offset: height_offset === 0 ? undefined : height_offset,
+              })
+            }
+          />
+        </>
+      )}
 
       <div className="space-y-2">
         <div className="flex items-center justify-between">
@@ -2293,7 +2707,7 @@ function InspectorText({ label, value, onChange }: { label: string; value: strin
   );
 }
 
-function InspectorNumber({ label, value, onChange, min, max }: { label: string; value: number; onChange: (value: number) => void; min?: number; max?: number }) {
+function InspectorNumber({ label, value, onChange, min, max, step }: { label: string; value: number; onChange: (value: number) => void; min?: number; max?: number; step?: number }) {
   return (
     <label className="block space-y-1">
       <span className="text-[11px] font-medium uppercase tracking-wide text-neutral-500">{label}</span>
@@ -2301,6 +2715,7 @@ function InspectorNumber({ label, value, onChange, min, max }: { label: string; 
         type="number"
         min={min}
         max={max}
+        step={step}
         value={Number.isFinite(value) ? value : 0}
         onChange={(event) => onChange(Number(event.target.value) || 0)}
         className="w-full rounded border border-neutral-800 bg-black px-2 py-1.5 text-xs text-white"
@@ -2332,8 +2747,8 @@ function CellInputs({ cell, onChange, compact = false }: { cell: [number, number
 function FacingInputs({ facing, onChange }: { facing: [number, number]; onChange: (facing: [number, number]) => void }) {
   return (
     <div className="grid grid-cols-2 gap-2">
-      <InspectorNumber label="Facing X" value={facing[0]} onChange={(x) => onChange([x, facing[1]])} />
-      <InspectorNumber label="Facing Z" value={facing[1]} onChange={(z) => onChange([facing[0], z])} />
+      <InspectorNumber label="Facing X" value={facing[0]} step={0.1} onChange={(x) => onChange([x, facing[1]])} />
+      <InspectorNumber label="Facing Z" value={facing[1]} step={0.1} onChange={(z) => onChange([facing[0], z])} />
     </div>
   );
 }

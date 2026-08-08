@@ -2325,12 +2325,14 @@ interface RuntimeSensoryProfile {
   channels: RuntimeSensoryChannel[];
   memory_ticks: number;
   search_ticks: number;
+  search_steps: number;
 }
 
 const DEFAULT_SENSORY_PROFILE: RuntimeSensoryProfile = {
   id: "standard",
   memory_ticks: 90,
   search_ticks: 90,
+  search_steps: 4,
   channels: [
     {
       id: "ordinary_sight",
@@ -2410,6 +2412,7 @@ const sensoryProfileForEntity = (
     id: authored.id || "custom",
     memory_ticks: Math.max(0, authored.memory_ticks ?? 90),
     search_ticks: Math.max(0, authored.search_ticks ?? 90),
+    search_steps: Math.max(1, Math.min(8, authored.search_steps ?? 4)),
     channels: authored.channels.map((channel) => ({
       id: channel.id,
       stimulus_kinds: [...channel.stimulus_kinds],
@@ -3142,6 +3145,7 @@ const taskForPerceptionAlert = (
   alert: ImmersivePerceptionAlertRecord,
   tick: number,
   searchTicks = 90,
+  searchSteps = 4,
 ): SimulationNpcTaskRecord => ({
   id: `task_perception_${tick}_${alert.actor_id}_${alert.stimulus.kind}`,
   actor_id: alert.actor_id,
@@ -3163,7 +3167,7 @@ const taskForPerceptionAlert = (
     ? {
         search_origin_cell: cloneCell(alert.target_cell),
         search_step: 0,
-        search_steps: Math.max(1, Math.min(4, Math.floor(searchTicks))),
+        search_steps: Math.max(1, Math.min(8, Math.floor(searchSteps))),
       }
     : {}),
 });
@@ -3195,6 +3199,7 @@ export const advanceImmersivePerceptionForSave = (
       alert,
       snapshot.generated_at_tick,
       profileForAlert(alert).search_ticks,
+      profileForAlert(alert).search_steps,
     ),
   );
   const worldFacts: PlaySaveWorldFact[] = snapshot.alerts.map((alert, index) => ({
@@ -3332,6 +3337,7 @@ export const advanceImmersivePerceptionForSave = (
       alert,
       snapshot.generated_at_tick,
       profileForAlert(alert).search_ticks,
+      profileForAlert(alert).search_steps,
     ),
   );
   const taskCandidates = [...freshNpcTaskCandidates, ...lostContactTaskCandidates];
@@ -3471,6 +3477,7 @@ export const advanceImmersivePerceptionForSave = (
           independent_search_origin: undefined,
           independent_search_target: undefined,
           independent_search_step: undefined,
+          independent_search_max_steps: undefined,
           independent_search_evidence_key: undefined,
           independent_search_complete_evidence_key: undefined,
         }];

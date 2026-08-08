@@ -813,6 +813,130 @@ export interface LegacyDialogueMigrationResult {
   migratedDialogueIds: string[];
 }
 
+const standardChoiceLabel = (
+  source: GamePackage,
+  response: DialogueResponseData,
+): string => {
+  if (response.dynamic_topic_id) {
+    return (
+      (source.dynamic_topics || []).find(
+        (topic) => topic.id === response.dynamic_topic_id,
+      )?.display_name || response.dynamic_topic_id
+    );
+  }
+  if (response.topic_id) {
+    return (
+      (source.keywords || []).find((topic) => topic.id === response.topic_id)
+        ?.display_label || response.topic_id.replace(/^action:/, "")
+    );
+  }
+  return "Continue";
+};
+
+/**
+ * Materializes a keyword conversation as the ordinary NPC-line/player-choice
+ * graph used by the Backrooms runtime. Keyword fields remain on the record so
+ * an older package reader can still inspect them, but they are no longer the
+ * active presentation.
+ */
+export const convertKeywordDialogueToChoiceTree = (
+  source: GamePackage,
+  entry: DialogueData,
+): DialogueData => {
+  const recoveredNodes = entry.legacy_migration?.original_nodes;
+  if (recoveredNodes?.length) {
+    return {
+      ...entry,
+      format: "tree_v1",
+      nodes: structuredClone(recoveredNodes),
+    };
+  }
+
+  if (entry.format !== "keyword_v1") {
+    return entry.nodes.length ? { ...entry, format: "tree_v1" } : entry;
+  }
+
+  const responses = entry.responses || [];
+  const opening = [...responses]
+    .filter((response) => response.role === "opening")
+    .sort((left, right) => right.priority - left.priority)[0];
+  const replies = responses.filter((response) => response.role !== "opening");
+  const usedNodeIds = new Set(["start"]);
+  const responseNodeIds = replies.map((response, index) => {
+    const base = stableToken(response.id || `reply_${index + 1}`) || `reply_${index + 1}`;
+    let id = base;
+    let suffix = 2;
+    while (usedNodeIds.has(id)) {
+      id = `${base}_${suffix}`;
+      suffix += 1;
+    }
+    usedNodeIds.add(id);
+    return id;
+  });
+  const replyNodes = replies.map((response, index) => ({
+    id: responseNodeIds[index],
+    speaker: response.speaker || entry.speaker || entry.display_name || "NPC",
+    text: response.text || "...",
+    type: response.type,
+    attend_node: response.attend_node,
+    scene_image_url: response.scene_image_url,
+    scene_image_alt: response.scene_image_alt,
+    options: response.end_conversation
+      ? []
+      : [{ text: "Ask something else.", next_node_id: "start" }],
+  }));
+  const options: DialogueData["nodes"][number]["options"] = replies.map(
+    (response, index) => ({
+    text: standardChoiceLabel(source, response),
+    next_node_id: responseNodeIds[index],
+    condition: response.condition,
+    set_switches: response.set_switches,
+    trigger_quest: response.set_quest_id,
+    trigger_quest_state: response.set_quest_state,
+    trigger_cutscene: response.trigger_cutscene_id,
+    }),
+  );
+  if (!options.some((option) => /^(goodbye|leave|later)$/i.test(option.text.trim()))) {
+    options.push({ text: "Goodbye." });
+  }
+
+  return {
+    ...entry,
+    format: "tree_v1",
+    nodes: [
+      {
+        id: "start",
+        speaker: opening?.speaker || entry.speaker || entry.display_name || "NPC",
+        text: opening?.text || "...",
+        type: opening?.type,
+        attend_node: opening?.attend_node,
+        scene_image_url: opening?.scene_image_url,
+        scene_image_alt: opening?.scene_image_alt,
+        options,
+      },
+      ...replyNodes,
+    ],
+  };
+};
+
+/**
+ * Restores choice trees that the former keyword migration preserved in its
+ * recovery payload and materializes native keyword records as ordinary
+ * branches.
+ *
+ * This is intentionally lossless: keyword response data stays in the package
+ * for backwards compatibility, but tree_v1 becomes the active presentation
+ * whenever the original authored graph is available.
+ */
+export const restoreStandardDialogueTrees = (source: GamePackage): GamePackage => ({
+  ...source,
+  dialogue: source.dialogue.map((entry) =>
+    entry.format === "tree_v1" && entry.nodes.length
+      ? entry
+      : convertKeywordDialogueToChoiceTree(source, entry),
+  ),
+});
+
 export const migrateLegacyDialoguePackage = (
   source: GamePackage,
 ): LegacyDialogueMigrationResult => {
@@ -820,7 +944,7 @@ export const migrateLegacyDialoguePackage = (
   const issues: DialogueValidationIssue[] = [];
   const migratedDialogueIds: string[] = [];
   const dialogue = source.dialogue.map((entry) => {
-    if (entry.format === "keyword_v1" || (entry.responses || []).length > 0 || entry.nodes.length === 0) return entry;
+    if (entry.format === "tree_v1" || entry.format === "keyword_v1" || (entry.responses || []).length > 0 || entry.nodes.length === 0) return entry;
     migratedDialogueIds.push(entry.id);
     const originalNodes = structuredClone(entry.nodes);
     const topicsByNode = new Map<string, string[]>();
@@ -1004,7 +1128,6 @@ export const validateKeywordDialoguePackage = (
   gamePackage.dialogue.forEach((dialogue, dialogueIndex) => {
     const path = `dialogue.${dialogueIndex}`;
     if (dialogue.format !== "keyword_v1") {
-      issues.push({ severity: "warning", code: "DIALOGUE_LEGACY_FORMAT", path: `${path}.format`, message: `${dialogue.id} still requires keyword migration.` });
       return;
     }
     const responseIds = new Set<string>();

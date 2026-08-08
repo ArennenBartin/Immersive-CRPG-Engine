@@ -205,8 +205,10 @@ import {
   resolveActorSpriteBrightness,
   resolveAuthoritativeLightRenderMetrics,
   resolveAuthoritativePointLightIntensity,
+  resolveExteriorEnvironmentLightLevels,
   BACKROOMS_LEVEL_ZERO_PLAY_AMBIENT_LIGHT,
   PRESENTATION_ROOM_LIGHT_ACTIVATION_RADIUS,
+  PRESENTATION_ROOM_FLUORESCENT_COLOR,
   PRESENTATION_ROOM_LIGHT_FILL_STRENGTH,
   PRESENTATION_ROOM_LIGHT_RADIUS,
   PRESENTATION_ROOM_POINT_LIGHT_INTENSITY,
@@ -228,6 +230,7 @@ import {
   fineCellsCoveredByWorldMacroCell,
   logicalCellToWorld,
   logicalCoordToWorld,
+  renderedCellWorldSize,
   worldCoordToLogical,
   worldPointToLogicalCell,
 } from "../src/utils/renderSpace";
@@ -365,6 +368,13 @@ console.log("engine-core: Play input cadence + demand frames");
         surface_tag: "none",
       },
     ],
+    fine_cell_overrides: [
+      {
+        macro_cell: [-45, -7],
+        fine_offset: [2, 1],
+        overrides: { walkable: false, blocks_los: true },
+      },
+    ],
     props: [],
     custom_object_placements: [],
     entity_placements: [],
@@ -374,6 +384,22 @@ console.log("engine-core: Play input cadence + demand frames");
     exits: [],
   };
   const negativeGrid = getRuntimeMapGrid(negativeOriginMap);
+  const negativeOverrideOrigin = fineOfMacro([-45, -7]);
+  const overriddenFineCell = negativeGrid.getFineCell(
+    negativeOverrideOrigin[0] + 2,
+    negativeOverrideOrigin[1] + 1,
+  );
+  const neighboringFineCell = negativeGrid.getFineCell(
+    negativeOverrideOrigin[0] + 1,
+    negativeOverrideOrigin[1] + 1,
+  );
+  ok(
+    overriddenFineCell?.walkable === false &&
+      overriddenFineCell.blocks_los === true &&
+      neighboringFineCell?.walkable === true &&
+      neighboringFineCell.blocks_los === false,
+    "large-map streaming applies authored fine-cell geometry without widening it",
+  );
   const beforeTrueBoundaryCell = fineCenterOfMacro([-14, -7]);
   const afterTrueBoundaryCell = fineCenterOfMacro([-13, -7]);
   const beforeTrueBoundary = negativeGrid.sectorOfFine(
@@ -660,6 +686,29 @@ console.log("engine-core: 3D render-space adapter");
   ok(
     terrain.length === 1 && terrain[0].x === 0 && terrain[0].z === 0,
     "nine fine copies produce one 3D terrain model",
+  );
+  const mixedFineBlock = fineCopies.map((cell) =>
+    cell.z === 1
+      ? {
+          ...cell,
+          walkable: false,
+          blocks_los: true,
+          object_id: "obj_wall_block",
+        }
+      : cell,
+  );
+  const mixedTerrain = dedupeFineTerrainCellsFor3D(mixedFineBlock, 3);
+  const thinWallCells = mixedTerrain.filter(
+    (cell) => cell.object_id === "obj_wall_block",
+  );
+  ok(
+    mixedTerrain.length === 9 &&
+      thinWallCells.length === 3 &&
+      thinWallCells.every(
+        (cell) => Math.abs(renderedCellWorldSize(cell) - 1 / 3) < 1e-9,
+      ) &&
+      thinWallCells.every((cell) => Math.abs(cell.z) < 1e-9),
+    "mixed fine blocks preserve visible one-microtile wall geometry",
   );
 }
 
@@ -3620,6 +3669,74 @@ console.log("engine-core: v1 package/save grid adapter");
     "v1 move emits resource_spent when costed",
   );
 
+  const packageWithTraversalHeights = (
+    currentHeight: number,
+    targetHeight: number,
+  ) => ({
+    ...gamePackage,
+    maps: gamePackage.maps.map((map) =>
+      map.id === demoMap.id
+        ? {
+            ...map,
+            cells: map.cells.map((mapCell) => {
+              if (mapCell.x === 0 && mapCell.z === 6) {
+                return {
+                  ...mapCell,
+                  object_id: "obj_floor_plate",
+                  tag: "",
+                  visual_height: currentHeight,
+                };
+              }
+              if (mapCell.x === 0 && mapCell.z === 5) {
+                return {
+                  ...mapCell,
+                  object_id: "obj_floor_plate",
+                  tag: "",
+                  visual_height: targetHeight,
+                };
+              }
+              return mapCell;
+            }),
+          }
+        : map,
+    ),
+  });
+  const smallStepUp = dispatchV1MoveEntity({
+    gamePackage: packageWithTraversalHeights(0, 0.85),
+    save: makeSave([0, 6]),
+    dx: 0,
+    dy: -1,
+  });
+  const smallStepDown = dispatchV1MoveEntity({
+    gamePackage: packageWithTraversalHeights(0, 0.85),
+    save: makeSave([0, 5]),
+    dx: 0,
+    dy: 1,
+  });
+  const tallStepUp = dispatchV1MoveEntity({
+    gamePackage: packageWithTraversalHeights(0, 1.25),
+    save: makeSave([0, 6]),
+    dx: 0,
+    dy: -1,
+  });
+  const tallStepDown = dispatchV1MoveEntity({
+    gamePackage: packageWithTraversalHeights(0, 1.25),
+    save: makeSave([0, 5]),
+    dx: 0,
+    dy: 1,
+  });
+  ok(
+    smallStepUp.ok && smallStepDown.ok,
+    "v1 movement automatically negotiates realistic small steps in both directions",
+  );
+  ok(
+    !tallStepUp.ok &&
+      tallStepUp.reason === "height blocked" &&
+      !tallStepDown.ok &&
+      tallStepDown.reason === "height blocked",
+    "v1 movement keeps tall ledges blocking in both directions",
+  );
+
   const intoWall = dispatchV1MoveEntity({
     gamePackage,
     save: makeSave([-1, -3]),
@@ -4212,7 +4329,7 @@ console.log("engine-core: v1 package/save grid adapter");
       resolvePresentationRoomLightContribution([6, 2], [[2, 2]]) > 0 &&
       PRESENTATION_ROOM_LIGHT_RADIUS >= 7 &&
       PRESENTATION_ROOM_POINT_LIGHT_INTENSITY >= 4 &&
-      PRESENTATION_ROOM_POINT_LIGHT_INTENSITY <= 7 &&
+      PRESENTATION_ROOM_POINT_LIGHT_INTENSITY <= 8 &&
       resolvePresentationRoomLightContribution([20, 20], [[2, 2]]) === 0 &&
       resolvePresentationRoomLightContribution(
         [2, 2],
@@ -4220,10 +4337,33 @@ console.log("engine-core: v1 package/save grid adapter");
       ) === PRESENTATION_ROOM_LIGHT_FILL_STRENGTH,
     "permanent room fixtures keep a restrained local actor fill while physical inverse-square lights shape the room",
   );
+  const fluorescentColor = PRESENTATION_ROOM_FLUORESCENT_COLOR.match(
+    /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i,
+  );
+  ok(
+    Boolean(fluorescentColor) &&
+      Math.abs(
+        Number.parseInt(fluorescentColor?.[2] || "0", 16) -
+          Number.parseInt(fluorescentColor?.[1] || "0", 16),
+      ) <= 16 &&
+      Number.parseInt(fluorescentColor?.[3] || "0", 16) > 0xaf,
+    "Backrooms room lights use a creamy fluorescent color between amber and green-white",
+  );
   ok(
     BACKROOMS_LEVEL_ZERO_PLAY_AMBIENT_LIGHT > 0.05 &&
       BACKROOMS_LEVEL_ZERO_PLAY_AMBIENT_LIGHT <= 0.1,
     "Level Zero uses a restrained visual ambient floor without changing mechanical ambient",
+  );
+  const exteriorLights = resolveExteriorEnvironmentLightLevels(0.28);
+  const darkExteriorLights = resolveExteriorEnvironmentLightLevels(0);
+  ok(
+    exteriorLights.hemisphere >= 0.95 &&
+      exteriorLights.ambient >= 0.7 &&
+      exteriorLights.key >= 1.1 &&
+      exteriorLights.rim >= 0.3 &&
+      exteriorLights.hemisphere > darkExteriorLights.hemisphere &&
+      exteriorLights.key > darkExteriorLights.key,
+    "exterior presentation supplies readable sky, ground, key, and rim light for PBR models",
   );
   const selectedRoomLights = selectLocalPresentationRoomLights(
     [
@@ -4813,6 +4953,48 @@ console.log("engine-core: v1 package/save grid adapter");
   );
   ok(mapChange.save.player.facing[0] === 1 && mapChange.save.player.facing[1] === 0, "change_map applies exit facing override");
   ok(mapChange.events.some((e) => e.type === "map_changed"), "change_map emits map_changed");
+
+  const implicitSpawnChange = dispatchV1ChangeMap({
+    gamePackage,
+    save: makeSave([0, 5]),
+    targetMapId: overworld.id,
+  });
+  ok(
+    implicitSpawnChange.ok &&
+      implicitSpawnChange.save.player.cell[0] === targetSpawn.cell[0] &&
+      implicitSpawnChange.save.player.cell[1] === targetSpawn.cell[1],
+    "change_map without an explicit spawn retains the first-spawn fallback",
+  );
+
+  const staleSpawnChange = dispatchV1ChangeMap({
+    gamePackage,
+    save: makeSave([0, 5]),
+    targetMapId: overworld.id,
+    targetSpawnId: "missing_arrival_anchor",
+  });
+  ok(
+    !staleSpawnChange.ok &&
+      staleSpawnChange.reason === "invalid map transition" &&
+      staleSpawnChange.save.current_map_id === demoMap.id,
+    "change_map rejects a stale explicit spawn instead of silently using spawn zero",
+  );
+
+  const packageWithSpawnlessTarget = {
+    ...gamePackage,
+    maps: gamePackage.maps.map((map) =>
+      map.id === overworld.id ? { ...map, spawns: [] } : map,
+    ),
+  };
+  const spawnlessMapChange = dispatchV1ChangeMap({
+    gamePackage: packageWithSpawnlessTarget,
+    save: makeSave([0, 5]),
+    targetMapId: overworld.id,
+  });
+  ok(
+    !spawnlessMapChange.ok &&
+      spawnlessMapChange.reason === "invalid map transition",
+    "change_map rejects a destination with no arrival spawn",
+  );
 
   const authoredOverworldExit = overworld.exits?.find((exit) => exit.id === "exit_to_demo_ground");
   ok(

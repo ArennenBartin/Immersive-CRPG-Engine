@@ -32,11 +32,14 @@ import { isStableMemoryStructureObject } from "../utils/fogOfWar";
 import { getEnemyXpReward, grantExperienceToSave } from "../utils/leveling";
 import {
   applyPlacementDeltas,
+  getMacroPlacementFootprint,
   isPushableObject,
   placementHasCollision,
   placementOriginKey,
 } from "../utils/objectFootprint";
 import { getJamEngineVisualHeight } from "../utils/legacyJamCompatibility";
+import { canAutomaticallyStepBetween } from "../utils/traversal";
+import { entityPlacementBlocksMovement } from "../utils/entityPresentationAnchor";
 import { EventBus } from "./events";
 import {
   FINE_PER_MACRO,
@@ -472,6 +475,8 @@ export interface V1IndependentPursuitTarget {
   tracksLiveTarget: boolean;
   targetActorId?: string;
   taskId?: string;
+  /** Bounded local-search waypoints after the evidence position is reached. */
+  searchSteps?: number;
 }
 
 const finiteCell = (value: unknown): [number, number] | undefined => {
@@ -579,6 +584,10 @@ export const resolveV1IndependentPursuitTarget = (
       evidence: "local_search",
       evidenceKey,
       tracksLiveTarget: false,
+      searchSteps: Math.max(
+        1,
+        Math.min(8, Math.floor(Number(state.independent_search_max_steps || 8))),
+      ),
     };
   }
 
@@ -611,6 +620,10 @@ export const resolveV1IndependentPursuitTarget = (
         evidenceKey: key,
         tracksLiveTarget: false,
         taskId: activeTask?.id,
+        searchSteps: Math.max(
+          1,
+          Math.min(8, Math.floor(Number(activeTask?.search_steps || 8))),
+        ),
       };
     }
   }
@@ -631,6 +644,9 @@ const cloneSaveForRuntime = (save: PlaySave): PlaySave => ({
     ...save.player,
     cell: cloneCell(save.player.cell),
     facing: cloneCell(save.player.facing),
+    fine_position: save.player.fine_position
+      ? cloneCell(save.player.fine_position)
+      : undefined,
   },
   playerStats: { ...save.playerStats },
   flags: { ...(save.flags || {}) },
@@ -702,6 +718,9 @@ const forkExplorationPlayerMoveSave = (save: PlaySave): PlaySave => ({
     ...save.player,
     cell: cloneCell(save.player.cell),
     facing: cloneCell(save.player.facing),
+    fine_position: save.player.fine_position
+      ? cloneCell(save.player.fine_position)
+      : undefined,
   },
   playerStats: { ...save.playerStats },
   flags: { ...(save.flags || {}) },
@@ -825,14 +844,23 @@ export class V1GridWorld implements InteractiveGridWorld {
   }
 
   private placementFootprint(
-    placement: Pick<ObjectPlacementData, "cell">,
+    placement: ObjectPlacementData,
     object: ObjectData | undefined,
   ): [number, number][] {
     const half = this.spatialHalfExtent;
     const ratio = this.spatialRatio;
-    const authoredFootprint = object?.collision?.footprint?.length
-      ? object.collision.footprint
-      : ([[0, 0]] as [number, number][]);
+    // Authored collision offsets rotate with the placed object. The prior
+    // runtime-only footprint path scaled offsets but never rotated them, so a
+    // west-facing house rendered with an open doorway while its invisible
+    // collision lane still faced north. Reuse the editor's canonical macro
+    // rotation, then scale/rasterize those offsets for the fine runtime.
+    const authoredFootprint = getMacroPlacementFootprint(
+      placement,
+      object,
+    ).map(
+      ([x, y]) =>
+        [x - placement.cell[0], y - placement.cell[1]] as [number, number],
+    );
     const cells: [number, number][] = [];
     for (const [rx, ry] of authoredFootprint) {
       const centerX = placement.cell[0] + rx * ratio;
@@ -906,11 +934,7 @@ export class V1GridWorld implements InteractiveGridWorld {
       const target = this.getActiveCell(fx, fy);
       if (!target) return { ok: false, reason: "missing cell" };
       if (!target.walkable) return { ok: false, reason: "blocked" };
-      if (
-        getJamEngineVisualHeight(target) -
-          getJamEngineVisualHeight(current) >
-        1
-      ) {
+      if (!canAutomaticallyStepBetween(current, target)) {
         return { ok: false, reason: "height blocked" };
       }
       if (this.cellObjectBlocks(target)) {
@@ -1000,12 +1024,10 @@ export class V1GridWorld implements InteractiveGridWorld {
       }
       if (
         cellCollision ||
-        getJamEngineVisualHeight(target) -
-          getJamEngineVisualHeight(current) >
-          1
+        !canAutomaticallyStepBetween(current, target)
       ) {
-        // Props, pits, cliffs, and height transitions are deliberate blockers,
-        // not wall corners that movement may steer around.
+        // Props, pits, cliffs, and non-step height transitions are deliberate
+        // blockers, not wall corners that movement may steer around.
         hasOtherCollision = true;
         continue;
       }
@@ -1361,6 +1383,12 @@ export class V1GridWorld implements InteractiveGridWorld {
     for (let index = 0; index < (this.activeMap.entity_placements || []).length; index += 1) {
       const placement = this.activeMap.entity_placements[index];
       if ((this.save.party_members || []).includes(placement.entity_id)) continue;
+      // A furniture-anchored or explicitly non-solid actor relies on its prop
+      // for collision and must not hold grid space of its own. Riley is posed
+      // on the sofa but her authoritative cell is the open floor in front of
+      // it; without this her footprint became an invisible 1.67 m no-go square
+      // in the middle of the room that turning could not explain.
+      if (!entityPlacementBlocksMovement(placement)) continue;
       const key = entityPlacementStateKey(this.activeMap.id, placement, index);
       if (key === excludeId) continue;
       const entity = this.getEntity(key);
@@ -1383,6 +1411,7 @@ export class V1GridWorld implements InteractiveGridWorld {
           ...this.save.player,
           cell: [x, y],
           facing,
+          fine_position: undefined,
         },
       };
       this.recordMovementSurfaceTransfer(id, to);
@@ -1640,10 +1669,15 @@ export class V1GridWorld implements InteractiveGridWorld {
   ): MapTransitionRef | undefined {
     const targetMap = this.options.gamePackage.maps.find((candidate) => candidate.id === targetMapId);
     if (!targetMap) return undefined;
-    const spawn =
-      (targetSpawnId ? targetMap.spawns.find((candidate) => candidate.id === targetSpawnId) : undefined) ||
-      targetMap.spawns[0];
-    const cell = cloneCell((spawn?.cell as [number, number] | undefined) || [0, 0]);
+    // An explicitly-authored arrival anchor is a contract, not a hint. Falling
+    // back to spawn zero when that ID is stale makes a door appear to work but
+    // silently sends the actor to the map's initial start position. Only exits
+    // that omit an anchor retain the legacy first-spawn behavior.
+    const spawn = targetSpawnId
+      ? targetMap.spawns.find((candidate) => candidate.id === targetSpawnId)
+      : targetMap.spawns[0];
+    if (!spawn) return undefined;
+    const cell = cloneCell(spawn.cell as [number, number]);
     const facing = cloneCell(facingOverride || (spawn?.facing as [number, number] | undefined) || [0, -1]);
     return {
       fromMapId: this.save.current_map_id,
@@ -1663,6 +1697,7 @@ export class V1GridWorld implements InteractiveGridWorld {
         ...this.save.player,
         cell: cloneCell(transition.cell),
         facing: cloneCell(transition.facing),
+        fine_position: undefined,
       },
     }, transition.toMapId);
     this.activeMap = this.resolveMap(transition.toMapId);
@@ -1905,6 +1940,7 @@ export class V1GridWorld implements InteractiveGridWorld {
         ...this.save.player,
         cell: cloneCell(cell),
         facing: cloneCell(facing || this.save.player.facing),
+        fine_position: undefined,
       },
     };
   }
@@ -1920,6 +1956,7 @@ export class V1GridWorld implements InteractiveGridWorld {
         ...this.save.player,
         cell: cloneCell(cell),
         facing: cloneCell(facing || this.save.player.facing),
+        fine_position: undefined,
       },
     };
     this.activeMap = nextMap;
@@ -4070,8 +4107,12 @@ export class V1GridWorld implements InteractiveGridWorld {
       [-distance, -distance],
       [distance, -distance],
     ];
+    const searchStepLimit = Math.max(
+      1,
+      Math.min(offsets.length, Math.floor(Number(pursuit.searchSteps || 8))),
+    );
     let target: [number, number] | undefined;
-    while (step < offsets.length && !target) {
+    while (step < searchStepLimit && !target) {
       const offset = offsets[step]!;
       step += 1;
       const candidate: [number, number] = [
@@ -4089,6 +4130,7 @@ export class V1GridWorld implements InteractiveGridWorld {
           independent_search_origin: cloneCell(pursuit.origin),
           independent_search_target: cloneCell(target),
           independent_search_step: step,
+          independent_search_max_steps: searchStepLimit,
           independent_search_evidence_key: pursuit.evidenceKey,
           independent_search_complete_evidence_key: undefined,
         }
@@ -4096,6 +4138,7 @@ export class V1GridWorld implements InteractiveGridWorld {
           ...currentState,
           independent_search_target: undefined,
           independent_search_step: step,
+          independent_search_max_steps: searchStepLimit,
           independent_search_evidence_key: pursuit.evidenceKey,
           independent_search_complete_evidence_key: pursuit.evidenceKey,
         };

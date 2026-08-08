@@ -2,8 +2,18 @@ import { z } from "zod";
 import { objectLibraryPresets, spriteLibraryPresets } from "./presets";
 import { createOverworldMap } from "../utils/overworldMap";
 import { createThreefoldMarchMaps } from "../utils/threefoldMarchMap";
-import { ABILITY_KIND_IDS, ABILITY_PAGE_ORDER, DEFAULT_BUILTIN_ABILITIES, DEFAULT_UNLOCKED_ABILITY_IDS, RUNTIME_ACTION_IDS } from "../data/defaultAbilities";
-import { PLAYER_IDLE_FBX_MODEL_ID } from "../data/playerModelAssets";
+import {
+  ABILITY_KIND_IDS,
+  ABILITY_PAGE_ORDER,
+  DEFAULT_BUILTIN_ABILITIES,
+  DEFAULT_UNLOCKED_ABILITY_IDS,
+  RUNTIME_ACTION_IDS,
+} from "../data/defaultAbilities";
+import {
+  BUNDLED_PLAYER_GUITAR_ANIMATION_OVERRIDE,
+  BUNDLED_PLAYER_GUITAR_ATTACHMENT_PROFILE,
+  PLAYER_IDLE_FBX_MODEL_ID,
+} from "../data/playerModelAssets";
 import {
   DungeonEncounterProfileSchema,
   DungeonHazardProfileSchema,
@@ -21,6 +31,13 @@ export const GameMetadataSchema = z.object({
   start_map_id: z.string(),
   start_spawn_id: z.string(),
 });
+
+// Combat selection is additive and conservative: legacy packages omit this
+// field and therefore continue to resolve through pulse combat. Maps may opt
+// into the realtime horror controller without changing the package-wide
+// setting used by every other authored location.
+export const HorrorCombatModeSchema = z.enum(["pulse", "horror_realtime"]);
+export type HorrorCombatMode = z.infer<typeof HorrorCombatModeSchema>;
 
 // ── Condition query layer ───────────────────────────────────────────────────
 // One declarative condition shape evaluated everywhere game logic gates on
@@ -114,7 +131,9 @@ export const ConditionSchema: z.ZodType<ConditionData> = z.lazy(() =>
     topic_ask_count_lte: z.number().optional(),
     entity_state_id: z.string().optional(),
     entity_state_field: z.string().optional(),
-    entity_state_value: z.union([z.string(), z.number(), z.boolean()]).optional(),
+    entity_state_value: z
+      .union([z.string(), z.number(), z.boolean()])
+      .optional(),
     not: ConditionSchema.optional(),
     all: z.array(ConditionSchema).optional(),
     any: z.array(ConditionSchema).optional(),
@@ -180,7 +199,9 @@ export const SimulationAuthoredProfileSchema = z.object({
   bulk: z.number().default(1),
   awkwardness: z.number().default(0),
   push_difficulty: z.number().default(1),
-  carry_size: z.enum(["hand", "armful", "oversized", "immovable"]).default("hand"),
+  carry_size: z
+    .enum(["hand", "armful", "oversized", "immovable"])
+    .default("hand"),
   requires_cooperation: z.boolean().default(false),
   trace_profile: SimulationTraceProfileSchema.optional(),
 });
@@ -191,6 +212,9 @@ export const SimulationAuthoredProfileSchema = z.object({
 export const LightSourceProfileSchema = z.object({
   intensity: z.number().finite().min(0).max(1).default(0.8),
   radius: z.number().finite().min(0).default(10),
+  // Optional visual source height relative to the placed object's origin.
+  // Omitted profiles retain the legacy renderer heuristic.
+  source_height_offset: z.number().finite().optional(),
   duration_ticks: z.number().int().positive().optional(),
   color: z.string().default("#facc15"),
   active_by_default: z.boolean().default(true),
@@ -233,8 +257,9 @@ export const GlassFuelProfileSchema = z.object({
 // universal detection rule on every actor.
 export const SensoryChannelSchema = z.object({
   id: z.string(),
-  stimulus_kinds: z
-    .array(z.enum(["light", "sound", "fire", "smoke", "danger_gas", "visible_player"])),
+  stimulus_kinds: z.array(
+    z.enum(["light", "sound", "fire", "smoke", "danger_gas", "visible_player"]),
+  ),
   stimulus_tags: z.array(z.string()).optional(),
   // Ignored tags take precedence over the positive tag filter. This lets an
   // otherwise ordinary hearing channel exclude footsteps (or Glass, voices,
@@ -266,9 +291,7 @@ export const SensoryChannelSchema = z.object({
   tracks_live_target: z.boolean().default(false),
   // A carried source may remain identifiable briefly after direct contact.
   // The lock is source-id based and never grants visual perception/combat.
-  source_tracking: z
-    .enum(["none", "lock_after_acquisition"])
-    .default("none"),
+  source_tracking: z.enum(["none", "lock_after_acquisition"]).default("none"),
 });
 
 export const SensoryProfileSchema = z.object({
@@ -276,6 +299,11 @@ export const SensoryProfileSchema = z.object({
   channels: z.array(SensoryChannelSchema).default([]),
   memory_ticks: z.number().int().min(0).default(90),
   search_ticks: z.number().int().min(0).default(90),
+  // Maximum number of nearby waypoints an independently moving hunter checks
+  // after reaching the last position it actually saw or heard. Keeping this
+  // separate from search_ticks lets horror maps author a short, tense sweep
+  // without also making the memory expire immediately.
+  search_steps: z.number().int().min(1).max(8).optional(),
 });
 
 export const SimulationProcessItemStackSchema = z.object({
@@ -292,23 +320,29 @@ export const SimulationProcessDefinitionSchema = z.object({
   input_items: z.array(SimulationProcessItemStackSchema).default([]),
   output_items: z.array(SimulationProcessItemStackSchema).default([]),
   waste_items: z.array(SimulationProcessItemStackSchema).default([]),
-  emits: z.object({
-    heat: z.number().optional(),
-    sound: z.number().optional(),
-    scent: z.number().optional(),
-    trace_kind: z.string().optional(),
-  }).optional(),
-  economy: z.object({
-    shop_id: z.string().optional(),
-    stock_item_id: z.string().optional(),
-    stock_delta: z.number().default(0),
-    shortage_threshold: z.number().default(1),
-    price_delta_when_short: z.number().default(0),
-  }).optional(),
-  failure: z.object({
-    interrupted_by_fire: z.boolean().default(true),
-    interrupted_by_actor_missing: z.boolean().default(true),
-  }).default({ interrupted_by_fire: true, interrupted_by_actor_missing: true }),
+  emits: z
+    .object({
+      heat: z.number().optional(),
+      sound: z.number().optional(),
+      scent: z.number().optional(),
+      trace_kind: z.string().optional(),
+    })
+    .optional(),
+  economy: z
+    .object({
+      shop_id: z.string().optional(),
+      stock_item_id: z.string().optional(),
+      stock_delta: z.number().default(0),
+      shortage_threshold: z.number().default(1),
+      price_delta_when_short: z.number().default(0),
+    })
+    .optional(),
+  failure: z
+    .object({
+      interrupted_by_fire: z.boolean().default(true),
+      interrupted_by_actor_missing: z.boolean().default(true),
+    })
+    .default({ interrupted_by_fire: true, interrupted_by_actor_missing: true }),
 });
 
 export const SimulationWorkstationSchema = z.object({
@@ -331,7 +365,14 @@ export const ItemSpatialProfileSchema = z.object({
 
 export const WorldRegionPassiveCheckSchema = z.object({
   id: z.string(),
-  stat: z.enum(["level", "hp_percent", "money", "inventory_weight", "faction_rep", "flag"]),
+  stat: z.enum([
+    "level",
+    "hp_percent",
+    "money",
+    "inventory_weight",
+    "faction_rep",
+    "flag",
+  ]),
   difficulty: z.number(),
   modifier: z.number().optional(),
   faction_id: z.string().optional(),
@@ -417,12 +458,14 @@ export const WorldRegionSchema = z.object({
   reputation_threshold: z.number().optional(),
   neutral: z.boolean().default(false),
   irreversible_denial_flag: z.string().optional(),
-  survival_delta: z.object({
-    hunger: z.number().optional(),
-    thirst: z.number().optional(),
-    fatigue: z.number().optional(),
-    exposure: z.number().optional(),
-  }).optional(),
+  survival_delta: z
+    .object({
+      hunger: z.number().optional(),
+      thirst: z.number().optional(),
+      fatigue: z.number().optional(),
+      exposure: z.number().optional(),
+    })
+    .optional(),
   passive_checks: z.array(WorldRegionPassiveCheckSchema).default([]),
   alderamontico_grid: AlderamonticoGridRegionSchema.optional(),
   emotional_profile: AlderamonticoRegionEmotionalProfileSchema.optional(),
@@ -471,6 +514,19 @@ export const CellSchema = z.object({
   simulation: SimulationAuthoredProfileSchema.optional(),
 });
 
+// Authored maps normally describe one uniform macro tile which the runtime
+// expands into a 3x3 fine-cell block. A fine override changes one cell inside
+// that block after expansion, allowing deliberate microtile-width partitions
+// without forcing the entire map into runtime coordinates.
+export const FineCellOverrideSchema = z.object({
+  macro_cell: z.tuple([z.number().int(), z.number().int()]),
+  fine_offset: z.tuple([
+    z.number().int().nonnegative(),
+    z.number().int().nonnegative(),
+  ]),
+  overrides: CellSchema.omit({ x: true, y: true, z: true }).partial(),
+});
+
 export const ObjectPlacementSchema = z.object({
   // Generated placements receive deterministic IDs. This remains optional so
   // older hand-authored packages (whose runtime identity is coordinate-based)
@@ -479,6 +535,11 @@ export const ObjectPlacementSchema = z.object({
   object_id: z.string(),
   cell: z.tuple([z.number(), z.number()]),
   facing: z.tuple([z.number(), z.number()]),
+  // Authored props normally sit at a macro-cell center. Set dressing sometimes
+  // needs finer alignment than that (for example, lining a table up beneath
+  // clutter baked into a room asset), so placements may add an offset measured
+  // in runtime fine cells without changing their owning macro cell.
+  fine_offset: z.tuple([z.number().int(), z.number().int()]).optional(),
   // Runtime manipulation may place props on top of one another. These fields
   // remain optional so authored maps and old saves retain their existing
   // shape; renderers use the height offset while collision treats the stack
@@ -534,6 +595,224 @@ export const SkillSchema = z.object({
   emotional_impulse: AlderamonticoEmotionalVectorSchema.optional(),
 });
 
+// Editable skeletal animation data lives beside the source model that owns the
+// rig. Imported FBX/GLB clip metadata remains in ObjectAsset.animation_clips;
+// these schemas describe Studio-authored keyframes without changing that
+// legacy representation.
+export const AnimationVector3Schema = z.tuple([
+  z.number(),
+  z.number(),
+  z.number(),
+]) as unknown as z.ZodType<[number, number, number]>;
+
+export const AnimationQuaternionSchema = z.tuple([
+  z.number(),
+  z.number(),
+  z.number(),
+  z.number(),
+]) as unknown as z.ZodType<[number, number, number, number]>;
+
+export const AuthoredAnimationClipKindSchema = z.enum([
+  "idle",
+  "locomotion",
+  "gameplay_action",
+  "cinematic",
+  "custom",
+]);
+
+export const AuthoredAnimationValueModeSchema = z
+  .enum(["absolute", "additive"])
+  .default("absolute");
+
+export const AuthoredAnimationInterpolationSchema = z.enum([
+  "step",
+  "linear",
+  "smooth",
+]);
+
+export const AuthoredAnimationVectorKeyframeSchema = z.object({
+  frame: z.number().int().nonnegative(),
+  value: AnimationVector3Schema,
+});
+
+export const AuthoredAnimationQuaternionKeyframeSchema = z.object({
+  frame: z.number().int().nonnegative(),
+  value: AnimationQuaternionSchema,
+});
+
+export const AuthoredAnimationTrackSchema = z.discriminatedUnion("property", [
+  z.object({
+    id: z.string().min(1),
+    target_node: z.string().min(1),
+    property: z.literal("position"),
+    interpolation: AuthoredAnimationInterpolationSchema.default("linear"),
+    keyframes: z.array(AuthoredAnimationVectorKeyframeSchema).default([]),
+  }),
+  z.object({
+    id: z.string().min(1),
+    target_node: z.string().min(1),
+    property: z.literal("quaternion"),
+    interpolation: z.enum(["step", "linear"]).default("linear"),
+    keyframes: z.array(AuthoredAnimationQuaternionKeyframeSchema).default([]),
+  }),
+  z.object({
+    id: z.string().min(1),
+    target_node: z.string().min(1),
+    property: z.literal("scale"),
+    interpolation: AuthoredAnimationInterpolationSchema.default("linear"),
+    keyframes: z.array(AuthoredAnimationVectorKeyframeSchema).default([]),
+  }),
+]);
+
+export const AuthoredAnimationClipSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  display_name: z.string().min(1),
+  kind: AuthoredAnimationClipKindSchema.default("custom"),
+  value_mode: AuthoredAnimationValueModeSchema,
+  fps: z.number().int().min(1).max(120).default(30),
+  duration_frames: z.number().int().min(1).default(30),
+  revision: z.number().int().min(1).default(1),
+  loop: z.enum(["repeat", "once", "ping_pong"]).default("once"),
+  tracks: z.array(AuthoredAnimationTrackSchema).default([]),
+});
+
+export const AnimationSemanticActionSchema = z.enum([
+  "idle",
+  "walk",
+  "attack",
+  "evade",
+  "hurt",
+  "death",
+]);
+
+export const AnimationFrameRangeSchema = z
+  .object({
+    start_frame: z.number().int().nonnegative(),
+    end_frame: z.number().int().nonnegative(),
+  })
+  .superRefine((range, context) => {
+    if (range.end_frame < range.start_frame) {
+      context.addIssue({
+        code: "custom",
+        path: ["end_frame"],
+        message: "end_frame must be greater than or equal to start_frame",
+      });
+    }
+  });
+
+export const AnimationPhaseMarkersSchema = z
+  .object({
+    windup_end_frame: z.number().int().nonnegative().optional(),
+    impact_frame: z.number().int().nonnegative().optional(),
+    active_end_frame: z.number().int().nonnegative().optional(),
+  })
+  .superRefine((markers, context) => {
+    const ordered = [
+      ["windup_end_frame", markers.windup_end_frame],
+      ["impact_frame", markers.impact_frame],
+      ["active_end_frame", markers.active_end_frame],
+    ] as const;
+    let previous: number | undefined;
+    ordered.forEach(([field, value]) => {
+      if (value === undefined) return;
+      if (previous !== undefined && value < previous) {
+        context.addIssue({
+          code: "custom",
+          path: [field],
+          message: "animation phase markers must be monotonic",
+        });
+      }
+      previous = value;
+    });
+  });
+
+export const AnimationActionBindingSchema = z.object({
+  action: AnimationSemanticActionSchema,
+  clip_id: z.string().min(1),
+  crossfade_ms: z.number().finite().nonnegative().default(120),
+  playback_rate: z.number().finite().positive().default(1),
+  sync: z.enum(["free", "action_phase"]).default("free"),
+  layer: z.enum(["base", "upper_body", "full_body"]).default("base"),
+  bone_mask_root: z.string().min(1).optional(),
+  blend_mode: z.enum(["override", "additive"]).default("override"),
+  frame_range: AnimationFrameRangeSchema.optional(),
+  phase_markers: AnimationPhaseMarkersSchema.optional(),
+});
+
+export const ModelAnimationProfileSchema = z.object({
+  id: z.string().min(1),
+  display_name: z.string().min(1).optional(),
+  root_node_name: z.string().min(1).default("mixamorigHips"),
+  default_clip_id: z.string().min(1).optional(),
+  action_bindings: z.array(AnimationActionBindingSchema).default([]),
+});
+
+export const ActorAnimationOverrideSchema = z.object({
+  profile_id: z.string().min(1).optional(),
+  default_clip_id: z.string().min(1).optional(),
+  action_bindings: z.array(AnimationActionBindingSchema).default([]),
+});
+
+export const VisualAttachmentSocketSchema = z.object({
+  bone_name: z.string().min(1),
+  position: AnimationVector3Schema.default([0, 0, 0]),
+  quaternion: AnimationQuaternionSchema.default([0, 0, 0, 1]),
+  scale: AnimationVector3Schema.default([1, 1, 1]),
+});
+
+export const VisualAttachmentTransitionSchema = z
+  .object({
+    draw_start: z.number().finite().min(0).max(1).default(0),
+    draw_end: z.number().finite().min(0).max(1).default(0.42),
+    return_start: z.number().finite().min(0).max(1).default(0.7),
+    return_end: z.number().finite().min(0).max(1).default(1),
+  })
+  .superRefine((transition, context) => {
+    const values = [
+      transition.draw_start,
+      transition.draw_end,
+      transition.return_start,
+      transition.return_end,
+    ];
+    if (values.some((value, index) => index > 0 && value < values[index - 1])) {
+      context.addIssue({
+        code: "custom",
+        message: "attachment transition fractions must be monotonic",
+      });
+    }
+  });
+
+export const VisualAttachmentProfileSchema = z.object({
+  id: z.string().min(1),
+  revision: z.number().int().min(1).optional(),
+  display_name: z.string().min(1).optional(),
+  object_id: z.string().min(1),
+  action: AnimationSemanticActionSchema.default("attack"),
+  stowed_socket: VisualAttachmentSocketSchema,
+  active_socket: VisualAttachmentSocketSchema,
+  transition: VisualAttachmentTransitionSchema.default({
+    draw_start: 0,
+    draw_end: 0.42,
+    return_start: 0.7,
+    return_end: 1,
+  }),
+  render_xray: z.boolean().default(false),
+});
+
+// Phase-one realtime enemy authoring. Every value remains optional so older
+// entities retain their exact serialized shape and the runtime may supply
+// conservative defaults. Cell units are explicit because authored maps are
+// expanded onto the fine runtime grid before combat begins.
+export const HorrorCombatProfileSchema = z.object({
+  windup_ms: z.number().finite().nonnegative().optional(),
+  active_ms: z.number().finite().nonnegative().optional(),
+  recovery_ms: z.number().finite().nonnegative().optional(),
+  reach_fine_cells: z.number().int().positive().optional(),
+  lunge_fine_cells: z.number().int().nonnegative().optional(),
+  direction_lock_fraction: z.number().finite().min(0).max(1).optional(),
+});
+
 export const EntitySchema = z.object({
   id: z.string(),
   display_name: z.string(),
@@ -566,6 +845,42 @@ export const EntitySchema = z.object({
       interval_ms: z.number().int().min(180).max(5000).default(650),
       activation_radius: z.number().min(1).max(60).default(18),
       steps_per_pulse: z.number().int().min(1).max(3).default(1),
+    })
+    .optional(),
+  horror_combat: HorrorCombatProfileSchema.optional(),
+  animation_override: ActorAnimationOverrideSchema.optional(),
+  visual_attachments: z.array(VisualAttachmentProfileSchema).optional(),
+  // Optional non-shadow-casting presentation fill for story NPCs that must
+  // remain readable in practical-lit interiors. This is deliberately local
+  // to the actor and opt-in; hostile silhouettes and stealth lighting keep
+  // using the authored world illumination contract.
+  presentation_fill_light: z
+    .object({
+      color: z.string().default("#ffffff"),
+      intensity: z.number().finite().nonnegative().default(1),
+      radius: z.number().finite().positive().default(3),
+      position: z
+        .tuple([z.number().finite(), z.number().finite(), z.number().finite()])
+        .default([0, 1, 0.5]),
+    })
+    .optional(),
+  // Optional actor-bound fire presentation. The renderer builds this from a
+  // few procedural flame sheets and one spark cloud, so an engulfed character
+  // does not require a stack of animated models or texture assets.
+  presentation_fire: z
+    .object({
+      hot_color: z.string().default("#fff4a3"),
+      mid_color: z.string().default("#ff7a16"),
+      edge_color: z.string().default("#c92305"),
+      light_color: z.string().default("#ff6a12"),
+      light_intensity: z.number().finite().nonnegative().default(6),
+      light_radius: z.number().finite().positive().default(4.5),
+      width: z.number().finite().positive().default(1.1),
+      height: z.number().finite().positive().default(2.1),
+      position: z
+        .tuple([z.number().finite(), z.number().finite(), z.number().finite()])
+        .default([0, 0, 0]),
+      spark_count: z.number().int().min(0).max(48).default(22),
     })
     .optional(),
   sensory_profile: SensoryProfileSchema.optional(),
@@ -607,6 +922,30 @@ export const ScheduleEntrySchema = z.object({
   cell: z.tuple([z.number(), z.number()]),
 });
 
+// Visual-only attachment to an authored object placement. This gives seated
+// NPCs and other furniture poses a stable local frame without moving their
+// authoritative navigation/interaction cell onto blocked prop geometry.
+export const EntityPresentationAnchorSchema = z.object({
+  object_placement_id: z.string().min(1),
+  local_position: z.tuple([
+    z.number().finite(),
+    z.number().finite(),
+    z.number().finite(),
+  ]),
+  // Optional facing expressed in the anchor object's local X/Z frame.
+  local_facing: z
+    .tuple([z.number().finite(), z.number().finite()])
+    .optional(),
+  // Keep stationary furniture poses attached even if runtime bookkeeping
+  // temporarily publishes a different cell (for example, when dialogue or
+  // proximity state is refreshed). Mobile NPCs can leave this unset so their
+  // authored anchor releases as soon as they genuinely walk away.
+  lock_to_anchor: z.boolean().optional(),
+  // Bundled content may use a revision to migrate a measured calibration once
+  // while leaving later user-authored adjustments alone.
+  revision: z.string().min(1).optional(),
+});
+
 export const EntityPlacementSchema = z.object({
   // See ObjectPlacementSchema.id. New generators must supply this through the
   // generation-facing map builder; legacy authored placements may omit it.
@@ -614,6 +953,21 @@ export const EntityPlacementSchema = z.object({
   entity_id: z.string(),
   cell: z.tuple([z.number(), z.number()]),
   facing: z.tuple([z.number(), z.number()]).optional(),
+  // Horizontal visual-only offset from the authoritative grid cell. This is
+  // useful for furniture poses without feeding fractional coordinates into
+  // pathfinding, interactions, schedules, or fine-world expansion.
+  presentation_offset: z
+    .tuple([z.number().finite(), z.number().finite()])
+    .optional(),
+  // Optional presentation offset for authored poses whose visual contact point
+  // is above the standing surface (for example, an NPC seated on furniture).
+  // It never changes navigation, collision, schedules, or authoritative cells.
+  height_offset: z.number().finite().optional(),
+  presentation_anchor: EntityPresentationAnchorSchema.optional(),
+  // Presentation-only or furniture-seated NPCs can remain interactable
+  // without adding a second physical blocker on top of the prop collision.
+  // Existing placements remain solid by default.
+  collision_mode: z.enum(["solid", "none"]).optional(),
   schedule: z.array(ScheduleEntrySchema).optional(),
 });
 
@@ -688,12 +1042,14 @@ export const ItemSchema = z.object({
       heal: z.number().optional(),
       mp_restore: z.number().optional(),
       energy_restore: z.number().optional(),
-      survival_restore: z.object({
-        hunger: z.number().optional(),
-        thirst: z.number().optional(),
-        fatigue: z.number().optional(),
-        exposure: z.number().optional(),
-      }).optional(),
+      survival_restore: z
+        .object({
+          hunger: z.number().optional(),
+          thirst: z.number().optional(),
+          fatigue: z.number().optional(),
+          exposure: z.number().optional(),
+        })
+        .optional(),
       max_hp_bonus: z.number().optional(),
       damage: z.number().optional(),
       attack_bonus: z.number().optional(),
@@ -845,7 +1201,9 @@ export const MapExitSchema = z.object({
   // links. Runtime travel remains driven by target_map_id/target_spawn_id.
   transition_id: z.string().min(1).optional(),
   paired_exit_id: z.string().min(1).optional(),
-  transition_kind: z.enum(["stairs", "ladder", "lift", "shaft", "portal"]).optional(),
+  transition_kind: z
+    .enum(["stairs", "ladder", "lift", "shaft", "portal"])
+    .optional(),
 });
 
 // Provenance attached to an otherwise ordinary map. The runtime deliberately
@@ -900,7 +1258,19 @@ export const MapDataSchema = z.object({
   display_name: z.string(),
   width: z.number(),
   height: z.number(),
+  // Immersive cameras normally derive an enclosed ceiling from walkable
+  // terrain. Exterior maps opt out so authored streets, yards, and wilderness
+  // retain an open sky while older packages continue to default to interiors.
+  environment: z.enum(["interior", "exterior"]).optional(),
+  // Bespoke interiors may provide their own practical fixtures and lighting
+  // composition. Setting this false prevents QA/package helpers from adding
+  // generic institutional fluorescent bars on top of the authored scene.
+  auto_ceiling_lights: z.boolean().optional(),
   ambient_light: z.number().finite().min(0).max(1).optional(),
+  // Optional render-only fill for dark PBR interiors. Simulation, stealth,
+  // perception, and AI continue to use ambient_light.
+  presentation_ambient_light: z.number().finite().min(0).max(1).optional(),
+  combat_mode: HorrorCombatModeSchema.optional(),
   // Entering a location may teach stable vocabulary without exposing any
   // dialogue text or coupling map discovery to a particular NPC.
   discover_topic_ids: z.array(z.string()).optional(),
@@ -913,6 +1283,7 @@ export const MapDataSchema = z.object({
     }),
   ),
   cells: z.array(CellSchema).default([]),
+  fine_cell_overrides: z.array(FineCellOverrideSchema).optional(),
   props: z.array(z.any()).default([]),
   generation_sockets: z.array(MapGenerationSocketSchema).optional(),
   custom_object_placements: z.array(ObjectPlacementSchema).default([]),
@@ -985,8 +1356,12 @@ export const ObjectAssetSchema = z.object({
   rotation: z.tuple([z.number(), z.number(), z.number()]).default([0, 0, 0]),
   scale: z.tuple([z.number(), z.number(), z.number()]).default([1, 1, 1]),
   source_min: z.tuple([z.number(), z.number(), z.number()]).default([0, 0, 0]),
-  source_center: z.tuple([z.number(), z.number(), z.number()]).default([0, 0, 0]),
-  source_bounds: z.tuple([z.number(), z.number(), z.number()]).default([1, 1, 1]),
+  source_center: z
+    .tuple([z.number(), z.number(), z.number()])
+    .default([0, 0, 0]),
+  source_bounds: z
+    .tuple([z.number(), z.number(), z.number()])
+    .default([1, 1, 1]),
   material_names: z.array(z.string()).default([]),
   animation: ObjectAnimationPlaybackSchema.optional(),
   animation_sources: z.array(ObjectAnimationSourceSchema).optional(),
@@ -999,6 +1374,8 @@ export const ObjectAssetSchema = z.object({
       }),
     )
     .optional(),
+  authored_animation_clips: z.array(AuthoredAnimationClipSchema).optional(),
+  animation_profile: ModelAnimationProfileSchema.optional(),
   stats: z
     .object({
       meshes: z.number().default(0),
@@ -1074,7 +1451,14 @@ export const GameObjectBlueprintSchema = z.object({
   tags: z.array(z.string()).default([]),
   source: z
     .object({
-      kind: z.enum(["generic", "object", "item", "container", "door", "runtime"]),
+      kind: z.enum([
+        "generic",
+        "object",
+        "item",
+        "container",
+        "door",
+        "runtime",
+      ]),
       id: z.string().optional(),
     })
     .optional(),
@@ -1085,10 +1469,19 @@ export const ObjectDecalSchema = z.object({
   id: z.string(),
   name: z.string().optional(),
   kind: z
-    .enum(["blood", "crack", "marble_vein", "inscription", "grid_glow", "custom"])
+    .enum([
+      "blood",
+      "crack",
+      "marble_vein",
+      "inscription",
+      "grid_glow",
+      "custom",
+    ])
     .default("crack"),
   position: z.tuple([z.number(), z.number(), z.number()]).default([0, 0.02, 0]),
-  rotation: z.tuple([z.number(), z.number(), z.number()]).default([-Math.PI / 2, 0, 0]),
+  rotation: z
+    .tuple([z.number(), z.number(), z.number()])
+    .default([-Math.PI / 2, 0, 0]),
   size: z.tuple([z.number(), z.number()]).default([0.5, 0.5]),
   color: z.string().default("#E5E9F0"),
   opacity: z.number().default(0.75),
@@ -1143,6 +1536,12 @@ export const ObjectSchema = z.object({
       ])
       .default("single"),
     footprint: z.array(z.tuple([z.number(), z.number()])).default([[0, 0]]),
+    // Optional runtime-only collision authored in fine-cell offsets. Most
+    // objects continue to use macro footprints, but fitted furniture needs a
+    // tighter shape than an entire 3x3 fine block per authored tile.
+    fine_footprint: z
+      .array(z.tuple([z.number().int(), z.number().int()]))
+      .optional(),
   }),
   simulation: SimulationAuthoredProfileSchema.optional(),
   light_source: LightSourceProfileSchema.optional(),
@@ -1150,10 +1549,14 @@ export const ObjectSchema = z.object({
 
 export const SpriteSchema = z.preprocess(
   (value) => {
-    if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      return value;
     const sprite = value as Record<string, unknown>;
     if (!Array.isArray(sprite.data_url)) return value;
-    const pixels = Array.isArray(sprite.pixels) && sprite.pixels.length ? sprite.pixels : sprite.data_url;
+    const pixels =
+      Array.isArray(sprite.pixels) && sprite.pixels.length
+        ? sprite.pixels
+        : sprite.data_url;
     return { ...sprite, data_url: undefined, pixels };
   },
   z.object({
@@ -1171,7 +1574,8 @@ export const SpriteSchema = z.preprocess(
 
 const DialogueOptionSchema = z.preprocess(
   (value) => {
-    if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      return value;
     const option = value as Record<string, unknown>;
     if (option.next_node_id !== null) return value;
     const { next_node_id: _nextNodeId, ...rest } = option;
@@ -1345,7 +1749,9 @@ export const DialogueLegacyMigrationIssueSchema = z.object({
 });
 
 export const DialogueLegacyMigrationSchema = z.object({
-  status: z.enum(["review_required", "ready", "confirmed"]).default("review_required"),
+  status: z
+    .enum(["review_required", "ready", "confirmed"])
+    .default("review_required"),
   migrated_at: z.string(),
   source_format: z.literal("legacy_tree"),
   issues: z.array(DialogueLegacyMigrationIssueSchema).default([]),
@@ -1357,7 +1763,10 @@ export const DialogueLegacyMigrationSchema = z.object({
 export const DialogueSchema = z.object({
   id: z.string(),
   display_name: z.string(),
-  format: z.enum(["legacy_tree", "keyword_v1"]).optional(),
+  // tree_v1 is the standard choice-and-branch conversation format. The
+  // legacy_tree token remains readable for old packages, while keyword_v1 is
+  // retained as a compatibility format for projects that already authored it.
+  format: z.enum(["tree_v1", "legacy_tree", "keyword_v1"]).optional(),
   speaker: z.string().optional(),
   nodes: z.array(DialogueNodeSchema).default([]),
   responses: z.array(DialogueResponseSchema).optional(),
@@ -1458,7 +1867,14 @@ const normalizeEnvironmentPreferenceAliases = (value: unknown) => {
 export const EnvironmentPreferenceSchema = z.preprocess(
   normalizeEnvironmentPreferenceAliases,
   z.object({
-    kind: z.enum(["terrain", "surface", "hazard", "cover", "elevation", "room_tag"]),
+    kind: z.enum([
+      "terrain",
+      "surface",
+      "hazard",
+      "cover",
+      "elevation",
+      "room_tag",
+    ]),
     value: z.string().min(1),
     weight: z.number().nonnegative().default(1),
     required: z.boolean().default(false),
@@ -1503,7 +1919,10 @@ export const EncounterDefinitionSchema = z.preprocess(
       rewardBudget: z.number().nonnegative().optional(),
     })
     .superRefine((encounter, context) => {
-      if (encounter.maxArea !== undefined && encounter.maxArea < encounter.minArea) {
+      if (
+        encounter.maxArea !== undefined &&
+        encounter.maxArea < encounter.minArea
+      ) {
         context.addIssue({
           code: "custom",
           path: ["maxArea"],
@@ -1513,10 +1932,20 @@ export const EncounterDefinitionSchema = z.preprocess(
     }),
 );
 
+export const GameSettingsSchema = z
+  .object({
+    combat_mode: HorrorCombatModeSchema.optional(),
+    player_animation_override: ActorAnimationOverrideSchema.optional(),
+    player_visual_attachments: z
+      .array(VisualAttachmentProfileSchema)
+      .optional(),
+  })
+  .catchall(z.any());
+
 export const GamePackageSchema = z.object({
   schema: z.literal("crpg_engine_game_package_v1"),
   metadata: GameMetadataSchema,
-  settings: z.record(z.string(), z.any()).default({}),
+  settings: GameSettingsSchema.default({}),
   maps: z.array(MapDataSchema).default([]),
   object_library: z.array(ObjectSchema).default([]),
   sprite_library: z.array(SpriteSchema).default([]),
@@ -1543,10 +1972,14 @@ export const GamePackageSchema = z.object({
   dungeon_themes: z.array(DungeonThemeProfileSchema).default([]),
   dungeon_room_archetypes: z.array(DungeonRoomArchetypeSchema).default([]),
   dungeon_room_templates: z.array(DungeonRoomTemplateSchema).default([]),
-  dungeon_encounter_profiles: z.array(DungeonEncounterProfileSchema).default([]),
+  dungeon_encounter_profiles: z
+    .array(DungeonEncounterProfileSchema)
+    .default([]),
   dungeon_hazard_profiles: z.array(DungeonHazardProfileSchema).default([]),
   dungeon_reward_profiles: z.array(DungeonRewardProfileSchema).default([]),
-  dungeon_narrative_profiles: z.array(DungeonNarrativeProfileSchema).default([]),
+  dungeon_narrative_profiles: z
+    .array(DungeonNarrativeProfileSchema)
+    .default([]),
   validators: z.record(z.string(), z.any()).default({}),
 });
 
@@ -1556,12 +1989,18 @@ export type MapGenerationSocketData = z.infer<typeof MapGenerationSocketSchema>;
 export type EnvironmentPreference = z.infer<typeof EnvironmentPreferenceSchema>;
 export type EncounterSlot = z.infer<typeof EncounterSlotSchema>;
 export type EncounterDefinition = z.infer<typeof EncounterDefinitionSchema>;
-export type SimulationProcessDefinitionData = z.infer<typeof SimulationProcessDefinitionSchema>;
-export type SimulationWorkstationData = z.infer<typeof SimulationWorkstationSchema>;
+export type SimulationProcessDefinitionData = z.infer<
+  typeof SimulationProcessDefinitionSchema
+>;
+export type SimulationWorkstationData = z.infer<
+  typeof SimulationWorkstationSchema
+>;
 export type ItemSpatialProfileData = z.infer<typeof ItemSpatialProfileSchema>;
 export type InitialChemistryData = z.infer<typeof InitialChemistrySchema>;
 export type WorldRegionData = z.infer<typeof WorldRegionSchema>;
-export type WorldRegionPassiveCheckData = z.infer<typeof WorldRegionPassiveCheckSchema>;
+export type WorldRegionPassiveCheckData = z.infer<
+  typeof WorldRegionPassiveCheckSchema
+>;
 export type MapData = z.infer<typeof MapDataSchema>;
 export type MapExitData = z.infer<typeof MapExitSchema>;
 export type WorldItemPlacementData = z.infer<typeof WorldItemPlacementSchema>;
@@ -1570,17 +2009,27 @@ export type ScheduleEntryData = z.infer<typeof ScheduleEntrySchema>;
 export type BarkLineData = z.infer<typeof BarkLineSchema>;
 export type BarkData = z.infer<typeof BarkSchema>;
 export type SimulationConditionData = z.infer<typeof SimulationConditionSchema>;
-export type SimulationMaterialProfileData = z.infer<typeof SimulationMaterialProfileSchema>;
-export type SimulationTraceProfileData = z.infer<typeof SimulationTraceProfileSchema>;
-export type SimulationAuthoredProfileData = z.infer<typeof SimulationAuthoredProfileSchema>;
+export type SimulationMaterialProfileData = z.infer<
+  typeof SimulationMaterialProfileSchema
+>;
+export type SimulationTraceProfileData = z.infer<
+  typeof SimulationTraceProfileSchema
+>;
+export type SimulationAuthoredProfileData = z.infer<
+  typeof SimulationAuthoredProfileSchema
+>;
 export type LightSourceProfileData = z.infer<typeof LightSourceProfileSchema>;
 export type LightSourceProfile = LightSourceProfileData;
 export type ArtifactProfileData = z.infer<typeof ArtifactProfileSchema>;
-export type GlassResourceProfileData = z.infer<typeof GlassResourceProfileSchema>;
+export type GlassResourceProfileData = z.infer<
+  typeof GlassResourceProfileSchema
+>;
 export type GlassFuelProfileData = z.infer<typeof GlassFuelProfileSchema>;
 export type SensoryChannelData = z.infer<typeof SensoryChannelSchema>;
 export type SensoryProfileData = z.infer<typeof SensoryProfileSchema>;
-export type GameObjectPartCascadeData = z.infer<typeof GameObjectPartCascadeSchema>;
+export type GameObjectPartCascadeData = z.infer<
+  typeof GameObjectPartCascadeSchema
+>;
 export type GameObjectPartData = z.infer<typeof GameObjectPartSchema>;
 export type GameObjectBlueprintData = z.infer<typeof GameObjectBlueprintSchema>;
 export type CellData = z.infer<typeof CellSchema>;
@@ -1595,16 +2044,70 @@ export type ObjectAnimationPlaybackData = z.infer<
 export type ObjectAnimationSourceData = z.infer<
   typeof ObjectAnimationSourceSchema
 >;
+export type AnimationVector3Data = z.infer<typeof AnimationVector3Schema>;
+export type AnimationQuaternionData = z.infer<typeof AnimationQuaternionSchema>;
+export type AuthoredAnimationClipKind = z.infer<
+  typeof AuthoredAnimationClipKindSchema
+>;
+export type AuthoredAnimationValueMode = z.infer<
+  typeof AuthoredAnimationValueModeSchema
+>;
+export type AuthoredAnimationInterpolation = z.infer<
+  typeof AuthoredAnimationInterpolationSchema
+>;
+export type AuthoredAnimationVectorKeyframeData = z.infer<
+  typeof AuthoredAnimationVectorKeyframeSchema
+>;
+export type AuthoredAnimationQuaternionKeyframeData = z.infer<
+  typeof AuthoredAnimationQuaternionKeyframeSchema
+>;
+export type AuthoredAnimationTrackData = z.infer<
+  typeof AuthoredAnimationTrackSchema
+>;
+export type AuthoredAnimationClipData = z.infer<
+  typeof AuthoredAnimationClipSchema
+>;
+export type AnimationSemanticAction = z.infer<
+  typeof AnimationSemanticActionSchema
+>;
+export type AnimationFrameRangeData = z.infer<typeof AnimationFrameRangeSchema>;
+export type AnimationPhaseMarkersData = z.infer<
+  typeof AnimationPhaseMarkersSchema
+>;
+export type AnimationActionBindingData = z.infer<
+  typeof AnimationActionBindingSchema
+>;
+export type ModelAnimationProfileData = z.infer<
+  typeof ModelAnimationProfileSchema
+>;
+export type ActorAnimationOverrideData = z.infer<
+  typeof ActorAnimationOverrideSchema
+>;
+export type VisualAttachmentSocketData = z.infer<
+  typeof VisualAttachmentSocketSchema
+>;
+export type VisualAttachmentTransitionData = z.infer<
+  typeof VisualAttachmentTransitionSchema
+>;
+export type VisualAttachmentProfileData = z.infer<
+  typeof VisualAttachmentProfileSchema
+>;
 export type ObjectMaterialData = z.infer<typeof ObjectMaterialSchema>;
 export type ObjectDecalData = z.infer<typeof ObjectDecalSchema>;
-export type ObjectReferenceImageData = z.infer<typeof ObjectReferenceImageSchema>;
+export type ObjectReferenceImageData = z.infer<
+  typeof ObjectReferenceImageSchema
+>;
 export type SpriteData = z.infer<typeof SpriteSchema>;
 export type DialogueData = z.infer<typeof DialogueSchema>;
 export type DialogueNodeData = z.infer<typeof DialogueNodeSchema>;
 export type DialogueKeywordData = z.infer<typeof DialogueKeywordSchema>;
 export type DialogueKeywordScope = z.infer<typeof DialogueKeywordScopeSchema>;
-export type DialogueKeywordCategory = z.infer<typeof DialogueKeywordCategorySchema>;
-export type DialogueDynamicTopicData = z.infer<typeof DialogueDynamicTopicSchema>;
+export type DialogueKeywordCategory = z.infer<
+  typeof DialogueKeywordCategorySchema
+>;
+export type DialogueDynamicTopicData = z.infer<
+  typeof DialogueDynamicTopicSchema
+>;
 export type DialogueResponseData = z.infer<typeof DialogueResponseSchema>;
 export type QuestData = z.infer<typeof QuestSchema>;
 export type QuestObjectiveData = z.infer<typeof QuestObjectiveSchema>;
@@ -1622,210 +2125,224 @@ export type ShopData = z.infer<typeof ShopSchema>;
 export type ShopItemData = z.infer<typeof ShopItemSchema>;
 export type ShopPriceModifierData = z.infer<typeof ShopPriceModifierSchema>;
 
-export const createDefaultGameObjectBlueprints = (): GameObjectBlueprintData[] => [
-  {
-    id: "Object",
-    display_name: "Object",
-    tags: ["root"],
-    source: { kind: "generic", id: "Object" },
-    parts: [
-      {
-        id: "identity",
-        type: "identity",
-        listens: ["inspect"],
-        cascade: [],
-        data: { root: true },
-      },
-    ],
-  },
-  {
-    id: "PhysicalObject",
-    display_name: "Physical Object",
-    extends: "Object",
-    tags: ["physical"],
-    source: { kind: "generic", id: "PhysicalObject" },
-    parts: [
-      {
-        id: "physical",
-        type: "physical",
-        listens: ["object_moved", "object_pushed", "object_broken", "apply_fire"],
-        cascade: [],
-        data: { has_location: true },
-      },
-    ],
-  },
-  {
-    id: "ItemObject",
-    display_name: "Item Object",
-    extends: "PhysicalObject",
-    tags: ["item"],
-    source: { kind: "generic", id: "ItemObject" },
-    parts: [
-      {
-        id: "inventory_item",
-        type: "inventory_item",
-        listens: ["object_taken", "object_dropped", "object_stowed"],
-        cascade: ["inventory"],
-        data: { stackable: true },
-      },
-    ],
-  },
-  {
-    id: "ContainerObject",
-    display_name: "Container Object",
-    extends: "PhysicalObject",
-    tags: ["container"],
-    source: { kind: "generic", id: "ContainerObject" },
-    parts: [
-      {
-        id: "container",
-        type: "container",
-        listens: ["container_opened", "container_closed", "container_searched", "object_stowed", "apply_fire", "apply_water"],
-        cascade: ["container_contents"],
-        data: { holds_items: true },
-      },
-    ],
-  },
-  {
-    id: "DoorObject",
-    display_name: "Door Object",
-    extends: "PhysicalObject",
-    tags: ["door", "openable"],
-    source: { kind: "generic", id: "DoorObject" },
-    parts: [
-      {
-        id: "openable",
-        type: "openable",
-        listens: ["door_opened", "door_closed"],
-        cascade: [],
-        data: { starts_open: false },
-      },
-    ],
-  },
-];
+export const createDefaultGameObjectBlueprints =
+  (): GameObjectBlueprintData[] => [
+    {
+      id: "Object",
+      display_name: "Object",
+      tags: ["root"],
+      source: { kind: "generic", id: "Object" },
+      parts: [
+        {
+          id: "identity",
+          type: "identity",
+          listens: ["inspect"],
+          cascade: [],
+          data: { root: true },
+        },
+      ],
+    },
+    {
+      id: "PhysicalObject",
+      display_name: "Physical Object",
+      extends: "Object",
+      tags: ["physical"],
+      source: { kind: "generic", id: "PhysicalObject" },
+      parts: [
+        {
+          id: "physical",
+          type: "physical",
+          listens: [
+            "object_moved",
+            "object_pushed",
+            "object_broken",
+            "apply_fire",
+          ],
+          cascade: [],
+          data: { has_location: true },
+        },
+      ],
+    },
+    {
+      id: "ItemObject",
+      display_name: "Item Object",
+      extends: "PhysicalObject",
+      tags: ["item"],
+      source: { kind: "generic", id: "ItemObject" },
+      parts: [
+        {
+          id: "inventory_item",
+          type: "inventory_item",
+          listens: ["object_taken", "object_dropped", "object_stowed"],
+          cascade: ["inventory"],
+          data: { stackable: true },
+        },
+      ],
+    },
+    {
+      id: "ContainerObject",
+      display_name: "Container Object",
+      extends: "PhysicalObject",
+      tags: ["container"],
+      source: { kind: "generic", id: "ContainerObject" },
+      parts: [
+        {
+          id: "container",
+          type: "container",
+          listens: [
+            "container_opened",
+            "container_closed",
+            "container_searched",
+            "object_stowed",
+            "apply_fire",
+            "apply_water",
+          ],
+          cascade: ["container_contents"],
+          data: { holds_items: true },
+        },
+      ],
+    },
+    {
+      id: "DoorObject",
+      display_name: "Door Object",
+      extends: "PhysicalObject",
+      tags: ["door", "openable"],
+      source: { kind: "generic", id: "DoorObject" },
+      parts: [
+        {
+          id: "openable",
+          type: "openable",
+          listens: ["door_opened", "door_closed"],
+          cascade: [],
+          data: { starts_open: false },
+        },
+      ],
+    },
+  ];
 
-export const createDefaultSimulationMaterialProfiles = (): SimulationMaterialProfileData[] => [
-  {
-    id: "sim_mat_stone",
-    label: "Stone",
-    density: 2.4,
-    hardness: 0.9,
-    flammability: 0,
-    ignition_temperature: 1200,
-    burn_behavior: "does_not_burn",
-    absorbency: 0.05,
-    permeability: 0.02,
-    conductivity: 0.25,
-    fragility: 0.15,
-    wetness_capacity: 0.1,
-    scent_retention: 0.2,
-    cleaning_difficulty: 0.7,
-    decay_behavior: "erodes",
-    sound_response: "hard_clack",
-    light_response: "matte",
-    tags: ["mineral", "structure"],
-  },
-  {
-    id: "sim_mat_wood",
-    label: "Wood",
-    density: 0.7,
-    hardness: 0.45,
-    flammability: 0.7,
-    ignition_temperature: 330,
-    burn_behavior: "chars_to_ash",
-    absorbency: 0.45,
-    permeability: 0.25,
-    conductivity: 0.1,
-    fragility: 0.3,
-    wetness_capacity: 0.5,
-    scent_retention: 0.55,
-    cleaning_difficulty: 0.8,
-    decay_behavior: "rots",
-    sound_response: "hollow_thud",
-    light_response: "warm_matte",
-    tags: ["organic", "flammable", "structure"],
-  },
-  {
-    id: "sim_mat_metal",
-    label: "Metal",
-    density: 7.5,
-    hardness: 0.8,
-    flammability: 0,
-    ignition_temperature: 1400,
-    burn_behavior: "heats_and_warps",
-    absorbency: 0,
-    permeability: 0,
-    conductivity: 0.9,
-    fragility: 0.1,
-    wetness_capacity: 0.05,
-    scent_retention: 0.1,
-    cleaning_difficulty: 0.45,
-    decay_behavior: "rusts",
-    sound_response: "ringing_clang",
-    light_response: "reflective",
-    tags: ["metal", "conductive"],
-  },
-  {
-    id: "sim_mat_cloth",
-    label: "Cloth",
-    density: 0.25,
-    hardness: 0.05,
-    flammability: 0.8,
-    ignition_temperature: 255,
-    burn_behavior: "burns_fast",
-    absorbency: 0.8,
-    permeability: 0.7,
-    conductivity: 0.05,
-    fragility: 0.45,
-    wetness_capacity: 0.85,
-    scent_retention: 0.9,
-    cleaning_difficulty: 0.65,
-    decay_behavior: "mildews",
-    sound_response: "soft_rustle",
-    light_response: "soft",
-    tags: ["organic", "absorbent", "flammable"],
-  },
-  {
-    id: "sim_mat_glass",
-    label: "Glass",
-    density: 2.5,
-    hardness: 0.7,
-    flammability: 0,
-    ignition_temperature: 1100,
-    burn_behavior: "softens",
-    absorbency: 0,
-    permeability: 0,
-    conductivity: 0.2,
-    fragility: 0.85,
-    wetness_capacity: 0.02,
-    scent_retention: 0.05,
-    cleaning_difficulty: 0.35,
-    decay_behavior: "stable",
-    sound_response: "sharp_chime",
-    light_response: "transparent",
-    tags: ["mineral", "fragile", "transparent"],
-  },
-  {
-    id: "sim_mat_soil",
-    label: "Soil",
-    density: 1.3,
-    hardness: 0.1,
-    flammability: 0.05,
-    ignition_temperature: 700,
-    burn_behavior: "scorches",
-    absorbency: 0.65,
-    permeability: 0.8,
-    conductivity: 0.15,
-    fragility: 0.05,
-    wetness_capacity: 0.9,
-    scent_retention: 0.75,
-    cleaning_difficulty: 1,
-    decay_behavior: "compacts",
-    sound_response: "muffled",
-    light_response: "dark_matte",
-    tags: ["earth", "absorbent"],
-  },
-];
+export const createDefaultSimulationMaterialProfiles =
+  (): SimulationMaterialProfileData[] => [
+    {
+      id: "sim_mat_stone",
+      label: "Stone",
+      density: 2.4,
+      hardness: 0.9,
+      flammability: 0,
+      ignition_temperature: 1200,
+      burn_behavior: "does_not_burn",
+      absorbency: 0.05,
+      permeability: 0.02,
+      conductivity: 0.25,
+      fragility: 0.15,
+      wetness_capacity: 0.1,
+      scent_retention: 0.2,
+      cleaning_difficulty: 0.7,
+      decay_behavior: "erodes",
+      sound_response: "hard_clack",
+      light_response: "matte",
+      tags: ["mineral", "structure"],
+    },
+    {
+      id: "sim_mat_wood",
+      label: "Wood",
+      density: 0.7,
+      hardness: 0.45,
+      flammability: 0.7,
+      ignition_temperature: 330,
+      burn_behavior: "chars_to_ash",
+      absorbency: 0.45,
+      permeability: 0.25,
+      conductivity: 0.1,
+      fragility: 0.3,
+      wetness_capacity: 0.5,
+      scent_retention: 0.55,
+      cleaning_difficulty: 0.8,
+      decay_behavior: "rots",
+      sound_response: "hollow_thud",
+      light_response: "warm_matte",
+      tags: ["organic", "flammable", "structure"],
+    },
+    {
+      id: "sim_mat_metal",
+      label: "Metal",
+      density: 7.5,
+      hardness: 0.8,
+      flammability: 0,
+      ignition_temperature: 1400,
+      burn_behavior: "heats_and_warps",
+      absorbency: 0,
+      permeability: 0,
+      conductivity: 0.9,
+      fragility: 0.1,
+      wetness_capacity: 0.05,
+      scent_retention: 0.1,
+      cleaning_difficulty: 0.45,
+      decay_behavior: "rusts",
+      sound_response: "ringing_clang",
+      light_response: "reflective",
+      tags: ["metal", "conductive"],
+    },
+    {
+      id: "sim_mat_cloth",
+      label: "Cloth",
+      density: 0.25,
+      hardness: 0.05,
+      flammability: 0.8,
+      ignition_temperature: 255,
+      burn_behavior: "burns_fast",
+      absorbency: 0.8,
+      permeability: 0.7,
+      conductivity: 0.05,
+      fragility: 0.45,
+      wetness_capacity: 0.85,
+      scent_retention: 0.9,
+      cleaning_difficulty: 0.65,
+      decay_behavior: "mildews",
+      sound_response: "soft_rustle",
+      light_response: "soft",
+      tags: ["organic", "absorbent", "flammable"],
+    },
+    {
+      id: "sim_mat_glass",
+      label: "Glass",
+      density: 2.5,
+      hardness: 0.7,
+      flammability: 0,
+      ignition_temperature: 1100,
+      burn_behavior: "softens",
+      absorbency: 0,
+      permeability: 0,
+      conductivity: 0.2,
+      fragility: 0.85,
+      wetness_capacity: 0.02,
+      scent_retention: 0.05,
+      cleaning_difficulty: 0.35,
+      decay_behavior: "stable",
+      sound_response: "sharp_chime",
+      light_response: "transparent",
+      tags: ["mineral", "fragile", "transparent"],
+    },
+    {
+      id: "sim_mat_soil",
+      label: "Soil",
+      density: 1.3,
+      hardness: 0.1,
+      flammability: 0.05,
+      ignition_temperature: 700,
+      burn_behavior: "scorches",
+      absorbency: 0.65,
+      permeability: 0.8,
+      conductivity: 0.15,
+      fragility: 0.05,
+      wetness_capacity: 0.9,
+      scent_retention: 0.75,
+      cleaning_difficulty: 1,
+      decay_behavior: "compacts",
+      sound_response: "muffled",
+      light_response: "dark_matte",
+      tags: ["earth", "absorbent"],
+    },
+  ];
 
 const cell = (
   x: number,
@@ -1850,7 +2367,8 @@ const makeDemoCells = (): CellData[] => {
   for (let x = -8; x <= 8; x += 1) {
     for (let z = -8; z <= 8; z += 1) {
       const edge = x === -8 || x === 8 || z === -8 || z === 8;
-      const interiorWall = (x === -2 && z >= -6 && z <= -2) || (z === 3 && x >= 2 && x <= 6);
+      const interiorWall =
+        (x === -2 && z >= -6 && z <= -2) || (z === 3 && x >= 2 && x <= 6);
       const doorCell = x === -2 && z === -4;
       const blocked = edge || (interiorWall && !doorCell);
       cells.push(
@@ -1880,7 +2398,18 @@ const createBaseGamePackage = (): GamePackage => ({
     fog_los_resolution: "macro",
     player_sprite_id: "generated_player_intercessor_south_idle",
     player_model_id: PLAYER_IDLE_FBX_MODEL_ID,
-    initial_known_skills: [...DEFAULT_UNLOCKED_ABILITY_IDS, "skl_quick_strike", "skl_first_aid", "skl_arc_bolt"],
+    player_animation_override: structuredClone(
+      BUNDLED_PLAYER_GUITAR_ANIMATION_OVERRIDE,
+    ),
+    player_visual_attachments: [
+      structuredClone(BUNDLED_PLAYER_GUITAR_ATTACHMENT_PROFILE),
+    ],
+    initial_known_skills: [
+      ...DEFAULT_UNLOCKED_ABILITY_IDS,
+      "skl_quick_strike",
+      "skl_first_aid",
+      "skl_arc_bolt",
+    ],
     starting_party_members: [],
     player_stats: {
       hp: 24,
@@ -1933,12 +2462,24 @@ const createBaseGamePackage = (): GamePackage => ({
         { object_id: "obj_training_beacon", cell: [5, -6], facing: [0, 1] },
       ],
       entity_placements: [
-        { entity_id: "ent_guide", cell: [-3, 5], schedule: [{ hour: 9, cell: [-3, 5] }, { hour: 18, cell: [-1, 5] }] },
+        {
+          entity_id: "ent_guide",
+          cell: [-3, 5],
+          schedule: [
+            { hour: 9, cell: [-3, 5] },
+            { hour: 18, cell: [-1, 5] },
+          ],
+        },
         { entity_id: "ent_companion", cell: [2, 5] },
         { entity_id: "ent_training_bot", cell: [5, -4], facing: [0, -1] },
       ],
       item_placements: [
-        { id: "drop_training_token", item_id: "itm_training_token", cell: [1, 3], count: 1 },
+        {
+          id: "drop_training_token",
+          item_id: "itm_training_token",
+          cell: [1, 3],
+          count: 1,
+        },
       ],
       container_placements: [
         {
@@ -1957,8 +2498,21 @@ const createBaseGamePackage = (): GamePackage => ({
         },
       ],
       triggers: [
-        { id: "trg_demo_intro", type: "on_load", conditions: [], cutscene_id: "cut_demo_intro", once: true },
-        { id: "trg_demo_note", cell: [0, 4], type: "interact", conditions: [], cutscene_id: "cut_read_demo_note", once: false },
+        {
+          id: "trg_demo_intro",
+          type: "on_load",
+          conditions: [],
+          cutscene_id: "cut_demo_intro",
+          once: true,
+        },
+        {
+          id: "trg_demo_note",
+          cell: [0, 4],
+          type: "interact",
+          conditions: [],
+          cutscene_id: "cut_read_demo_note",
+          once: false,
+        },
       ],
       exits: [],
     },
@@ -2033,7 +2587,10 @@ const createBaseGamePackage = (): GamePackage => ({
             text: "You cannot tell whether this is obedience or fear from here.",
             truth: "partial",
             requiresAttention: 9,
-            effect: { set_switch: "attend_training_bot_admitted_uncertainty", attention_delta: 1 },
+            effect: {
+              set_switch: "attend_training_bot_admitted_uncertainty",
+              attention_delta: 1,
+            },
           },
         ],
         onTimeout: {
@@ -2100,7 +2657,10 @@ const createBaseGamePackage = (): GamePackage => ({
               trigger_quest_state: "started",
               set_switch: "demo_tour_started",
             },
-            { text: "Open the supply shop.", trigger_cutscene: "cut_open_demo_shop" },
+            {
+              text: "Open the supply shop.",
+              trigger_cutscene: "cut_open_demo_shop",
+            },
             { text: "Goodbye." },
           ],
         },
@@ -2121,7 +2681,11 @@ const createBaseGamePackage = (): GamePackage => ({
           speaker: "Companion",
           text: "Need someone in the initiative queue beside you? I can join, follow, and take turns in combat.",
           options: [
-            { text: "Join me.", trigger_cutscene: "cut_recruit_companion", set_switch: "demo_companion_recruited" },
+            {
+              text: "Join me.",
+              trigger_cutscene: "cut_recruit_companion",
+              set_switch: "demo_companion_recruited",
+            },
             { text: "Stay here for now." },
           ],
         },
@@ -2176,11 +2740,30 @@ const createBaseGamePackage = (): GamePackage => ({
     {
       id: "quest_demo_tour",
       display_name: "Feature Demo Tour",
-      description: "Walk through the reusable CRPG engine systems in a neutral test map.",
+      description:
+        "Walk through the reusable CRPG engine systems in a neutral test map.",
       objectives: [
-        { id: "obj_terminal", description: "Read the terminal note", type: "interact", target_id: "doc_demo_note", count: 1 },
-        { id: "obj_companion", description: "Recruit the companion", type: "talk", target_id: "ent_companion", count: 1 },
-        { id: "obj_training", description: "Defeat the training bot", type: "kill", target_id: "ent_training_bot", count: 1 },
+        {
+          id: "obj_terminal",
+          description: "Read the terminal note",
+          type: "interact",
+          target_id: "doc_demo_note",
+          count: 1,
+        },
+        {
+          id: "obj_companion",
+          description: "Recruit the companion",
+          type: "talk",
+          target_id: "ent_companion",
+          count: 1,
+        },
+        {
+          id: "obj_training",
+          description: "Defeat the training bot",
+          type: "kill",
+          target_id: "ent_training_bot",
+          count: 1,
+        },
       ],
     },
   ],
@@ -2192,7 +2775,11 @@ const createBaseGamePackage = (): GamePackage => ({
       actions: [
         { type: "set_switch", switch_id: "demo_loaded", switch_value: true },
         { type: "give_currency", amount: 10 },
-        { type: "show_dialogue", dialogue_id: "dia_demo_guide", node_id: "start" },
+        {
+          type: "show_dialogue",
+          dialogue_id: "dia_demo_guide",
+          node_id: "start",
+        },
       ],
     },
     {
@@ -2202,7 +2789,11 @@ const createBaseGamePackage = (): GamePackage => ({
       actions: [
         { type: "read_document", document_id: "doc_demo_note" },
         { type: "set_switch", switch_id: "demo_note_read", switch_value: true },
-        { type: "set_switch", switch_id: "demo_tour_started", switch_value: true },
+        {
+          type: "set_switch",
+          switch_id: "demo_tour_started",
+          switch_value: true,
+        },
       ],
     },
     {
@@ -2210,7 +2801,11 @@ const createBaseGamePackage = (): GamePackage => ({
       display_name: "World Surface Probe",
       is_blocking: false,
       actions: [
-        { type: "set_switch", switch_id: "world_surface_probe_seen", switch_value: true },
+        {
+          type: "set_switch",
+          switch_id: "world_surface_probe_seen",
+          switch_value: true,
+        },
         { type: "advance_clock", amount: 5 },
         { type: "adjust_faction_rep", faction_id: "f_guild", amount: 1 },
       ],
@@ -2221,7 +2816,11 @@ const createBaseGamePackage = (): GamePackage => ({
       is_blocking: false,
       actions: [
         { type: "give_item", item_id: "itm_training_token", amount: 1 },
-        { type: "set_switch", switch_id: "world_switch_probe_seen", switch_value: true },
+        {
+          type: "set_switch",
+          switch_id: "world_switch_probe_seen",
+          switch_value: true,
+        },
       ],
     },
     {
@@ -2238,8 +2837,16 @@ const createBaseGamePackage = (): GamePackage => ({
         { type: "add_party_member", entity_id: "ent_companion" },
         { type: "learn_skill", skill_id: "skl_arc_bolt" },
         { type: "set_entity_hidden", entity_id: "ent_companion", hidden: true },
-        { type: "set_switch", switch_id: "demo_companion_recruited", switch_value: true },
-        { type: "set_switch", switch_id: "demo_tour_started", switch_value: true },
+        {
+          type: "set_switch",
+          switch_id: "demo_companion_recruited",
+          switch_value: true,
+        },
+        {
+          type: "set_switch",
+          switch_id: "demo_tour_started",
+          switch_value: true,
+        },
       ],
     },
   ],
@@ -2265,7 +2872,8 @@ const createBaseGamePackage = (): GamePackage => ({
     {
       id: "itm_field_ration",
       display_name: "Field Ration",
-      description: "A compact survival kit that relieves hunger, thirst, fatigue, and exposure pressure.",
+      description:
+        "A compact survival kit that relieves hunger, thirst, fatigue, and exposure pressure.",
       icon: "r",
       category: "consumable",
       effects: {
@@ -2293,7 +2901,8 @@ const createBaseGamePackage = (): GamePackage => ({
     {
       id: "skl_quick_strike",
       display_name: "Quick Strike",
-      description: "A simple single-target attack used to test ability targeting.",
+      description:
+        "A simple single-target attack used to test ability targeting.",
       ability_kind: "skill",
       ability_page: "combat",
       icon: "sparkles",
@@ -2369,7 +2978,10 @@ const createBaseGamePackage = (): GamePackage => ({
         shortage_threshold: 2,
         price_delta_when_short: 2,
       },
-      failure: { interrupted_by_fire: true, interrupted_by_actor_missing: true },
+      failure: {
+        interrupted_by_fire: true,
+        interrupted_by_actor_missing: true,
+      },
     },
     {
       id: "sim_proc_pack_field_ration",
@@ -2381,7 +2993,10 @@ const createBaseGamePackage = (): GamePackage => ({
       output_items: [{ item_id: "itm_field_ration", count: 1 }],
       waste_items: [],
       emits: { sound: 1, scent: 0.25, trace_kind: "ration_wrap" },
-      failure: { interrupted_by_fire: true, interrupted_by_actor_missing: true },
+      failure: {
+        interrupted_by_fire: true,
+        interrupted_by_actor_missing: true,
+      },
     },
   ],
   simulation_workstations: [
@@ -2433,7 +3048,10 @@ const createBaseGamePackage = (): GamePackage => ({
       condition: { switch: "demo_tour_started" },
       lines: [
         { speaker: "ent_guide", text: "The tour is active." },
-        { speaker: "ent_companion", text: "Then the engine paths are doing their job." },
+        {
+          speaker: "ent_companion",
+          text: "Then the engine paths are doing their job.",
+        },
       ],
       cooldown_minutes: 120,
     },
@@ -2451,4 +3069,5 @@ export const createLegacyEngineTestFixturePackage = (): GamePackage =>
 
 // A neutral authoring package. Regression/sample content is installed only by
 // an explicit QA-suite API; creating a workspace never replaces its maps.
-export const createEmptyGamePackage = (): GamePackage => createBaseGamePackage();
+export const createEmptyGamePackage = (): GamePackage =>
+  createBaseGamePackage();

@@ -1,12 +1,11 @@
-// Locked third-person crawler support for the fine ("micro") grid.
+// Third-person camera and input support for the fine ("micro") world.
 //
 // Third person is an authored presentation mode, not a new simulation mode.
 // It keeps the existing movement legality, AP/energy use, combat, LOS,
 // perception, stealth, and hearing rules. Unlike authored first person, the
 // chase camera stays active for exploration, tactical, and story camera
-// states. Input is deliberately strict tank control: W/S move along the
-// authoritative eight-way facing, A/D turn that facing by 45 degrees, Q/E
-// adjust presentation-only pitch, and no modifier enables strafing.
+// states. Authored third-person exploration uses continuous position and
+// heading; the ring helpers remain for legacy tactical/grid actions.
 
 import {
   FIRST_PERSON_FACING_RING,
@@ -27,6 +26,13 @@ export const isThirdPersonCameraActive = (
   void cameraMode;
   return viewMode === "third_person";
 };
+
+export const isThirdPersonFreeMovementActive = (
+  viewMode: AuthoredViewMode,
+  inCombat: boolean,
+  horrorRealtimeMode: boolean,
+): boolean =>
+  viewMode === "third_person" && (!inCombat || horrorRealtimeMode);
 
 // Reuse the authoritative first-person eight-way ring so saves, simulation,
 // model facing, perception cones, and both immersive cameras agree exactly.
@@ -115,8 +121,14 @@ export const wrapThirdPersonYaw = (yaw: number): number => {
 export const facingToThirdPersonYaw = (
   facing: readonly [number, number],
 ): number => {
-  const normalized = normalizeThirdPersonFacing(facing);
-  return Math.atan2(normalized[0], normalized[1]);
+  const x = Number(facing?.[0] ?? 0);
+  const z = Number(facing?.[1] ?? -1);
+  const length = Math.hypot(x, z);
+  if (!Number.isFinite(length) || length <= 0.000001) return Math.PI;
+  // Camera presentation follows the exact authoritative heading. Grid-only
+  // helpers below may still normalize to the legacy eight-way ring, but they
+  // must never quantize the physical third-person rig.
+  return Math.atan2(x / length, z / length);
 };
 
 // Continuous camera/drag yaw becomes authoritative only through this

@@ -8,7 +8,7 @@ import {
   type PackageMigrationResult,
 } from "../store/packageMigration";
 import { withTestingMapSuite } from "./testingMapSuite";
-import { migrateLegacyDialoguePackage } from "../engine-core/keywordDialogue";
+import { restoreStandardDialogueTrees } from "../engine-core/keywordDialogue";
 import { withQaRoomCeilingArchitecture } from "./qaSuite/shared";
 
 export type QaSuiteInstallMode = "empty" | "merge" | "replace";
@@ -23,7 +23,7 @@ export interface QaSuiteInstallOptions {
 
 /** Builds the canonical QA package without consulting or mutating the Studio workspace. */
 export const createQaSuitePackage = (): GamePackage =>
-  migrateLegacyDialoguePackage(withTestingMapSuite(createEmptyGamePackage())).package;
+  restoreStandardDialogueTrees(withTestingMapSuite(createEmptyGamePackage()));
 
 const appendMissingById = <T extends { id: string }>(current: T[], additions: T[]): T[] => {
   const currentIds = new Set(current.map((entry) => entry.id));
@@ -51,7 +51,7 @@ type IdCollection = { label: string; current: Array<{ id: string }>; qa: Array<{
 export const installQaSuiteIntoEmptyPackage = (
   source: GamePackage,
 ): PackageMigrationResult => {
-  const candidate = migrateLegacyDialoguePackage(withTestingMapSuite(source)).package;
+  const candidate = restoreStandardDialogueTrees(withTestingMapSuite(source));
   if (source.maps.length) {
     return finalizePackageMigration(source, candidate, {
       warnings: [

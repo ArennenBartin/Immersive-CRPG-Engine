@@ -1,0 +1,26 @@
+# macOS Finder metadata — pure noise, and it re-dirties the tree constantly.
+.DS_Store
+**/.DS_Store
+
+# Per-user agent permission grants. These carry absolute paths from whichever
+# machine generated them, so they conflict across contributors and say nothing
+# about the project. The SHARED agent config (.claude/agents, .claude/skills,
+# .claude/launch.json) is intentionally committed.
+.claude/settings.local.json
+
+# Node / build output. The blueprint has its own .gitignore for these too;
+# repeating them here keeps a root-level `git add -A` honest.
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+*.local
+.env
+.env.*
+!.env.example
+
+# Python bytecode from the Blender tooling in tools/. The .py sources are
+# committed; their compiled caches are machine/interpreter-specific.
+__pycache__/
+**/__pycache__/
+*.pyc

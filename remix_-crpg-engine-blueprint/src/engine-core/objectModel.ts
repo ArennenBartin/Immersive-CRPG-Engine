@@ -183,6 +183,13 @@ const collisionPart = (object: ObjectData): GameObjectPartData[] =>
           data: {
             profile: object.collision.profile,
             footprint: object.collision.footprint.map((cell) => [...cell]),
+            ...(object.collision.fine_footprint?.length
+              ? {
+                  fine_footprint: object.collision.fine_footprint.map((cell) => [
+                    ...cell,
+                  ]),
+                }
+              : {}),
           },
         },
       ]

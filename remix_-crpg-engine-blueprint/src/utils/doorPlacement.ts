@@ -5,6 +5,10 @@ export type DoorCell = { x: number; z: number };
 export type DoorFacing = [number, number];
 
 export const DOOR_OBJECT_ID = "obj_p_door";
+export const LONELY_STREET_FRONT_DOOR_OBJECT_ID =
+  "obj_lonely_street_front_door";
+export const LONELY_STREET_INTERIOR_DOOR_OBJECT_ID =
+  "obj_lonely_street_interior_door";
 
 export const doorFacingForBounds = (
   door: DoorCell,
@@ -25,7 +29,9 @@ export const doorPlacementKey = (placement: ObjectPlacementData) =>
   `${placement.object_id}|${placement.cell[0]}|${placement.cell[1]}|${placement.facing[0]}|${placement.facing[1]}`;
 
 export const isBuildingDoorPlacement = (placement: ObjectPlacementData) =>
-  placement.object_id === DOOR_OBJECT_ID;
+  placement.object_id === DOOR_OBJECT_ID ||
+  placement.object_id === LONELY_STREET_FRONT_DOOR_OBJECT_ID ||
+  placement.object_id === LONELY_STREET_INTERIOR_DOOR_OBJECT_ID;
 
 export const isDoorPlacementOpen = (
   delta: MapDelta | undefined,

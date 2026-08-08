@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
-import { createEmptyGamePackage, type GamePackage, type MapData } from "../src/schema/game";
+import {
+  GamePackageSchema,
+  createEmptyGamePackage,
+  type GamePackage,
+  type MapData,
+} from "../src/schema/game";
 import { GAME_PACKAGE_V2_SCHEMA } from "../src/schema/v2";
 import {
   createQaSuitePackage,
@@ -19,6 +24,11 @@ import {
   BACKROOMS_LEVEL_ZERO_LIGHT_OBJECT_ID,
   INSTITUTIONAL_CEILING_LIGHT_OBJECT_ID,
 } from "../src/schema/presets";
+import {
+  PLAYER_ELECTRIC_GUITAR_ATTACHMENT_ID,
+  PLAYER_ELECTRIC_GUITAR_OBJECT_ID,
+  PLAYER_GUITAR_ANIMATION_PROFILE_ID,
+} from "../src/data/playerModelAssets";
 
 const base = createEmptyGamePackage();
 const template = base.maps[0];
@@ -115,6 +125,120 @@ assert.deepEqual(
   TEST_SUITE_MAP_IDS,
   "the explicit QA builder must create the canonical suite",
 );
+const qaBackroomsMap = qaPackage.maps.find(
+  (map) => map.id === "qa_backrooms_level_zero",
+);
+const qaLonelyStreetMap = qaPackage.maps.find(
+  (map) => map.id === "qa_lonely_street",
+);
+const qaParasite = qaPackage.entities.find(
+  (entity) => entity.id === "ent_backrooms_parasite",
+);
+assert.equal(
+  qaBackroomsMap?.combat_mode,
+  "horror_realtime",
+  "Level Zero alone must opt into realtime horror combat",
+);
+assert.ok(
+  qaPackage.maps
+    .filter(
+      (map) =>
+        ![
+          "qa_backrooms_level_zero",
+          "qa_lonely_street",
+          "qa_lonely_street_house_interior",
+          "qa_lonely_street_house_basement",
+        ].includes(map.id),
+    )
+    .every((map) => map.combat_mode === undefined),
+  "the remaining developer QA maps must retain legacy pulse combat by omission",
+);
+assert.ok(
+  qaPackage.maps
+    .filter((map) =>
+      [
+        "qa_lonely_street",
+        "qa_lonely_street_house_interior",
+        "qa_lonely_street_house_basement",
+      ].includes(map.id),
+    )
+    .every((map) => map.combat_mode === "pulse"),
+  "the bundled Lonely Street story maps must explicitly preserve pulse combat",
+);
+assert.equal(
+  qaLonelyStreetMap?.environment,
+  "exterior",
+  "the Lonely Street must opt out of automatic indoor architecture",
+);
+assert.deepEqual(qaParasite?.horror_combat, {
+  windup_ms: 500,
+  active_ms: 120,
+  recovery_ms: 850,
+  reach_fine_cells: 2,
+  lunge_fine_cells: 2,
+  direction_lock_fraction: 0.6,
+});
+
+const qaCombatRoundTrip = normalizePackageImportPayload(
+  JSON.parse(serializePackageForExport(qaPackage)),
+);
+assert.equal(
+  qaCombatRoundTrip.maps.find((map) => map.id === "qa_backrooms_level_zero")
+    ?.combat_mode,
+  "horror_realtime",
+  "package V1/V2 round-trip must preserve the map combat mode",
+);
+assert.equal(
+  qaCombatRoundTrip.maps.find((map) => map.id === "qa_lonely_street")
+    ?.environment,
+  "exterior",
+  "package V1/V2 round-trip must preserve the exterior environment mode",
+);
+assert.deepEqual(
+  qaCombatRoundTrip.entities.find(
+    (entity) => entity.id === "ent_backrooms_parasite",
+  )?.horror_combat,
+  qaParasite?.horror_combat,
+  "package V1/V2 round-trip must preserve the Parasite realtime profile",
+);
+const mixedCombatExport = JSON.parse(
+  serializePackageForExport(qaPackage),
+) as { runtime: { feature_flags: { turn_queue_combat: boolean } } };
+assert.equal(
+  mixedCombatExport.runtime.feature_flags.turn_queue_combat,
+  true,
+  "a mixed package must continue to advertise its pulse-combat maps",
+);
+
+const realtimeOnlyPackage = GamePackageSchema.parse({
+  ...base,
+  settings: { ...base.settings, combat_mode: "horror_realtime" },
+  maps: base.maps.map((map) => {
+    const inheritedMap = { ...map };
+    delete inheritedMap.combat_mode;
+    return inheritedMap;
+  }),
+});
+assert.ok(
+  realtimeOnlyPackage.maps.every((map) => map.combat_mode === undefined),
+  "the realtime-only round-trip fixture must exercise package-setting inheritance",
+);
+const realtimeOnlyExport = JSON.parse(
+  serializePackageForExport(realtimeOnlyPackage),
+) as { runtime: { feature_flags: { turn_queue_combat: boolean } } };
+assert.equal(
+  realtimeOnlyExport.runtime.feature_flags.turn_queue_combat,
+  false,
+  "an all-realtime package must not advertise turn-queue combat",
+);
+assert.throws(
+  () =>
+    GamePackageSchema.parse({
+      ...base,
+      settings: { ...base.settings, combat_mode: "invalid_realtime_mode" },
+    }),
+  "package settings must reject unknown combat modes",
+);
 
 const editedQaShapedPackage: GamePackage = {
   ...qaPackage,
@@ -123,14 +247,35 @@ const editedQaShapedPackage: GamePackage = {
     index === 0 ? { ...map, display_name: "Authored hydration sentinel" } : map,
   ),
 };
-assert.equal(
-  refreshBundledEnginePackage(editedQaShapedPackage),
+const refreshedAuthoredQaPackage = refreshBundledEnginePackage(
   editedQaShapedPackage,
-  "browser hydration must never replace a QA-shaped authored workspace",
 );
 assert.equal(
-  refreshBundledEnginePackage(editedQaShapedPackage).maps[0]?.display_name,
+  refreshedAuthoredQaPackage.maps[0]?.display_name,
   "Authored hydration sentinel",
+  "browser hydration must preserve authored maps while adding bundled Steve content",
+);
+assert.equal(
+  refreshedAuthoredQaPackage.settings.player_animation_override?.profile_id,
+  PLAYER_GUITAR_ANIMATION_PROFILE_ID,
+  "bundled Steve workspaces must gain the default guitar animation profile",
+);
+assert.ok(
+  refreshedAuthoredQaPackage.settings.player_visual_attachments?.some(
+    (attachment) => attachment.id === PLAYER_ELECTRIC_GUITAR_ATTACHMENT_ID,
+  ),
+  "bundled Steve workspaces must gain the guitar attachment non-destructively",
+);
+assert.ok(
+  refreshedAuthoredQaPackage.object_library.some(
+    (object) => object.id === PLAYER_ELECTRIC_GUITAR_OBJECT_ID,
+  ),
+  "bundled Steve workspaces must gain the collisionless guitar asset",
+);
+assert.equal(
+  refreshBundledEnginePackage(refreshedAuthoredQaPackage),
+  refreshedAuthoredQaPackage,
+  "bundled player-content refresh must be idempotent",
 );
 
 const maplessPackage: GamePackage = { ...base, maps: [] };
@@ -187,14 +332,19 @@ assert.equal(
   "ceiling backfill must preserve authored QA map edits",
 );
 assert.ok(
-  backfilledQaPackage.package.maps.every((map) =>
-    map.custom_object_placements.some(
-      (placement) =>
-        placement.object_id === INSTITUTIONAL_CEILING_LIGHT_OBJECT_ID &&
-        placement.collision_mode === "none",
+  backfilledQaPackage.package.maps
+    .filter(
+      (map) =>
+        map.environment !== "exterior" && map.auto_ceiling_lights !== false,
+    )
+    .every((map) =>
+      map.custom_object_placements.some(
+        (placement) =>
+          placement.object_id === INSTITUTIONAL_CEILING_LIGHT_OBJECT_ID &&
+          placement.collision_mode === "none",
+      ),
     ),
-  ),
-  "merging the QA suite must backfill collision-free ceiling lights into legacy QA maps",
+  "merging the QA suite must backfill collision-free ceiling lights into auto-lit indoor QA maps",
 );
 
 const proposedReplace = replaceWithQaSuite(authoredPackage);

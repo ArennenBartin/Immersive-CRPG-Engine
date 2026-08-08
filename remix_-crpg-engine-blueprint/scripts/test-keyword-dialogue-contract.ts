@@ -19,6 +19,7 @@ import {
   initializeDialogueMemory,
   isDialogueTopicChanged,
   migrateLegacyDialoguePackage,
+  restoreStandardDialogueTrees,
   resolveKeywordDialogueResponse,
   selectKeywordDialogueTopic,
   shouldCloseKeywordConversationImmediately,
@@ -800,9 +801,18 @@ for (const keyword of gamePackage.keywords) {
   );
 }
 assert.deepEqual(imported.dynamic_topics, gamePackage.dynamic_topics);
+const importedStandardDialogue = imported.dialogue.find(
+  (dialogue) => dialogue.id === DIALOGUE_ID,
+);
+assert.equal(
+  importedStandardDialogue?.format,
+  "keyword_v1",
+  "generic package export/import must preserve compatibility projects until the author converts them",
+);
 assert.deepEqual(
-  imported.dialogue.find((dialogue) => dialogue.id === DIALOGUE_ID),
-  gamePackage.dialogue.find((dialogue) => dialogue.id === DIALOGUE_ID),
+  importedStandardDialogue?.responses,
+  gamePackage.dialogue.find((dialogue) => dialogue.id === DIALOGUE_ID)?.responses,
+  "standardization must retain inert keyword response data for compatibility",
 );
 
 // Runtime dispatch and direct resolver consume the same authored response data.
@@ -950,12 +960,35 @@ assert.equal(
   "a blank migrated cutscene action must hand off without an empty Continue panel",
 );
 const importedMigration = normalizePackageImportPayloadWithReport(legacyPackage);
-assert.ok(importedMigration.warnings.some((warning) => warning.code === "legacy_dialogue_detected"));
 assert.notEqual(importedMigration.package.dialogue[0]?.format, "keyword_v1");
 assert.equal(
   importedMigration.package.dialogue[0]?.nodes[0]?.options[0]?.text,
   "What can you tell me about the old mine?",
-  "ordinary import must preserve legacy data until Studio's explicit migration action",
+  "ordinary import must preserve an already-authored standard choice tree",
+);
+const restoredMigration = restoreStandardDialogueTrees(migrationA.package);
+assert.equal(restoredMigration.dialogue[0]?.format, "tree_v1");
+assert.deepEqual(
+  restoredMigration.dialogue[0]?.nodes,
+  legacyPackage.dialogue[0]?.nodes,
+  "a keyword migration recovery payload must restore the exact authored graph",
+);
+const materializedNativeKeyword = restoreStandardDialogueTrees(gamePackage);
+const materializedConversation = materializedNativeKeyword.dialogue.find(
+  (dialogue) => dialogue.id === DIALOGUE_ID,
+);
+assert.equal(materializedConversation?.format, "tree_v1");
+assert.ok(
+  materializedConversation?.nodes[0]?.options.some(
+    (option) => option.text === "Old cistern",
+  ),
+  "native keyword topics must materialize as ordinary player choices",
+);
+assert.ok(
+  materializedConversation?.nodes[0]?.options.some(
+    (option) => option.text === "Goodbye.",
+  ),
+  "materialized trees must always expose an explicit conversation exit",
 );
 
 // Validation covers invalid references, unreachable fallbacks, and ambiguous priority.

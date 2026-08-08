@@ -1,7 +1,7 @@
 // Minimal music/SFX layer for play mode. One looping music track at a time;
 // sound effects are short overlapping Audio instances. Browser autoplay policy
-// may block playback until the player has interacted with the page — cutscene
-// clicks count, so in practice music and SFX started from play actions work.
+// may block playback until the player has interacted with the page. When that
+// happens, retain the requested track and retry it on the first trusted input.
 
 import { resolveAssetUrl } from './assetBase';
 import { SFX, type SoundEffectId } from '../data/builtinAudio';
@@ -10,6 +10,7 @@ export { SFX, type SoundEffectId } from '../data/builtinAudio';
 
 let currentAudio: HTMLAudioElement | null = null;
 let currentUrl: string | null = null;
+let musicUnlockArmed = false;
 
 const sfxLastPlayed = new Map<string, number>();
 const sfxChannels = new Map<
@@ -37,6 +38,45 @@ const isAutoplayBlockError = (err: unknown) => {
   );
 };
 
+const removeMusicUnlockListeners = () => {
+  if (typeof window === "undefined") return;
+  window.removeEventListener("pointerdown", retryBlockedMusic, true);
+  window.removeEventListener("touchstart", retryBlockedMusic, true);
+  window.removeEventListener("keydown", retryBlockedMusic, true);
+};
+
+function retryBlockedMusic() {
+  musicUnlockArmed = false;
+  removeMusicUnlockListeners();
+  if (audioCtx?.state === "suspended") audioCtx.resume().catch(() => {});
+  const audio = currentAudio;
+  if (!audio || !currentUrl || !audio.paused) return;
+  requestMusicPlayback(audio);
+}
+
+const armMusicUnlock = () => {
+  if (musicUnlockArmed || typeof window === "undefined") return;
+  musicUnlockArmed = true;
+  // Capture lets the unlock happen within the browser's trusted input event,
+  // before a title button changes scenes and requests the next track.
+  const options: AddEventListenerOptions = { capture: true, passive: true };
+  window.addEventListener("pointerdown", retryBlockedMusic, options);
+  window.addEventListener("touchstart", retryBlockedMusic, options);
+  window.addEventListener("keydown", retryBlockedMusic, { capture: true });
+};
+
+const requestMusicPlayback = (audio: HTMLAudioElement) => {
+  audio.play().catch((err) => {
+    // Do not mark a rejected request as successfully playing. Keeping the
+    // element and arming a trusted-input retry fixes title music after reload.
+    if (isAutoplayBlockError(err)) {
+      if (audio === currentAudio) armMusicUnlock();
+      return;
+    }
+    console.warn("Music playback failed:", err?.message || err);
+  });
+};
+
 export const getSoundUrl = (
   idOrUrl: SoundEffectId | string,
   customSounds: Record<string, string> = {},
@@ -51,19 +91,17 @@ export const playMusic = (
 ) => {
   if (currentAudio && currentUrl === url) {
     currentAudio.volume = Math.min(1, Math.max(0, opts.volume ?? currentAudio.volume));
+    if (currentAudio.paused) requestMusicPlayback(currentAudio);
     return;
   }
   stopMusic();
   const audio = new Audio(resolveAssetUrl(url));
   audio.loop = opts.loop ?? true;
   audio.volume = Math.min(1, Math.max(0, opts.volume ?? 0.7));
-  audio.play().catch((err) => {
-    if (isAutoplayBlockError(err)) return;
-    console.warn("Music playback blocked or failed:", err?.message || err);
-  });
   currentAudio = audio;
   currentUrl = url;
   initAudioAnalyser(audio);
+  requestMusicPlayback(audio);
 };
 
 // The URL currently looping, or null. Lets the combat-music layer remember
@@ -71,6 +109,8 @@ export const playMusic = (
 export const getCurrentMusicUrl = () => currentUrl;
 
 export const stopMusic = () => {
+  musicUnlockArmed = false;
+  removeMusicUnlockListeners();
   if (currentAudio) {
     currentAudio.pause();
     currentAudio.src = "";

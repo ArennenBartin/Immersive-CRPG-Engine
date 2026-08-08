@@ -164,6 +164,9 @@ const cloneSaveV1 = (save: PlaySave): PlaySave => ({
     ...save.player,
     cell: [...save.player.cell] as [number, number],
     facing: [...save.player.facing] as [number, number],
+    fine_position: save.player.fine_position
+      ? ([...save.player.fine_position] as [number, number])
+      : undefined,
   },
   playerStats: { ...save.playerStats },
   level: save.level,
@@ -220,6 +223,17 @@ const cloneSaveV1 = (save: PlaySave): PlaySave => ({
   combat_xp_pool: save.combat_xp_pool,
 });
 
+const packageSupportsTurnQueueCombat = (gamePackage: GamePackage): boolean => {
+  const packageMode =
+    gamePackage.settings?.combat_mode === "horror_realtime"
+      ? "horror_realtime"
+      : "pulse";
+  if (gamePackage.maps.length === 0) return packageMode === "pulse";
+  return gamePackage.maps.some(
+    (map) => (map.combat_mode ?? packageMode) === "pulse",
+  );
+};
+
 export const defaultPackageRuntimeV2 = (gamePackage: GamePackage): PackageRuntimeV2 => ({
   coordinate_system: {
     horizontal_axes: ["x", "z"],
@@ -229,7 +243,7 @@ export const defaultPackageRuntimeV2 = (gamePackage: GamePackage): PackageRuntim
   },
   feature_flags: {
     fog_of_war: Boolean(gamePackage.settings?.fog_of_war ?? true),
-    turn_queue_combat: true,
+    turn_queue_combat: packageSupportsTurnQueueCombat(gamePackage),
     story_command_stream: true,
   },
 });
@@ -241,6 +255,9 @@ export const buildSaveRuntimeV2 = (save: PlaySave): SaveRuntimeV2 => ({
     ...save.player,
     cell: [...save.player.cell] as [number, number],
     facing: [...save.player.facing] as [number, number],
+    fine_position: save.player.fine_position
+      ? ([...save.player.fine_position] as [number, number])
+      : undefined,
   },
   progression: {
     level: save.level,

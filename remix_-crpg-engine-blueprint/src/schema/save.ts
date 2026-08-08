@@ -649,6 +649,11 @@ export interface PlaySave {
   player: {
     cell: [number, number];
     facing: [number, number];
+    // Backrooms third-person play can move between fine-grid centers. The
+    // integer cell remains the authoritative gameplay anchor for AI, exits,
+    // triggers, and legacy saves; this optional coordinate preserves the
+    // exact continuous position used by presentation and collision.
+    fine_position?: [number, number];
     sprite_id?: string;
   };
   // Explicit, save-backed quiet-movement stance. This is presentation/input

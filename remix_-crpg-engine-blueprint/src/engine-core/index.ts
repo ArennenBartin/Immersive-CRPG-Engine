@@ -38,6 +38,7 @@ export {
   withinSameMacroTile,
 } from "./gridCoordinates";
 export type { FineCoord, GridCoord, GridCoordKey, MacroCoord } from "./gridCoordinates";
+export * from "./horrorCombat";
 export {
   DEFAULT_MOVEMENT_HEARING_SETTINGS,
   isActorUsingStealthStance,
@@ -497,7 +498,9 @@ export {
   getKnownDialogueTopics,
   initializeDialogueMemory,
   isDialogueTopicChanged,
+  convertKeywordDialogueToChoiceTree,
   migrateLegacyDialoguePackage,
+  restoreStandardDialogueTrees,
   resolveKeywordDialogueResponse,
   selectKeywordDialogueTopic,
   shouldCloseKeywordConversationImmediately,

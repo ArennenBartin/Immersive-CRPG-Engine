@@ -79,14 +79,45 @@ export const resolveActorSpriteBrightness = (illumination: number): number => {
 // prop bulb. Space them roughly one per 48 walkable cells and let neighboring
 // pools overlap so a populated room reads as lit instead of as isolated spots.
 export const PRESENTATION_ROOM_LIGHT_RADIUS = 9;
-export const PRESENTATION_ROOM_POINT_LIGHT_INTENSITY = 6.4;
+export const PRESENTATION_ROOM_POINT_LIGHT_INTENSITY = 7.2;
+// Level Zero fixtures should read as aged fluorescent tubes rather than
+// tungsten bulbs. This creamy yellow sits midway between the original amber
+// and a green-white tube, retaining warmth without reading as orange.
+export const PRESENTATION_ROOM_FLUORESCENT_COLOR = "#f2eeb5";
 export const PRESENTATION_ROOM_LIGHT_FILL_RADIUS = 6.25;
-export const PRESENTATION_ROOM_LIGHT_FILL_STRENGTH = 0.5;
+export const PRESENTATION_ROOM_LIGHT_FILL_STRENGTH = 0.56;
 export const PRESENTATION_ROOM_LIGHT_FORWARD_DISTANCE = 36;
 // Mechanical ambience remains authored at 0.05. Play uses this restrained
 // presentation-only floor so the surfaces between fluorescent pools retain
 // texture instead of crushing to pure black.
 export const BACKROOMS_LEVEL_ZERO_PLAY_AMBIENT_LIGHT = 0.09;
+
+export interface ExteriorEnvironmentLightLevels {
+  hemisphere: number;
+  ambient: number;
+  key: number;
+  rim: number;
+}
+
+// Exterior maps need actual sky and sun fill. Mechanical ambient values are
+// intentionally dim for stealth, so reusing the indoor presentation rig left
+// PBR models almost black against the bright sky. This renderer-only mapping
+// preserves the authored light value while guaranteeing readable outdoor
+// surfaces and characters.
+export const resolveExteriorEnvironmentLightLevels = (
+  ambientLight: number,
+): ExteriorEnvironmentLightLevels => {
+  const ambient = Math.max(
+    0,
+    Math.min(1, Number.isFinite(ambientLight) ? ambientLight : 0),
+  );
+  return {
+    hemisphere: 0.82 + ambient * 0.65,
+    ambient: 0.62 + ambient * 0.35,
+    key: 0.95 + ambient * 0.8,
+    rim: 0.24 + ambient * 0.35,
+  };
+};
 // Keep a fixture mounted until its physical point-light falloff has reached
 // zero. The small release margin prevents boundary noise from mounting and
 // unmounting a light on consecutive fine-grid steps.

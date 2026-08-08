@@ -19,8 +19,8 @@ import {
   type QaWing,
   cell,
   entityPlacement,
-  hubReturnExit,
   key,
+  oneMicrotileWallOverrides,
   stampCells,
   stampRect,
 } from "./shared";
@@ -61,6 +61,41 @@ const ZONES = [
   [12, 15],
 ] as const;
 const ZONE_CENTERS = [-13, -7, 0, 7, 13] as const;
+
+const horizontalLine = (z: number, minX: number, maxX: number) =>
+  Array.from(
+    { length: maxX - minX + 1 },
+    (_, index) => [minX + index, z] as const,
+  );
+
+const verticalLine = (x: number, minZ: number, maxZ: number) =>
+  Array.from(
+    { length: maxZ - minZ + 1 },
+    (_, index) => [x, minZ + index] as const,
+  );
+
+// Selected interior partitions use the smallest collision/rendering unit: one
+// fine (micro) tile. Divider intersections, the outer shell, and the remaining
+// partitions stay a full macro tile thick, preserving strong structural beats.
+const oneMicrotilePartitions = [
+  { orientation: "horizontal" as const, cells: horizontalLine(-10, -2, 3) },
+  { orientation: "horizontal" as const, cells: horizontalLine(-3, -9, -4) },
+  { orientation: "horizontal" as const, cells: horizontalLine(4, -2, 3) },
+  { orientation: "horizontal" as const, cells: horizontalLine(11, 12, 15) },
+  { orientation: "vertical" as const, cells: verticalLine(-10, -12, -11) },
+  { orientation: "vertical" as const, cells: verticalLine(4, 1, 3) },
+  { orientation: "vertical" as const, cells: verticalLine(11, 5, 6) },
+];
+
+export const BACKROOMS_LEVEL_ZERO_MICRO_WALL_OVERRIDES =
+  oneMicrotilePartitions.flatMap((partition) =>
+    oneMicrotileWallOverrides(
+      partition.cells,
+      partition.orientation,
+      BACKROOMS_WALL,
+      BACKROOMS_FLOOR,
+    ),
+  );
 
 const openingCenter = (zone: number, variation: number) => {
   const [zoneMin, zoneMax] = ZONES[zone];
@@ -146,17 +181,6 @@ const backroomsCells = (() => {
     BACKROOMS_FLOOR,
   );
 
-  // The only break in the outer shell is a three-cell return vestibule.
-  stampCells(
-    overrides,
-    [
-      [-1, MAP_MAX],
-      [0, MAP_MAX],
-      [1, MAP_MAX],
-    ],
-    BACKROOMS_FLOOR,
-  );
-
   const cells: MapData["cells"] = [];
   for (let z = MAP_MIN; z <= MAP_MAX; z += 1) {
     for (let x = MAP_MIN; x <= MAP_MAX; x += 1) {
@@ -197,6 +221,7 @@ const backroomsMap: MapData = {
   width: MAP_MAX - MAP_MIN + 1,
   height: MAP_MAX - MAP_MIN + 1,
   ambient_light: 0.05,
+  combat_mode: "horror_realtime",
   spawns: [
     {
       id: BACKROOMS_LEVEL_ZERO_SPAWN_ID,
@@ -205,6 +230,7 @@ const backroomsMap: MapData = {
     },
   ],
   cells: backroomsCells,
+  fine_cell_overrides: BACKROOMS_LEVEL_ZERO_MICRO_WALL_OVERRIDES,
   props: [],
   custom_object_placements: ceilingLights,
   entity_placements: [
@@ -214,7 +240,8 @@ const backroomsMap: MapData = {
   container_placements: [],
   regions: [],
   triggers: [],
-  exits: [hubReturnExit([0, MAP_MAX])],
+  // Level Zero has no diegetic route into the developer-only QA suite.
+  exits: [],
 };
 
 export const backroomsWing: QaWing = {

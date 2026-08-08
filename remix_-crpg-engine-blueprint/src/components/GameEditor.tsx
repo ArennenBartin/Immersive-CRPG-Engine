@@ -229,6 +229,22 @@ export function GameEditor() {
                     onChange={(e) => updateSettings({ title_image_url: e.target.value || undefined })}
                   />
                 </Field>
+                <Field label="Title logo URL" hint="Optional title artwork shown above the menu.">
+                  <input
+                    className={inputCls}
+                    value={settings.title_logo_url || ""}
+                    placeholder="/title/my-logo.png"
+                    onChange={(e) => updateSettings({ title_logo_url: e.target.value || undefined })}
+                  />
+                </Field>
+                <Field label="Title video URL" hint="Optional looping video behind the title. Overrides the title image.">
+                  <input
+                    className={inputCls}
+                    value={settings.title_video_url || ""}
+                    placeholder="/title/my-background.mp4"
+                    onChange={(e) => updateSettings({ title_video_url: e.target.value || undefined })}
+                  />
+                </Field>
               </div>
             </Section>
 

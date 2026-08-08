@@ -2,6 +2,8 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from "react"
 import { Canvas, useThree } from "@react-three/fiber";
 import { useShallow } from "zustand/react/shallow";
 import { useEngineStore } from "../store/engineStore";
+import { ManagedLoopingVideo, OpeningPrologue } from "./OpeningPrologue";
+import { shouldEnterRequestedPlaytestMap } from "../utils/playtestWindow";
 import {
   dispatchV1MoveEntity,
   dispatchV1Wait,
@@ -56,6 +58,15 @@ import {
   dispatchV1EmitSound,
   dispatchV1EnemyPulse,
   resolveV1IndependentPursuitTarget,
+  advanceHorrorFixedSteps,
+  createHorrorFixedStepClock,
+  HORROR_FIXED_STEP_MS,
+  resolveHorrorCombatMode,
+  resolveHorrorPrimaryCommand,
+  horrorAttackDirectionToward,
+  horrorDirectionToward,
+  hasHorrorStructuralLine,
+  resolveHorrorSweptMelee,
   getV1NearbyHostiles,
   getV1ControlledCombatant,
   getV1SkillTargetCells,
@@ -85,10 +96,12 @@ import {
   ENERGY_PER_FINE_STEP,
   FINE_HALF_EXTENT,
   FINE_PER_MACRO,
+  fineCenterOfMacro,
   actorFootprintCells,
   areAdjacentMacro,
   expandGamePackageToFine,
   expandMapToFine,
+  isFineExpandedPackage,
   getRuntimeMapGrid,
   isLargeAuthoredMap,
   materializeLargeMapWindow,
@@ -172,10 +185,14 @@ import {
   readSaveSlot,
   deleteSaveSlot,
 } from "../store/playStore";
-import { GameRenderer3D } from "./GameRenderer3D";
+import {
+  GameRenderer3D,
+  type ActorActionPresentationMap,
+} from "./GameRenderer3D";
 import {
   AdaptiveQualityProbe,
   BlackStarLightRig,
+  CinematicCameraRig,
   FirstPersonCameraRig,
   firstPersonLookRef,
   getInitialPlayCameraPosition,
@@ -239,6 +256,7 @@ import {
   applyThirdPersonLookDelta,
   facingToThirdPersonYaw,
   isThirdPersonCameraActive,
+  isThirdPersonFreeMovementActive,
   isThirdPersonStructuralCameraCell,
   resolveHeldThirdPersonIntent,
   resolveLiveHeldThirdPersonIntent,
@@ -250,6 +268,7 @@ import {
   BACKROOMS_LEVEL_ZERO_PLAY_AMBIENT_LIGHT,
   hasAuthoritativePresentLight,
 } from "../utils/lightRendering";
+import { entityPlacementBlocksMovement } from "../utils/entityPresentationAnchor";
 import {
   getPlayerCarriedObject,
   placePlayerCarriedObject,
@@ -262,10 +281,19 @@ import {
   type RuntimeAbilityActionId,
 } from "../data/defaultAbilities";
 import {
+  HOUSE_ARRIVAL_SEATED_SWITCH,
+  STEVE_SOFA_SEATED_LOCAL_FACING,
+  STEVE_SOFA_SEATED_RENDER_OFFSET,
+  STEVE_SOFA_SEATED_SHOT_CELL,
+  STEVE_SOFA_SEATED_SHOT_FACING,
+} from "../data/lonelyStreetHouseArrivalScene";
+import { BUNDLED_OPENING_MUSIC_URL } from "../data/bundledMusic";
+import {
   MapData,
   CellData,
   ContainerPlacementData,
   ObjectPlacementData,
+  EntityPlacementData,
   ScheduleEntryData,
   GamePackage,
   CutsceneData,
@@ -320,6 +348,7 @@ import {
 import type { ExperienceGrantResult, LevelUpStat } from "../utils/leveling";
 import {
   applyPlacementDeltas,
+  getPlacementContinuousCollisionBounds,
   getPlacementFootprint,
   isPushableObject,
   placementHasCollision,
@@ -327,11 +356,30 @@ import {
   placementOriginKey,
 } from "../utils/objectFootprint";
 import { getJamEngineVisualHeight } from "../utils/legacyJamCompatibility";
+import { canAutomaticallyStepBetween } from "../utils/traversal";
+import {
+  advanceFreeActorToward,
+  BACKROOMS_FREE_MAX_FRAME_SECONDS,
+  freePlayerPositionIntersectsBounds,
+  quantizeFreePlayerPosition,
+  resolveFacedInteractionProbe,
+  resolveFreeActorStart,
+  resolveFreeInteractionPose,
+  resolveFreePlayerMovement,
+  resolveNearestFreePlayerPosition,
+  resolveFreePlayerStart,
+  rotateFreeFacing,
+} from "../utils/freePlayerMovement";
 import {
   doorPlacementKey,
   isBuildingDoorPlacement,
   isDoorPlacementOpen,
 } from "../utils/doorPlacement";
+import {
+  selectDirectionalInteractionCandidate,
+  selectInteractionPlacementAtCell,
+} from "../utils/interactionTargeting";
+import { resolveEntityPresentationPose } from "../utils/entityPresentationAnchor";
 import { entityPlacementStateKey } from "../utils/entityState";
 import { resolvePlayModeMap } from "../utils/playModeMap";
 import {
@@ -1545,6 +1593,105 @@ type NearbyHostile = {
   dist: number;
 };
 
+type HorrorRealtimePhase = "idle" | "windup" | "active" | "recovery";
+type HorrorRealtimeActionKind =
+  | "attack"
+  | "evade"
+  | "enemy_attack"
+  | "hurt"
+  | "contact";
+
+type HorrorRealtimeAction = {
+  kind: HorrorRealtimeActionKind;
+  phase: HorrorRealtimePhase;
+  phaseStartedAt: number;
+  phaseDurationMs: number;
+  sequence: number;
+  facing: [number, number];
+  reachFineCells?: number;
+  telegraphTargetCells?: Array<[number, number]>;
+  hitResolved?: boolean;
+};
+
+type HorrorEnemyRuntime = {
+  action: HorrorRealtimeAction | null;
+  feedbackAction: HorrorRealtimeAction | null;
+  nextPursuitAt: number;
+  trackedFacing: [number, number];
+  directionLocked: boolean;
+};
+
+type HorrorRealtimeRuntime = {
+  mapId: string | null;
+  stamina: number;
+  regenBlockedUntil: number;
+  evadeReadyAt: number;
+  contactGraceUntil: number;
+  playerAction: HorrorRealtimeAction | null;
+  playerFeedbackAction: HorrorRealtimeAction | null;
+  enemies: Map<string, HorrorEnemyRuntime>;
+  sequence: number;
+  fixedStepClock: ReturnType<typeof createHorrorFixedStepClock>;
+  simulationNowMs: number;
+  lastTickAt: number;
+  pausedAt: number | null;
+  uiDueAt: number;
+  threatActive: boolean;
+};
+
+type HorrorRealtimeUi = {
+  stamina: number;
+  threatActive: boolean;
+  actions: Record<
+    string,
+    {
+      kind: HorrorRealtimeActionKind;
+      phase: HorrorRealtimePhase;
+      progress: number;
+      sequence: number;
+      facing: [number, number];
+      reachFineCells?: number;
+      phaseStartedAt: number;
+      phaseDurationMs: number;
+      telegraphTargetCells?: Array<[number, number]>;
+    }
+  >;
+};
+
+const HORROR_PLAYER_MAX_STAMINA = 100;
+const HORROR_PLAYER_ATTACK_STAMINA = 20;
+const HORROR_PLAYER_EVADE_STAMINA = 30;
+const HORROR_PLAYER_STAMINA_REGEN_DELAY_MS = 650;
+const HORROR_PLAYER_STAMINA_REGEN_PER_SECOND = 25;
+const HORROR_PLAYER_ATTACK_WINDUP_MS = 170;
+const HORROR_PLAYER_ATTACK_ACTIVE_MS = 130;
+const HORROR_PLAYER_ATTACK_RECOVERY_MS = 350;
+const HORROR_PLAYER_EVADE_ACTIVE_MS = 120;
+const HORROR_PLAYER_EVADE_RECOVERY_MS = 730;
+const HORROR_PLAYER_EVADE_TOTAL_MS =
+  HORROR_PLAYER_EVADE_ACTIVE_MS + HORROR_PLAYER_EVADE_RECOVERY_MS;
+const HORROR_PLAYER_EVADE_GRACE_MS = 120;
+const HORROR_PLAYER_ATTACK_REACH_FINE = 2;
+const HORROR_CONTROLLER_STEP_MS = 40;
+
+const createHorrorRealtimeRuntime = (): HorrorRealtimeRuntime => ({
+  mapId: null,
+  stamina: HORROR_PLAYER_MAX_STAMINA,
+  regenBlockedUntil: 0,
+  evadeReadyAt: 0,
+  contactGraceUntil: 0,
+  playerAction: null,
+  playerFeedbackAction: null,
+  enemies: new Map(),
+  sequence: 0,
+  fixedStepClock: createHorrorFixedStepClock(HORROR_FIXED_STEP_MS),
+  simulationNowMs: 0,
+  lastTickAt: 0,
+  pausedAt: null,
+  uiDueAt: 0,
+  threatActive: false,
+});
+
 const getNearbyHostiles = (
   save: PlaySave | null,
   map: MapData | null,
@@ -1611,6 +1758,11 @@ type AttendTarget = {
   isNpc: boolean;
 };
 
+type EntityInteractionTarget = AttendTarget & {
+  placement: EntityPlacementData;
+  placementIndex: number;
+};
+
 type AttendNodePanelState = {
   target: AttendTarget;
   node: AlderamonticoAttendNode;
@@ -1631,13 +1783,14 @@ const attentionDisplay = (attention: number) =>
 const getControlledActor = (
   save: PlaySave | null,
   gp: GamePackage,
+  realtimeHorror = false,
 ): ControlledActor | null => {
   if (!save) return null;
   // Exploration always controls the player. Reading that snapshot directly
   // avoids constructing a full V1GridWorld (including save cloning and map
   // indexing) every render and again for every fine movement input. Combat
   // still delegates to the authoritative turn-aware adapter below.
-  if (!save.in_combat) {
+  if (!save.in_combat || realtimeHorror) {
     if ((save.playerStats.hp ?? 0) <= 0) return null;
     return {
       key: "player",
@@ -1679,10 +1832,8 @@ const getControlledActor = (
 const facedProbeCell = (
   cell: [number, number],
   facing: [number, number],
-): [number, number] => [
-  cell[0] + facing[0] * (FINE_HALF_EXTENT + 1),
-  cell[1] + facing[1] * (FINE_HALF_EXTENT + 1),
-];
+): [number, number] =>
+  resolveFacedInteractionProbe(cell, facing, FINE_HALF_EXTENT + 1);
 
 // The living, visible actor whose FOOTPRINT covers a cell, if any. Used by
 // Attend (faced cell) and by the emotional verbs (targeted cell).
@@ -1717,6 +1868,92 @@ const getLivingActorAtCell = (
     };
   }
   return null;
+};
+
+/**
+ * Resolve an entity for the contextual prompt and the actual Act command.
+ * Keeping this shared prevents the HUD from promising an interaction that a
+ * slightly different angle test then rejects (or vice versa).
+ */
+const getDirectionalEntityInteractionTarget = (
+  save: PlaySave | null,
+  map: MapData | null,
+  gp: GamePackage,
+  origin: readonly [number, number],
+  facing: readonly [number, number],
+): EntityInteractionTarget | null => {
+  if (!save || !map) return null;
+  const party = new Set(save.party_members || []);
+  const entityById = new Map(gp.entities.map((entity) => [entity.id, entity]));
+  const candidates = (map.entity_placements || []).flatMap(
+    (placement, placementIndex) => {
+      if (party.has(placement.entity_id)) return [];
+      const actorId = entityPlacementStateKey(map.id, placement, placementIndex);
+      const entityState =
+        (save.entity_states || {})[actorId] ||
+        (save.entity_states || {})[placement.entity_id] ||
+        {};
+      if (entityState.dead || entityState.hidden) return [];
+      const cell = (entityState.cell || placement.cell) as [number, number];
+      const currentFacing = (entityState.facing || placement.facing) as
+        | [number, number]
+        | undefined;
+      const anchorId = placement.presentation_anchor?.object_placement_id;
+      const anchorPlacement = anchorId
+        ? map.custom_object_placements?.find(
+            (candidate) => candidate.id === anchorId,
+          )
+        : undefined;
+      const anchorFacing = anchorPlacement?.facing || [0, 1];
+      const presentationPose = resolveEntityPresentationPose({
+        placement,
+        currentCell: cell,
+        currentFacing,
+        // Interaction is planar. The renderer supplies the real standing
+        // height separately, but X/Z must use the same furniture transform.
+        standingY: 0,
+        anchorWorldPose: anchorPlacement
+          ? {
+              position: [
+                anchorPlacement.cell[0],
+                0,
+                anchorPlacement.cell[1],
+              ],
+              rotationY: Math.atan2(anchorFacing[0], anchorFacing[1]),
+            }
+          : undefined,
+        planarUnitScale: isFineExpandedPackage(gp) ? FINE_PER_MACRO : 1,
+      });
+      const entity = entityById.get(placement.entity_id);
+      return [
+        {
+          value: {
+            actorId,
+            entityId: placement.entity_id,
+            name: entity?.display_name || placement.entity_id,
+            cell: [cell[0], cell[1]] as [number, number],
+            isNpc: Boolean(entity?.is_npc),
+            placement,
+            placementIndex,
+          },
+          position: presentationPose.cell,
+          // Furniture-anchored actors use the furniture for collision. A
+          // compact conversational footprint follows the visible body instead
+          // of resurrecting the old sofa-sized invisible blocker.
+          halfExtent:
+            placement.collision_mode === "none" ? 0.55 : FINE_HALF_EXTENT,
+        },
+      ];
+    },
+  );
+
+  return (
+    selectDirectionalInteractionCandidate(candidates, origin, facing, {
+      maxSurfaceDistance: FINE_HALF_EXTENT + 1.35,
+      minimumFacingDot: 0.1,
+      overlapPadding: 0.2,
+    }) || null
+  );
 };
 
 const getFacedAttendTarget = (
@@ -1807,11 +2044,11 @@ const getDialoguePortraits = (
             entity.combat_attend_dialogue_id === dialogueId,
         )
       : undefined);
-  const entitySprite = portraitEntity?.sprite_id
-    ? gamePackage.sprite_library.find((sprite) => sprite.id === portraitEntity.sprite_id)
-    : undefined;
-  const entitySpriteSrc = entitySprite?.data_url || "";
-  const portraitSrc = speakerPortrait?.src || entitySpriteSrc;
+  // A portrait must be AUTHORED (settings.dialogue_portraits). Falling back to
+  // the speaker's world sprite pulled a full-size animated GIF into the panel,
+  // where it covered the very actor the scene was framing. A world sprite is
+  // map dressing, not a headshot: if no portrait is authored, show none.
+  const portraitSrc = speakerPortrait?.src || "";
 
   if (!portraitSrc) {
     return [];
@@ -2122,6 +2359,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     logMessages,
     initSave,
     updatePlayer,
+    updatePlayerFinePosition,
     commitRuntimeSave,
     addLog,
     resetRun,
@@ -2153,6 +2391,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       logMessages: state.logMessages,
       initSave: state.initSave,
       updatePlayer: state.updatePlayer,
+      updatePlayerFinePosition: state.updatePlayerFinePosition,
       commitRuntimeSave: state.commitRuntimeSave,
       addLog: state.addLog,
       resetRun: state.resetRun,
@@ -2187,6 +2426,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     if (!saveMap) return activeMapState;
     return activeMapState?.id === saveMap.id ? activeMapState : saveMap;
   }, [activeMapState, baseGamePackage.maps, saveData?.current_map_id]);
+  const horrorRealtimeMode =
+    resolveHorrorCombatMode(activeMap, baseGamePackage.settings) ===
+    "horror_realtime";
+  const horrorRealtimeModeRef = useRef(false);
+  horrorRealtimeModeRef.current = horrorRealtimeMode;
   const gamePackage = useMemo(() => {
     if (!activeMap) return baseGamePackage;
     return {
@@ -2196,15 +2440,64 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   }, [activeMap, baseGamePackage]);
   const authoredViewMode = resolveAuthoredViewMode(gamePackage.settings);
   const thirdPersonAuthored = authoredViewMode === "third_person";
-  const controlledActorSnapshot = getControlledActor(saveData, gamePackage);
+  // Authored third-person exploration is a continuous world-space mode on
+  // every map, not a Level Zero-only exception. Traditional pulse combat may
+  // still opt back into exact tactical cells while it owns the active actor.
+  const freeThirdPersonMovement = isThirdPersonFreeMovementActive(
+    authoredViewMode,
+    Boolean(saveData?.in_combat),
+    horrorRealtimeMode,
+  );
+  const freeThirdPersonMovementRef = useRef(false);
+  freeThirdPersonMovementRef.current = freeThirdPersonMovement;
+  const controlledActorSnapshot = getControlledActor(
+    saveData,
+    gamePackage,
+    horrorRealtimeMode,
+  );
+  const playerPresentationPosition: [number, number] =
+    freeThirdPersonMovement && saveData
+      ? resolveFreePlayerStart(
+          saveData.player.cell,
+          saveData.player.fine_position,
+        )
+      : saveData?.player.cell || [0, 0];
+  useEffect(() => {
+    if (!horrorRealtimeMode) return;
+    const current = usePlayStore.getState().saveData;
+    if (!current) return;
+    const hasLegacyCombat =
+      current.in_combat || (current.combat_queue || []).length > 0;
+    if (!hasLegacyCombat) return;
+    // A save can enter Level Zero carrying initiative from a legacy map.
+    // Realtime horror owns its own encounter state, while the ordinary
+    // player stealth stance remains available during exploration.
+    commitRuntimeSave({
+      ...current,
+      in_combat: false,
+      combat_queue: [],
+      active_turn_id: null,
+    });
+  }, [
+    commitRuntimeSave,
+    horrorRealtimeMode,
+    saveData?.combat_queue?.length,
+    saveData?.current_map_id,
+    saveData?.in_combat,
+  ]);
   const thirdPersonCameraSubjectSnapshot =
     resolveThirdPersonCameraSubject(
       {
         key: "player",
-        cell: saveData?.player.cell || [0, 0],
+        cell: playerPresentationPosition,
         facing: saveData?.player.facing || [0, -1],
       },
-      controlledActorSnapshot,
+      controlledActorSnapshot?.key === "player"
+        ? {
+            ...controlledActorSnapshot,
+            cell: playerPresentationPosition,
+          }
+        : controlledActorSnapshot,
     );
   const thirdPersonCameraSubjectKey = thirdPersonAuthored
     ? thirdPersonCameraSubjectSnapshot.key
@@ -2252,6 +2545,8 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     saveData?.dialogue_memory?.current_intercessor_id,
   ]);
   const largeMapWindowKeyRef = useRef("");
+  const largeMapWindowRef = useRef<MapData | null>(null);
+  const largeMapWindowSourceRef = useRef<MapData | null>(null);
   const lastMapTopicDiscoveryRef = useRef("");
   useEffect(() => {
     if (!saveData?.current_map_id) {
@@ -2281,12 +2576,31 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       playerCell[1],
     );
     const windowKey = `${authored.id}:${sectorX}:${sectorZ}`;
-    if (largeMapWindowKeyRef.current === windowKey) return;
+    // A return door can land in the same sector that was active before the
+    // player entered a compact interior. The sector key is therefore not
+    // enough to prove that the currently-rendered map is the matching runtime
+    // window: the transition may just have installed the package's start-area
+    // window. Object identity keeps ordinary movement cheap while forcing a
+    // fresh materialization after any map swap or authored-map revision.
+    if (
+      largeMapWindowKeyRef.current === windowKey &&
+      largeMapWindowRef.current === activeMapState &&
+      largeMapWindowSourceRef.current === authored
+    ) {
+      return;
+    }
     largeMapWindowKeyRef.current = windowKey;
     const windowMap = materializeLargeMapWindow(authored, playerCell);
+    largeMapWindowRef.current = windowMap;
+    largeMapWindowSourceRef.current = authored;
     registerRuntimeMapWindow(windowMap);
     setActiveMap(windowMap);
-  }, [rawGamePackage.maps, saveData?.current_map_id, saveData?.player?.cell]);
+  }, [
+    activeMapState,
+    rawGamePackage.maps,
+    saveData?.current_map_id,
+    saveData?.player?.cell,
+  ]);
 
   // The player's MACRO tile. Exploration-cadence simulation (chemistry ooze,
   // emotional/grid pressure, perception, survival) is macro-paced by design
@@ -2331,7 +2645,13 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     prevMusicMapRef.current = mapId;
     const settings = gamePackage.settings || {};
     const assignment = ((settings.map_music || {}) as Record<string, string>)[mapId];
-    if (!assignment) return;
+    if (!assignment) {
+      // Music belongs to the map that requested it. Entering an unscored map
+      // (notably Riley's house) must release the previous map's track instead
+      // of carrying the Lonely Street intro indoors.
+      stopMusic();
+      return;
+    }
     const url = ((settings.music_tracks || {}) as Record<string, string>)[assignment] || assignment;
     if (url) playMusic(url, { loop: true });
   }, [saveData?.current_map_id, gamePackage.settings]);
@@ -2446,6 +2766,12 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   const [dialogueShowItemPickerOpen, setDialogueShowItemPickerOpen] = useState(false);
   const [pendingDialogueCutsceneId, setPendingDialogueCutsceneId] = useState<string | null>(null);
   const initializedKeywordSessionRef = useRef<string | null>(null);
+  // A scripted shot, in FINE cells (the cutscene's cells arrive fine-expanded).
+  const [cinematicShot, setCinematicShot] = useState<{
+    cell: [number, number];
+    facing: [number, number];
+    cut?: boolean;
+  } | null>(null);
   const [cameraFocusOverride, setCameraFocusOverride] = useState<
     [number, number] | null
   >(null);
@@ -2640,6 +2966,17 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   const visualConfig = SCREEN_VISUAL_PRESETS[visualPreset];
   const activeMapCellCount = activeMap?.cells.length || 0;
   const largePlayMap = isLargePlayMap(activeMapCellCount);
+  const performanceFoliageActive = useMemo(() => {
+    if (!activeMap) return false;
+    const foliageObjectIds = new Set(
+      baseGamePackage.object_library
+        .filter((object) => object.tags?.includes("performance_foliage"))
+        .map((object) => object.id),
+    );
+    return activeMap.custom_object_placements.some((placement) =>
+      foliageObjectIds.has(placement.object_id),
+    );
+  }, [activeMap, baseGamePackage.object_library]);
   const backroomsLevelZeroActive = useMemo(
     () =>
       Boolean(
@@ -2657,6 +2994,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       visualConfig.dprCap,
       activeMapCellCount,
     ),
+    performanceFoliageActive && largePlayMap ? 1.12 : Number.POSITIVE_INFINITY,
   );
   const effectivePlayDpr = Math.min(playDpr, visualDprCap);
   const playFrameIntervalMs = resolvePlayFrameIntervalMs(
@@ -2669,6 +3007,15 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   const playArchitectureRadius = scaleMacroDistanceToFine(
     resolvePlayArchitectureRadiusMacro(visualPreset, activeMapCellCount),
   );
+  // Exterior sightlines should terminate at authored scenery rather than a
+  // streaming edge. Keep the normal circular detail budget around Steve, but
+  // extend its camera-facing wedge far enough to reach the opposite map edge.
+  // The wedge remains narrow, so the doubled Lonely Street does not pay the
+  // cost of a same-sized circular render field behind the player.
+  const exteriorForwardDrawDistance =
+    activeMap?.environment === "exterior"
+      ? Math.max(activeMap.width, activeMap.height)
+      : undefined;
   // Preset changes used to leave the adaptive probe's raw DPR above the
   // effective cap. It then caused repeated heavyweight Play re-renders while
   // spending many checks reducing a value that could not affect the canvas.
@@ -2903,6 +3250,71 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     objectByIdForPlay,
   ]);
 
+  const freeMovementPrecisePlacementBounds = useMemo(
+    () =>
+      effectiveObjectPlacements.flatMap((placement) => {
+        if (
+          isBuildingDoorPlacement(placement) &&
+          isDoorOpenForPlay(placement)
+        ) {
+          return [];
+        }
+        const bounds = getPlacementContinuousCollisionBounds(
+          placement,
+          objectByIdForPlay.get(placement.object_id),
+        );
+        return bounds ? [bounds] : [];
+      }),
+    [effectiveObjectPlacements, isDoorOpenForPlay, objectByIdForPlay],
+  );
+
+  // Continuous third-person movement can collide with fitted furniture at its
+  // real model bounds. Keep discrete cells for every other obstacle, but do not
+  // also apply the furniture's rasterized fine footprint or the two shapes
+  // would combine into the same oversized invisible wall we are avoiding.
+  const freeMovementWalkableCells = useMemo(() => {
+    const walkable = new Set<string>();
+    activeMap?.cells.forEach((cell) => {
+      if (cell.walkable === false) return;
+      if (cell.object_id) {
+        const object = objectByIdForPlay.get(cell.object_id);
+        if (object && object.collision?.profile !== "none") return;
+      }
+      walkable.add(pathCellKey(cell.x, cell.z));
+    });
+
+    effectiveObjectPlacements.forEach((placement) => {
+      const object = objectByIdForPlay.get(placement.object_id);
+      if (!placementHasCollision(placement, object)) return;
+      if (
+        isBuildingDoorPlacement(placement) &&
+        isDoorOpenForPlay(placement)
+      ) {
+        return;
+      }
+      if (getPlacementContinuousCollisionBounds(placement, object)) return;
+      getPlacementFootprint(placement, object).forEach(([x, z]) => {
+        walkable.delete(pathCellKey(x, z));
+      });
+    });
+    activeMap?.container_placements?.forEach((container) => {
+      for (let dx = -FINE_HALF_EXTENT; dx <= FINE_HALF_EXTENT; dx += 1) {
+        for (let dz = -FINE_HALF_EXTENT; dz <= FINE_HALF_EXTENT; dz += 1) {
+          walkable.delete(
+            pathCellKey(container.cell[0] + dx, container.cell[1] + dz),
+          );
+        }
+      }
+    });
+    return walkable;
+  }, [
+    activeMap?.cells,
+    activeMap?.container_placements,
+    effectiveObjectPlacements,
+    isDoorOpenForPlay,
+    objectByIdForPlay,
+  ]);
+
   // Footprint-eroded walkability: a fine cell is a legal FOOTPRINT CENTER only
   // when its whole FINE_PER_MACRO² block is walkable. NPC pathing uses this so
   // 3×3-footprint actors never clip walls or objects.
@@ -2921,6 +3333,47 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     return centers;
   }, [baseWalkableCells]);
   useEffect(() => {
+    if (!freeThirdPersonMovement || !activeMap) return;
+    const current = usePlayStore.getState().saveData;
+    if (!current || current.current_map_id !== activeMap.id) return;
+    const start = resolveFreePlayerStart(
+      current.player.cell,
+      current.player.fine_position,
+    );
+    const repaired = resolveNearestFreePlayerPosition({
+      position: start,
+      isBlockedCell: (x, z) =>
+        !freeMovementWalkableCells.has(pathCellKey(x, z)),
+      intersectsBlockedPosition: (position, radius) =>
+        freeMovementPrecisePlacementBounds.some((bounds) =>
+          freePlayerPositionIntersectsBounds(position, radius, bounds),
+        ),
+    });
+    if (
+      !repaired ||
+      (repaired[0] === start[0] && repaired[1] === start[1])
+    ) {
+      return;
+    }
+    commitRuntimeSave({
+      ...current,
+      player: {
+        ...current.player,
+        cell: quantizeFreePlayerPosition(repaired),
+        fine_position: repaired,
+      },
+    });
+  }, [
+    activeMap,
+    commitRuntimeSave,
+    freeMovementPrecisePlacementBounds,
+    freeMovementWalkableCells,
+    freeThirdPersonMovement,
+    saveData?.current_map_id,
+    saveData?.player.cell,
+    saveData?.player.fine_position,
+  ]);
+  useEffect(() => {
     // A map transition or collision edit can invalidate more than the next
     // cached step (for example, a door opening midway down the route).
     explorationRouteCacheRef.current.clear();
@@ -2931,6 +3384,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   const activeMapRef = useRef<MapData | null>(null);
   const latestPartyFollowersRef = useRef<{ entity_id: string; cell: [number, number] }[]>([]);
   const inputBlockedRef = useRef(false);
+  const horrorControllerPausedRef = useRef(false);
   const playerFootstepFineStepsRef = useRef(0);
   // bark id -> in-game minute it last played; throttles repeat gossip.
   const barkCooldownRef = useRef<Map<string, number>>(new Map());
@@ -2939,7 +3393,10 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     | ((
         dx: number,
         dz: number,
-        moveOptions?: { facingOverride?: [number, number] },
+        moveOptions?: {
+          facingOverride?: [number, number];
+          continuousPosition?: [number, number];
+        },
       ) => void)
     | null
   >(null);
@@ -2953,10 +3410,61 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     | ((intent: { forward: number; turn: number }) => void)
     | null
   >(null);
+  const handleBackroomsFreeMoveRef = useRef<
+    | ((
+        intent: { forward: number; turn: number },
+        deltaSeconds: number,
+      ) => void)
+    | null
+  >(null);
   const handleActRef = useRef<(() => void) | null>(null);
+  const contextualActAvailableRef = useRef(false);
+  const commitHorrorAttackRef = useRef<(() => void) | null>(null);
+  const commitHorrorEvadeRef = useRef<(() => void) | null>(null);
   const confirmThirdPersonGridTargetRef = useRef<(() => void) | null>(null);
   const waitRef = useRef<(() => void) | null>(null);
   const toggleStealthRef = useRef<(() => void) | null>(null);
+  // Held movement repeats every few frames. This latch makes body contact a
+  // single stop/recoil event instead of repeatedly attacking or spamming SFX.
+  const horrorContactLatchRef = useRef<string | null>(null);
+  const horrorRuntimeRef = useRef<HorrorRealtimeRuntime>(
+    createHorrorRealtimeRuntime(),
+  );
+  const [horrorRealtimeUi, setHorrorRealtimeUi] =
+    useState<HorrorRealtimeUi>({
+      stamina: HORROR_PLAYER_MAX_STAMINA,
+      threatActive: false,
+      actions: {},
+    });
+  const rendererActorActionPresentations = useMemo<ActorActionPresentationMap>(
+    () =>
+      Object.fromEntries(
+        Object.entries(horrorRealtimeUi.actions).flatMap(
+          ([actorKey, action]) => {
+            if (action.phase === "idle") return [];
+            const presentation = {
+              action:
+                action.kind === "enemy_attack"
+                  ? "attack"
+                  : action.kind === "contact"
+                    ? "hurt"
+                    : action.kind,
+              phase: action.phase,
+              progress: action.progress,
+              sequence: action.sequence,
+              facing: action.facing,
+              reach: action.reachFineCells,
+              phaseStartedAt: action.phaseStartedAt,
+              phaseDurationMs: action.phaseDurationMs,
+              telegraphTargetCells: action.telegraphTargetCells,
+              hostile: actorKey !== "player",
+            } satisfies NonNullable<ActorActionPresentationMap[string]>;
+            return [[actorKey, presentation]];
+          },
+        ),
+      ),
+    [horrorRealtimeUi.actions],
+  );
   const stealthMoveReadyAtRef = useRef(0);
   const pendingLevelUps = getPendingLevelUps(saveData);
   const levelUpOpen = pendingLevelUps > 0;
@@ -3012,6 +3520,84 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     },
     [pulseForSfx],
   );
+  const publishHorrorRealtimeUi = useCallback((now = performance.now()) => {
+    const runtime = horrorRuntimeRef.current;
+    const actions: HorrorRealtimeUi["actions"] = {};
+    const addAction = (actorKey: string, action: HorrorRealtimeAction | null) => {
+      if (!action) return;
+      actions[actorKey] = {
+        kind: action.kind,
+        phase: action.phase,
+        progress: Math.max(
+          0,
+          Math.min(
+            1,
+            (now - action.phaseStartedAt) /
+              Math.max(1, action.phaseDurationMs),
+          ),
+        ),
+        sequence: action.sequence,
+        facing: [action.facing[0], action.facing[1]],
+        reachFineCells: action.reachFineCells,
+        phaseStartedAt: action.phaseStartedAt,
+        phaseDurationMs: action.phaseDurationMs,
+        telegraphTargetCells: action.telegraphTargetCells?.map((cell) => [
+          cell[0],
+          cell[1],
+        ]),
+      };
+    };
+    addAction("player", runtime.playerFeedbackAction ?? runtime.playerAction);
+    runtime.enemies.forEach((enemy, actorKey) =>
+      addAction(
+        actorKey,
+        enemy.action?.phase === "windup" || enemy.action?.phase === "active"
+          ? enemy.action
+          : enemy.feedbackAction ?? enemy.action,
+      ),
+    );
+    setHorrorRealtimeUi((previous) => {
+      const previousKeys = Object.keys(previous.actions);
+      const nextKeys = Object.keys(actions);
+      const sameActions =
+        previousKeys.length === nextKeys.length &&
+        nextKeys.every((key) => {
+          const before = previous.actions[key];
+          const after = actions[key];
+          if (!before || !after) return false;
+          const beforeCells = before.telegraphTargetCells || [];
+          const afterCells = after.telegraphTargetCells || [];
+          return (
+            before.kind === after.kind &&
+            before.phase === after.phase &&
+            before.sequence === after.sequence &&
+            before.phaseStartedAt === after.phaseStartedAt &&
+            before.phaseDurationMs === after.phaseDurationMs &&
+            before.facing[0] === after.facing[0] &&
+            before.facing[1] === after.facing[1] &&
+            before.reachFineCells === after.reachFineCells &&
+            beforeCells.length === afterCells.length &&
+            beforeCells.every(
+              (cell, index) =>
+                cell[0] === afterCells[index]?.[0] &&
+                cell[1] === afterCells[index]?.[1],
+            )
+          );
+        });
+      if (
+        sameActions &&
+        previous.threatActive === runtime.threatActive &&
+        Math.abs(previous.stamina - runtime.stamina) < 0.1
+      ) {
+        return previous;
+      }
+      return {
+        stamina: runtime.stamina,
+        threatActive: runtime.threatActive,
+        actions,
+      };
+    });
+  }, []);
   const presentStealthActionBlock = useCallback(
     (action: StealthBlockedAction = "act") => {
       const currentSave = usePlayStore.getState().saveData;
@@ -3539,6 +4125,93 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     [addLog, playSfx],
   );
 
+  const applyHorrorDamageToEnemy = useCallback(
+    (
+      actorKey: string,
+      definition: GamePackage["entities"][number],
+      cell: [number, number],
+      amount: number,
+    ) => {
+      const store = usePlayStore.getState();
+      const current = store.saveData;
+      if (!current) return;
+      const state = current.entity_states?.[actorKey] || {};
+      if (state.dead || state.hidden) return;
+      const hp = Math.max(0, (state.hp ?? definition.max_hp ?? 1) - amount);
+      const defeated = hp <= 0;
+      store.commitRuntimeSave({
+        ...current,
+        entity_states: {
+          ...(current.entity_states || {}),
+          [actorKey]: {
+            ...state,
+            hp,
+            dead: defeated || Boolean(state.dead),
+          },
+        },
+      });
+      const runtime = horrorRuntimeRef.current;
+      const enemyRuntime = runtime.enemies.get(actorKey);
+      if (enemyRuntime && !defeated) {
+        const now = performance.now();
+        runtime.sequence += 1;
+        enemyRuntime.feedbackAction = {
+          kind: "hurt",
+          phase: "active",
+          phaseStartedAt: now,
+          phaseDurationMs: 180,
+          sequence: runtime.sequence,
+          facing: [
+            state.facing?.[0] ?? 0,
+            state.facing?.[1] ?? 1,
+          ],
+        };
+        publishHorrorRealtimeUi(now);
+      }
+      const fx = useFxStore.getState();
+      fx.addPopup(cell, defeated ? "Down" : "Hit", "#f8fafc");
+      fx.flashEntity(actorKey);
+      playSfx(defeated ? "enemy_defeat" : "melee_hit", {
+        volume: defeated ? 0.5 : 0.4,
+        cooldownMs: 90,
+      });
+      addLog(
+        defeated
+          ? `${definition.display_name} is defeated.`
+          : `You hit ${definition.display_name}.`,
+      );
+      if (defeated) handleEnemyDefeatedExperience(definition);
+    },
+    [addLog, handleEnemyDefeatedExperience, playSfx, publishHorrorRealtimeUi],
+  );
+
+  const applyHorrorDamageToPlayer = useCallback(
+    (attackerName: string, amount: number, cell: [number, number]) => {
+      const store = usePlayStore.getState();
+      const current = store.saveData;
+      if (!current || current.playerStats.hp <= 0) return;
+      store.updatePlayerHp(-amount);
+      const runtime = horrorRuntimeRef.current;
+      const now = performance.now();
+      runtime.sequence += 1;
+      runtime.playerFeedbackAction = {
+        kind: "hurt",
+        phase: "active",
+        phaseStartedAt: now,
+        phaseDurationMs: 200,
+        sequence: runtime.sequence,
+        facing: [current.player.facing[0], current.player.facing[1]],
+      };
+      publishHorrorRealtimeUi(now);
+      const fx = useFxStore.getState();
+      fx.addPopup(cell, "Hurt", "#fb7185");
+      fx.markPlayerHurt();
+      playSfx("melee_hit", { volume: 0.48, cooldownMs: 100 });
+      addLog(`${attackerName} hits you.`);
+    },
+    [addLog, playSfx, publishHorrorRealtimeUi],
+  );
+
   const presentSkillOutcome = useCallback(
     (outcome: SkillCastOutcome) => {
       const fx = useFxStore.getState();
@@ -4049,7 +4722,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
 
   useEffect(() => {
     levelUpOpenRef.current = levelUpOpen;
-    inputBlockedRef.current = Boolean(
+    const blockingOverlay = Boolean(
       activeCutscene?.is_blocking ||
         levelUpOpen ||
         showInventory ||
@@ -4058,13 +4731,19 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         showJournal ||
         showGameMenu ||
         successionNoticeOpen ||
-        ((targetingSkillId || verbTargeting) &&
-          !thirdPersonActiveRef.current) ||
         activeDialogueId ||
         activeShopId ||
         activeDocumentId ||
         activeContainerId ||
-        activeAttendNodePanel,
+        activeAttendNodePanel
+    );
+    // Target cursors may gate locomotion in legacy/isometric controls, but
+    // they are tactical controls—not a realtime simulation pause.
+    horrorControllerPausedRef.current = blockingOverlay;
+    inputBlockedRef.current = Boolean(
+      blockingOverlay ||
+        ((targetingSkillId || verbTargeting) &&
+          !thirdPersonActiveRef.current),
     );
     if (inputBlockedRef.current) resetRepeatInputState();
     if (levelUpOpen) keysDownRef.current.clear();
@@ -4190,6 +4869,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     setActiveCutscene(null);
     setCutsceneActionIndex(0);
     setCameraFocusOverride(null);
+    setCinematicShot(null);
     setShowInventory(false);
     setShowSkills(false);
     setShowSaveMenu(false);
@@ -4554,6 +5234,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       : "";
   useEffect(() => {
     if (!saveData || !activeMap || activeCutscene) return;
+    // Horror realtime has its own single scheduling authority. The legacy
+    // session command also creates an initiative queue and changes movement
+    // ownership, so running it here would reintroduce turn-only freezes as
+    // soon as a Parasite notices Steve.
+    if (horrorRealtimeMode) return;
     if (saveData.playerStats.hp <= 0) return;
 
     // Starting exploration combat requires a live hostile that has already
@@ -4641,6 +5326,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     combatSessionInputKey,
     commitRuntimeSave,
     gamePackage.entities,
+    horrorRealtimeMode,
     logCoreExperience,
     playSfx,
   ]);
@@ -4814,6 +5500,13 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   const independentEnemyMapIdRef = useRef<string | null>(null);
 
   useEffect(() => {
+    // Realtime horror is advanced by the unified controller below. Keeping
+    // this timer alive as well would grant each enemy two independent clocks.
+    if (horrorRealtimeMode) {
+      independentEnemyDueAtRef.current.clear();
+      independentEnemyMapIdRef.current = null;
+      return;
+    }
     const scheduler = window.setInterval(() => {
       const map = activeMapRef.current;
       const store = usePlayStore.getState();
@@ -4957,7 +5650,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       independentEnemyDueAtRef.current.clear();
       independentEnemyMapIdRef.current = null;
     };
-  }, [playSfx, presentMeleeOutcome]);
+  }, [horrorRealtimeMode, playSfx, presentMeleeOutcome]);
 
   // Overwatch is a combat stance — disarm it when combat ends so the flag
   // doesn't linger into exploration.
@@ -4991,6 +5684,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         setCutsceneActionIndex(0);
         // A finished cutscene always hands the camera back to the player.
         setCameraFocusOverride(null);
+    setCinematicShot(null);
         return;
       }
 
@@ -5456,6 +6150,20 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         setTimeout(finishAction, duration);
       } else if (action.type === "camera_pan") {
         setCameraFocusOverride(action.cell ? [action.cell[0], action.cell[1]] : null);
+        // `facing` promotes the pan to a scripted shot: the camera is placed in
+        // the world and aimed, rather than following the player's own facing.
+        // Without it the verb keeps its original focus-only behaviour.
+        setCinematicShot(
+          action.cell && action.facing
+            ? {
+                cell: [action.cell[0], action.cell[1]],
+                facing: [action.facing[0], action.facing[1]],
+                // Duration 0 is a cut; anything longer is a move that starts
+                // wherever the camera already is.
+                cut: (action.duration ?? 800) <= 0,
+              }
+            : null,
+        );
         setTimeout(finishAction, action.duration ?? 800);
       } else if (action.type === "adjust_faction_rep") {
         if (action.faction_id) {
@@ -5590,6 +6298,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         setActiveCutscene(null);
         setCutsceneActionIndex(0);
         setCameraFocusOverride(null);
+    setCinematicShot(null);
       }
     };
 
@@ -5611,9 +6320,15 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
 
   useEffect(() => {
     let animId: number;
+    let lastFreeMoveFrameTime = performance.now();
 
     const loop = (time: number) => {
       animId = requestAnimationFrame(loop);
+      const freeMoveDeltaSeconds = Math.min(
+        BACKROOMS_FREE_MAX_FRAME_SECONDS,
+        Math.max(0, (time - lastFreeMoveFrameTime) / 1000),
+      );
+      lastFreeMoveFrameTime = time;
 
       // Look pitch is held-only. Every path that stops accepting exploration
       // input releases it so the view springs back to level rather than
@@ -5657,6 +6372,31 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           return;
         }
 
+        // Backrooms realtime play has no movement-direction ring. Steve's
+        // heading rotates continuously while the held movement is integrated
+        // in world space every frame; only the underlying gameplay anchor is
+        // quantized when a fine-cell boundary is crossed.
+        if (freeThirdPersonMovementRef.current) {
+          const state = repeatStateRef.current;
+          if (intent.wait) {
+            if (!state.active) waitRef.current?.();
+            state.active = true;
+            state.wait = true;
+            return;
+          }
+          if (intent.forward === 0 && intent.turn === 0) {
+            resetRepeatInputState();
+            return;
+          }
+          state.active = true;
+          state.wait = false;
+          handleBackroomsFreeMoveRef.current?.(
+            { forward: intent.forward, turn: intent.turn },
+            freeMoveDeltaSeconds,
+          );
+          return;
+        }
+
         const isHolding =
           intent.forward !== 0 || intent.turn !== 0 || intent.wait;
         if (!isHolding) {
@@ -5666,6 +6406,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         const actor = getControlledActor(
           currentSave,
           getRuntimeGamePackage(),
+          horrorRealtimeModeRef.current,
         );
         if (!actor) {
           resetRepeatInputState();
@@ -6051,6 +6792,60 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           setHoveredCell(null);
           return;
         }
+        if (
+          horrorRealtimeModeRef.current &&
+          !inputBlockedRef.current &&
+          !targetingSkillIdRef.current &&
+          !verbTargetingRef.current &&
+          (key === "shift" || key === "3")
+        ) {
+          e.preventDefault();
+          commitHorrorEvadeRef.current?.();
+          return;
+        }
+        if (
+          horrorRealtimeModeRef.current &&
+          (key === " " || key === "enter" || key === "1")
+        ) {
+          const targeting = Boolean(
+            targetingSkillIdRef.current || verbTargetingRef.current,
+          );
+          const primaryCommand = resolveHorrorPrimaryCommand({
+            key,
+            inputBlocked: inputBlockedRef.current,
+            targeting,
+            contextualActAvailable: contextualActAvailableRef.current,
+          });
+          if (primaryCommand !== "none") {
+            e.preventDefault();
+            if (primaryCommand === "confirm_target") {
+              confirmThirdPersonGridTargetRef.current?.();
+            } else if (primaryCommand === "act") {
+              handleActRef.current?.();
+            } else {
+              commitHorrorAttackRef.current?.();
+            }
+            return;
+          }
+          // Do not let the dedicated attack key leak into legacy ability
+          // hotkeys while a realtime target cursor or blocking overlay owns
+          // input.
+          if (key === "1" && (targeting || inputBlockedRef.current)) {
+            e.preventDefault();
+            return;
+          }
+        }
+        if (
+          horrorRealtimeModeRef.current &&
+          !inputBlockedRef.current &&
+          /^[2-6]$/.test(key)
+        ) {
+          // Shove and realtime skills are deliberately deferred until the
+          // basic attack/evade encounter is tuned. Do not leak legacy
+          // turn-based ability hotkeys into the prototype controller.
+          e.preventDefault();
+          return;
+        }
         // Ability hotkeys 1-6 mirror the visible bottom-bar page.
         if (/^[1-6]$/.test(key) && !inputBlockedRef.current) {
           const entry = abilityBarEntriesRef.current[parseInt(key, 10) - 1];
@@ -6180,6 +6975,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       keysDownRef.current.delete(key);
       consumedMovementTapKeysRef.current.delete(key);
       if (isMovementCommandKey(key)) {
+        if (horrorRealtimeModeRef.current) {
+          horrorContactLatchRef.current = null;
+        }
         combatInputHeldKeysRef.current.delete(key);
         releaseCombatInputGateIfReady();
         if (![...keysDownRef.current].some(isMovementCommandKey)) {
@@ -6193,6 +6991,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
 
     const clearHeldInput = () => {
       keysDownRef.current.clear();
+      horrorContactLatchRef.current = null;
       combatInputHeldKeysRef.current.clear();
       consumedMovementTapKeysRef.current.clear();
       setThirdPersonPitchInput(0);
@@ -6200,7 +6999,13 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       releaseCombatInputGateIfReady();
     };
     const handleVisibilityChange = () => {
-      if (document.visibilityState === "hidden") clearHeldInput();
+      if (document.visibilityState === "hidden") {
+        clearHeldInput();
+        const runtime = horrorRuntimeRef.current;
+        if (horrorRealtimeModeRef.current && runtime.pausedAt === null) {
+          runtime.pausedAt = performance.now();
+        }
+      }
     };
 
     window.addEventListener("keydown", handleKeyDown);
@@ -6537,6 +7342,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           ?.flatMap((p, index) => {
             if (partyMembers.has(p.entity_id)) return [];
             const def = entityByIdForPlay.get(p.entity_id);
+            // On a realtime-horror map every hostile belongs to the single
+            // wall-clock controller, including stationary enemies that omit
+            // an explicit movement/profile block. Leaving one in this pump
+            // would restore instant, player-step-driven attacks.
+            if (horrorRealtimeMode && def && !def.is_npc) return [];
             // Wall-clock hunters own their entire exploration cadence. Keeping
             // them in the player-energy pump as well made one player step
             // grant an extra movement/attack and produced nondeterministic
@@ -7198,6 +8008,10 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   ]);
 
   const performWait = useCallback(() => {
+    // Realtime horror maps have no legacy wait/turn pulse. Keyboard, touch,
+    // and authored ability routes all converge here, so keep the guard at the
+    // command boundary as well as hiding the old action bar.
+    if (horrorRealtimeModeRef.current) return;
     const save = usePlayStore.getState().saveData;
     if (!save) return;
     if (getPendingLevelUps(save) > 0) return;
@@ -7545,7 +8359,10 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     (
       dx: number,
       dz: number,
-      moveOptions?: { facingOverride?: [number, number] },
+      moveOptions?: {
+        facingOverride?: [number, number];
+        continuousPosition?: [number, number];
+      },
     ) => {
       const currentSave = usePlayStore.getState().saveData;
       if (!activeMap || !currentSave) return;
@@ -7563,8 +8380,8 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       }
 
       const gp = getRuntimeGamePackage();
-      const inCombat = !!currentSave.in_combat;
-      const actor = getControlledActor(currentSave, gp);
+      const inCombat = !!currentSave.in_combat && !horrorRealtimeMode;
+      const actor = getControlledActor(currentSave, gp, horrorRealtimeMode);
       if (!actor) return; // an enemy is acting
       const actorUsesStealth = isActorUsingStealthStance(currentSave, actor.key);
       const throttleStealthMovement = actor.isPlayer && actorUsesStealth;
@@ -7619,6 +8436,25 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           nx = resolvedCell[0];
           nz = resolvedCell[1];
         }
+        if (actor.isPlayer && moveOptions?.continuousPosition) {
+          const desiredAnchor = quantizeFreePlayerPosition(
+            moveOptions.continuousPosition,
+          );
+          const continuousPosition: [number, number] =
+            desiredAnchor[0] === nx && desiredAnchor[1] === nz
+              ? [
+                  moveOptions.continuousPosition[0],
+                  moveOptions.continuousPosition[1],
+                ]
+              : [nx, nz];
+          movementCommand.save = {
+            ...movementCommand.save,
+            player: {
+              ...movementCommand.save.player,
+              fine_position: continuousPosition,
+            },
+          };
+        }
       }
       const targetCell = getActiveCell(nx, nz);
 
@@ -7638,10 +8474,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         for (const [fx, fz] of actorFootprintCells([nx, nz])) {
           const footCell = getActiveCell(fx, fz);
           const stepTooHigh = Boolean(
-            footCell &&
-              getJamEngineVisualHeight(footCell) -
-                getJamEngineVisualHeight(currentCell) >
-                1,
+            footCell && !canAutomaticallyStepBetween(currentCell, footCell),
           );
           if (
             !footCell ||
@@ -7712,7 +8545,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       }
 
       // Entity collisions: walking into any entity whose footprint would
-      // overlap the destination footprint counts as a bump (talk / attack).
+      // overlap the destination footprint counts as a physical bump. NPC
+      // dialogue is deliberately excluded here: conversations only begin
+      // through the existing explicit Interact action below.
       // Successful doorway/corner alignment may substitute a safe one-cell
       // direction, so only failed moves probe the originally requested edge.
       const collisionProbeDelta: [number, number] = movementCommand.ok
@@ -7720,6 +8555,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         : [dx, dz];
       const entityIndex = activeMap.entity_placements?.findIndex((e, idx) => {
         if ((currentSave.party_members || []).includes(e.entity_id)) return false;
+        if (!entityPlacementBlocksMovement(e)) return false;
         const key = entityPlacementStateKey(activeMap.id, e, idx);
         const est = (currentSave.entity_states || {})[key];
         const cx = est?.cell?.[0] ?? e.cell[0];
@@ -7738,6 +8574,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       const entityKey = entityPlacement
         ? entityPlacementStateKey(activeMap.id, entityPlacement, entityIndex)
         : "";
+      if (!entityPlacement) horrorContactLatchRef.current = null;
 
       // Turning in place / facing updates for whichever body we control.
       const faceActor = (facing: [number, number]) => {
@@ -7772,35 +8609,42 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         if (entityData) {
           faceActor(newFacing);
 
-          if (actorUsesStealth) {
-            presentStealthActionBlock(entityData.is_npc ? "talk" : "attack");
+          if (actorUsesStealth && !horrorRealtimeMode && !entityData.is_npc) {
+            presentStealthActionBlock("attack");
             return;
           }
 
           if (entityData.is_npc) {
-            // Mid-combat there is no time for talk — the NPC just blocks.
-            if (actor.isPlayer && !inCombat && entityData.dialogue_id) {
-              const dialogue = useEngineStore
-                .getState()
-                .gamePackage.dialogue.find(
-                  (d) => d.id === entityData.dialogue_id,
-                );
-              if (dialogueCanStart(dialogue)) {
-                clearInputState();
-                completeTalkObjectivesForEntity(entityData.id, currentSave);
-                usePlayStore
-                  .getState()
-                  .startDialogue(dialogue!.id, dialogueEntryNodeId(dialogue!), {
-                    participantKey: entityKey,
-                    participantEntityId: entityData.id,
-                  });
-                playSfx("dialogue_open", { volume: 0.32, cooldownMs: 120 });
-                addLog(`Started conversation with ${entityData.display_name}...`);
-              }
-            }
+            // NPC bodies block movement in every mode, but touching one never
+            // starts dialogue. This prevents a held movement input (including
+            // one aimed away as the continuous anchor crosses a cell edge)
+            // from repeatedly reopening a nearby conversation.
             turnConsumed = !inCombat;
           } else {
-            // Bump attack — walking into a hostile strikes it instead.
+            if (horrorRealtimeMode) {
+              // Contact is never an attack in the survival-horror profile.
+              // Preserve the requested facing and emit one restrained recoil
+              // until Steve separates or pushes in a different direction.
+              const contactKey = `${entityKey}:${newFacing[0]}:${newFacing[1]}`;
+              if (horrorContactLatchRef.current !== contactKey) {
+                horrorContactLatchRef.current = contactKey;
+                const now = performance.now();
+                const runtime = horrorRuntimeRef.current;
+                runtime.sequence += 1;
+                runtime.playerFeedbackAction = {
+                  kind: "contact",
+                  phase: "active",
+                  phaseStartedAt: now,
+                  phaseDurationMs: 140,
+                  sequence: runtime.sequence,
+                  facing: [newFacing[0], newFacing[1]],
+                };
+                publishHorrorRealtimeUi(now);
+                playSfx("bump", { volume: 0.18, cooldownMs: 140 });
+              }
+              return;
+            }
+            // Legacy pulse combat keeps its authored bump-to-attack rule.
             const attacked = executeMeleeAttack(actor, entityKey, entityData);
             if (attacked && actor.isPlayer && !inCombat) turnEnergyConsumed = true;
             turnConsumed = true;
@@ -7891,6 +8735,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                 setActiveCutscene(null);
                 setCutsceneActionIndex(0);
                 setCameraFocusOverride(null);
+    setCinematicShot(null);
                 perceptionAdvanceKeyRef.current = "";
                 lastExplorationPerceptionRef.current = null;
                 setPerceptionSnapshotState(null);
@@ -8090,18 +8935,106 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     [
       activeMap,
       commitRuntimeSave,
-      completeTalkObjectivesForEntity,
       updatePlayer,
       executeMeleeAttack,
       getActiveCell,
       getContainerAtCell,
       isBlockedByPlacement,
+      horrorRealtimeMode,
       stableMemoryPlacementCells,
       logCoreExperience,
       advanceCombatTurnCore,
       playSfx,
       presentStealthActionBlock,
       presentWorldStateBlockFeedback,
+      publishHorrorRealtimeUi,
+    ],
+  );
+
+  const handleBackroomsFreeMove = useCallback(
+    (
+      intent: { forward: number; turn: number },
+      deltaSeconds: number,
+    ) => {
+      const currentSave = usePlayStore.getState().saveData;
+      if (!activeMap || !currentSave || currentSave.playerStats.hp <= 0) return;
+      if (!freeThirdPersonMovementRef.current || deltaSeconds <= 0) return;
+      const actor = getControlledActor(
+        currentSave,
+        getRuntimeGamePackage(),
+        horrorRealtimeModeRef.current,
+      );
+      if (!actor?.isPlayer) return;
+
+      const start = resolveFreePlayerStart(
+        currentSave.player.cell,
+        currentSave.player.fine_position,
+      );
+      const facing = rotateFreeFacing(
+        currentSave.player.facing,
+        intent.turn,
+        deltaSeconds,
+      );
+      thirdPersonVisualYawRef.current = facingToThirdPersonYaw(facing);
+
+      if (intent.forward === 0) {
+        updatePlayerFinePosition(start, facing);
+        return;
+      }
+      if ((currentSave.playerStats.energy || 0) < ENERGY_PER_FINE_STEP) {
+        updatePlayerFinePosition(start, facing);
+        return;
+      }
+
+      const stealthSpeedMultiplier = isPlayerStealthActive(currentSave)
+        ? resolveMovementHearingSettings(getRuntimeGamePackage())
+            .stealth_speed_multiplier
+        : 1;
+      const speedFineCellsPerSecond =
+        (1000 / MOVEMENT_REPEAT_INTERVAL_MS) * stealthSpeedMultiplier;
+      const movementScale =
+        Math.max(-1, Math.min(1, intent.forward)) *
+        speedFineCellsPerSecond *
+        Math.min(BACKROOMS_FREE_MAX_FRAME_SECONDS, deltaSeconds);
+      const anchorCell = getActiveCell(
+        currentSave.player.cell[0],
+        currentSave.player.cell[1],
+      );
+      const nextPosition = resolveFreePlayerMovement({
+        position: start,
+        delta: [facing[0] * movementScale, facing[1] * movementScale],
+        isBlockedCell: (x, z) => {
+          if (!freeMovementWalkableCells.has(pathCellKey(x, z))) return true;
+          const target = getActiveCell(x, z);
+          return !target || !canAutomaticallyStepBetween(anchorCell, target);
+        },
+        intersectsBlockedPosition: (position, radius) =>
+          freeMovementPrecisePlacementBounds.some((bounds) =>
+            freePlayerPositionIntersectsBounds(position, radius, bounds),
+          ),
+      });
+      const nextCell = quantizeFreePlayerPosition(nextPosition);
+      const dx = nextCell[0] - currentSave.player.cell[0];
+      const dz = nextCell[1] - currentSave.player.cell[1];
+
+      if (dx === 0 && dz === 0) {
+        updatePlayerFinePosition(nextPosition, facing);
+        return;
+      }
+      if (Math.abs(dx) <= 1 && Math.abs(dz) <= 1) {
+        handleMove(dx, dz, {
+          facingOverride: facing,
+          continuousPosition: nextPosition,
+        });
+      }
+    },
+    [
+      activeMap,
+      freeMovementPrecisePlacementBounds,
+      freeMovementWalkableCells,
+      getActiveCell,
+      handleMove,
+      updatePlayerFinePosition,
     ],
   );
 
@@ -8140,7 +9073,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     (facing: [number, number]) => {
       const currentSave = usePlayStore.getState().saveData;
       if (!currentSave) return;
-      const actor = getControlledActor(currentSave, getRuntimeGamePackage());
+      const actor = getControlledActor(
+        currentSave,
+        getRuntimeGamePackage(),
+        horrorRealtimeMode,
+      );
       if (!actor) return;
       if (actor.isPlayer) {
         updatePlayer(
@@ -8155,7 +9092,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         facing,
       });
     },
-    [updatePlayer],
+    [horrorRealtimeMode, updatePlayer],
   );
 
   // Locked third-person movement is strict tank control. A/D are free
@@ -8165,7 +9102,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     (intent: { forward: number; turn: number }) => {
       const currentSave = usePlayStore.getState().saveData;
       if (!currentSave || currentSave.playerStats.hp <= 0) return;
-      const actor = getControlledActor(currentSave, getRuntimeGamePackage());
+      const actor = getControlledActor(
+        currentSave,
+        getRuntimeGamePackage(),
+        horrorRealtimeMode,
+      );
       if (!actor) return;
       let facing = actor.facing;
       if (intent.turn !== 0) {
@@ -8181,12 +9122,949 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         }
       }
     },
-    [handleMove, updateControlledActorFacing],
+    [handleMove, horrorRealtimeMode, updateControlledActorFacing],
   );
 
   useEffect(() => {
     handleMoveRef.current = handleMove;
   }, [handleMove]);
+
+  const commitHorrorAttack = useCallback(() => {
+    if (!horrorRealtimeMode || inputBlockedRef.current) return;
+    const save = usePlayStore.getState().saveData;
+    if (!save || save.playerStats.hp <= 0) return;
+    if (presentStealthActionBlock("attack")) return;
+    const runtime = horrorRuntimeRef.current;
+    if (runtime.playerAction) {
+      playSfx("warning", { volume: 0.12, cooldownMs: 180 });
+      return;
+    }
+    if (runtime.stamina < HORROR_PLAYER_ATTACK_STAMINA) {
+      playSfx("warning", { volume: 0.2, cooldownMs: 180 });
+      addLog("Steve is too winded to swing.");
+      return;
+    }
+    const now = performance.now();
+    runtime.sequence += 1;
+    runtime.stamina -= HORROR_PLAYER_ATTACK_STAMINA;
+    runtime.regenBlockedUntil = now + HORROR_PLAYER_STAMINA_REGEN_DELAY_MS;
+    runtime.playerAction = {
+      kind: "attack",
+      phase: "windup",
+      phaseStartedAt: now,
+      phaseDurationMs: HORROR_PLAYER_ATTACK_WINDUP_MS,
+      sequence: runtime.sequence,
+      facing: [save.player.facing[0], save.player.facing[1]],
+      reachFineCells: HORROR_PLAYER_ATTACK_REACH_FINE,
+      hitResolved: false,
+    };
+    horrorContactLatchRef.current = null;
+    playSfx("melee_swing", {
+      volume: 0.2,
+      playbackRate: 0.9,
+      cooldownMs: 80,
+    });
+    publishHorrorRealtimeUi(now);
+  }, [
+    addLog,
+    horrorRealtimeMode,
+    playSfx,
+    presentStealthActionBlock,
+    publishHorrorRealtimeUi,
+  ]);
+
+  const commitHorrorEvade = useCallback(() => {
+    if (!horrorRealtimeMode || inputBlockedRef.current) return;
+    const store = usePlayStore.getState();
+    const save = store.saveData;
+    if (!save || save.playerStats.hp <= 0) return;
+    const runtime = horrorRuntimeRef.current;
+    const now = performance.now();
+    const action = runtime.playerAction;
+    if (
+      action?.phase === "windup" ||
+      action?.phase === "active" ||
+      (action?.phase === "recovery" &&
+        now - action.phaseStartedAt < 180)
+    ) {
+      playSfx("warning", { volume: 0.12, cooldownMs: 160 });
+      return;
+    }
+    if (now < runtime.evadeReadyAt) return;
+    if (runtime.stamina < HORROR_PLAYER_EVADE_STAMINA) {
+      playSfx("warning", { volume: 0.2, cooldownMs: 180 });
+      addLog("Steve is too winded to evade.");
+      return;
+    }
+
+    const facing: [number, number] = [
+      save.player.facing[0],
+      save.player.facing[1],
+    ];
+    const held = keysDownRef.current;
+    const forwardHeld = held.has("w") || held.has("arrowup");
+    const backwardHeld = held.has("s") || held.has("arrowdown");
+    const directionScale = forwardHeld && !backwardHeld ? 1 : -1;
+    const dx = facing[0] * directionScale;
+    const dz = facing[1] * directionScale;
+    const gp = getRuntimeGamePackage();
+    let workingSave = save;
+    const events: ReturnType<typeof dispatchV1MoveEntity>["events"] = [];
+    let movedSteps = 0;
+    for (let step = 0; step < 2; step += 1) {
+      const move = dispatchV1MoveEntity({
+        gamePackage: gp,
+        save: workingSave,
+        dx,
+        dy: dz,
+        facingOverride: facing,
+        energyCost: 0,
+        allowDoorwayAssist: false,
+        allowCornerAssist: false,
+      });
+      if (!move.ok) break;
+      workingSave = move.save;
+      events.push(...move.events);
+      movedSteps += 1;
+    }
+    if (workingSave !== save) {
+      store.commitRuntimeSave(workingSave);
+      store.pushEngineEvents(events);
+    }
+
+    runtime.sequence += 1;
+    runtime.stamina -= HORROR_PLAYER_EVADE_STAMINA;
+    runtime.regenBlockedUntil = now + HORROR_PLAYER_STAMINA_REGEN_DELAY_MS;
+    runtime.evadeReadyAt = now + HORROR_PLAYER_EVADE_TOTAL_MS;
+    runtime.contactGraceUntil = now + HORROR_PLAYER_EVADE_GRACE_MS;
+    runtime.playerAction = {
+      kind: "evade",
+      phase: "active",
+      phaseStartedAt: now,
+      phaseDurationMs: HORROR_PLAYER_EVADE_ACTIVE_MS,
+      sequence: runtime.sequence,
+      facing,
+    };
+    horrorContactLatchRef.current = null;
+    playSfx(movedSteps > 0 ? "footstep_stone" : "bump", {
+      volume: movedSteps > 0 ? 0.26 : 0.16,
+      playbackRate: 1.25,
+      cooldownMs: 100,
+    });
+    publishHorrorRealtimeUi(now);
+  }, [addLog, horrorRealtimeMode, playSfx, publishHorrorRealtimeUi]);
+
+  useEffect(() => {
+    commitHorrorAttackRef.current = commitHorrorAttack;
+    commitHorrorEvadeRef.current = commitHorrorEvade;
+    return () => {
+      if (commitHorrorAttackRef.current === commitHorrorAttack) {
+        commitHorrorAttackRef.current = null;
+      }
+      if (commitHorrorEvadeRef.current === commitHorrorEvade) {
+        commitHorrorEvadeRef.current = null;
+      }
+    };
+  }, [commitHorrorAttack, commitHorrorEvade]);
+
+  const resolveHorrorPlayerSwing = useCallback(
+    (facing: [number, number]) => {
+      const save = usePlayStore.getState().saveData;
+      const map = activeMapRef.current;
+      if (!save || !map) return;
+      const gp = getRuntimeGamePackage();
+      const party = new Set(save.party_members || []);
+      const targets: Array<{
+        id: string;
+        cell: [number, number];
+        definition: GamePackage["entities"][number];
+      }> = [];
+      for (let index = 0; index < map.entity_placements.length; index += 1) {
+        const placement = map.entity_placements[index]!;
+        if (party.has(placement.entity_id)) continue;
+        const definition = gp.entities.find(
+          (entity) => entity.id === placement.entity_id,
+        );
+        if (!definition || definition.is_npc) continue;
+        const actorKey = entityPlacementStateKey(map.id, placement, index);
+        const latest = usePlayStore.getState().saveData;
+        if (!latest) return;
+        const state = latest.entity_states?.[actorKey] || {};
+        if (state.dead || state.hidden) continue;
+        const targetCell = (state.cell || placement.cell) as [number, number];
+        targets.push({ id: actorKey, cell: targetCell, definition });
+      }
+
+      const sweep = resolveHorrorSweptMelee({
+        origin: save.player.cell,
+        startDirection: facing,
+        endDirection: facing,
+        originFootprintRadiusFine: FINE_HALF_EXTENT,
+        reachFine: HORROR_PLAYER_ATTACK_REACH_FINE,
+        halfWidthDegrees: 35,
+        innerReachFine: FINE_HALF_EXTENT + 0.25,
+        targets,
+        isBlocked: (cell) => !baseWalkableCells.has(pathCellKey(cell[0], cell[1])),
+      });
+      let hits = 0;
+      const targetById = new Map(targets.map((target) => [target.id, target]));
+      for (const hit of sweep.hits) {
+        const target = targetById.get(hit.targetId);
+        if (!target) continue;
+        const latest = usePlayStore.getState().saveData;
+        if (!latest) return;
+        const latestState = latest.entity_states?.[target.id] || {};
+        if (latestState.dead || latestState.hidden) continue;
+        const damage = Math.max(
+          1,
+          Math.round((latest.playerStats.attack || 1) * 0.8 + 2) -
+            Math.round((target.definition.defense || 0) * 0.65),
+        );
+        applyHorrorDamageToEnemy(
+          target.id,
+          target.definition,
+          target.cell,
+          damage,
+        );
+        hits += 1;
+      }
+      if (hits === 0) addLog("The swing cuts empty air.");
+    },
+    [addLog, applyHorrorDamageToEnemy, baseWalkableCells],
+  );
+
+  const resolveHorrorEnemyTelegraphCells = useCallback(
+    (
+      actorKey: string,
+      definition: GamePackage["entities"][number],
+      origin: [number, number],
+      facing: [number, number],
+      save: PlaySave,
+      includeLunge: boolean,
+    ): Array<[number, number]> => {
+      const map = activeMapRef.current;
+      if (!map) return [];
+      let projectedCell: [number, number] = [origin[0], origin[1]];
+      const targetCells = new Map<string, [number, number]>();
+      const addCell = (cell: readonly [number, number]) => {
+        targetCells.set(pathCellKey(cell[0], cell[1]), [cell[0], cell[1]]);
+      };
+      const lungeFineCells = includeLunge
+        ? Math.max(
+            0,
+            Math.min(3, definition.horror_combat?.lunge_fine_cells ?? 2),
+          )
+        : 0;
+
+      for (let step = 0; step < lungeFineCells; step += 1) {
+        const candidate: [number, number] = [
+          projectedCell[0] + facing[0],
+          projectedCell[1] + facing[1],
+        ];
+        if (!footprintWalkableCells.has(pathCellKey(candidate[0], candidate[1]))) {
+          break;
+        }
+        if (footprintsOverlap(candidate, save.player.cell)) break;
+        const occupied = map.entity_placements.some((other, otherIndex) => {
+          const otherKey = entityPlacementStateKey(map.id, other, otherIndex);
+          if (otherKey === actorKey) return false;
+          const otherState = save.entity_states?.[otherKey] || {};
+          if (otherState.dead || otherState.hidden) return false;
+          return footprintsOverlap(
+            candidate,
+            (otherState.cell || other.cell) as [number, number],
+          );
+        });
+        if (occupied) break;
+        projectedCell = candidate;
+        addCell(projectedCell);
+      }
+
+      const sweep = resolveHorrorSweptMelee({
+        origin: projectedCell,
+        startDirection: facing,
+        endDirection: facing,
+        originFootprintRadiusFine: FINE_HALF_EXTENT,
+        reachFine: definition.horror_combat?.reach_fine_cells ?? 2,
+        halfWidthDegrees: 35,
+        innerReachFine: FINE_HALF_EXTENT + 0.25,
+        targets: [],
+        isBlocked: (sample) =>
+          !baseWalkableCells.has(pathCellKey(sample[0], sample[1])),
+      });
+      sweep.sweptCells.forEach(addCell);
+      return [...targetCells.values()];
+    },
+    [baseWalkableCells, footprintWalkableCells],
+  );
+
+  const resolveHorrorEnemyLungeAndStrike = useCallback(
+    (
+      actorKey: string,
+      definition: GamePackage["entities"][number],
+      facing: [number, number],
+    ) => {
+      const store = usePlayStore.getState();
+      const map = activeMapRef.current;
+      let save = store.saveData;
+      if (!save || !map) return;
+      const placementIndex = map.entity_placements.findIndex(
+        (placement, index) =>
+          entityPlacementStateKey(map.id, placement, index) === actorKey,
+      );
+      if (placementIndex < 0) return;
+      const placement = map.entity_placements[placementIndex]!;
+      const state = save.entity_states?.[actorKey] || {};
+      let cell = (state.cell || placement.cell) as [number, number];
+      const lungeFineCells = Math.max(
+        0,
+        Math.min(3, definition.horror_combat?.lunge_fine_cells ?? 2),
+      );
+
+      for (let step = 0; step < lungeFineCells; step += 1) {
+        const candidate: [number, number] = [
+          cell[0] + facing[0],
+          cell[1] + facing[1],
+        ];
+        if (!footprintWalkableCells.has(pathCellKey(candidate[0], candidate[1]))) {
+          break;
+        }
+        if (footprintsOverlap(candidate, save.player.cell)) break;
+        const occupied = map.entity_placements.some((other, otherIndex) => {
+          const otherKey = entityPlacementStateKey(map.id, other, otherIndex);
+          if (otherKey === actorKey) return false;
+          const otherState = save!.entity_states?.[otherKey] || {};
+          if (otherState.dead || otherState.hidden) return false;
+          return footprintsOverlap(
+            candidate,
+            (otherState.cell || other.cell) as [number, number],
+          );
+        });
+        if (occupied) break;
+        cell = candidate;
+      }
+
+      if (
+        cell[0] !== (state.cell?.[0] ?? placement.cell[0]) ||
+        cell[1] !== (state.cell?.[1] ?? placement.cell[1]) ||
+        state.facing?.[0] !== facing[0] ||
+        state.facing?.[1] !== facing[1]
+      ) {
+        save = {
+          ...save,
+          entity_states: {
+            ...(save.entity_states || {}),
+            [actorKey]: {
+              ...state,
+              cell,
+              facing,
+            },
+          },
+        };
+        store.commitRuntimeSave(save);
+      }
+
+      const runtime = horrorRuntimeRef.current;
+      const reach = definition.horror_combat?.reach_fine_cells ?? 2;
+      const sweep = resolveHorrorSweptMelee({
+        origin: cell,
+        startDirection: facing,
+        endDirection: facing,
+        originFootprintRadiusFine: FINE_HALF_EXTENT,
+        reachFine: reach,
+        halfWidthDegrees: 35,
+        targets: [{ id: "player", cell: save.player.cell }],
+        isBlocked: (sample) =>
+          !baseWalkableCells.has(pathCellKey(sample[0], sample[1])),
+      });
+      if (
+        performance.now() >= runtime.contactGraceUntil &&
+        sweep.hits.some((hit) => hit.targetId === "player")
+      ) {
+        const damage = Math.max(
+          1,
+          Math.round((definition.attack || 1) * 0.8) -
+            Math.round((save.playerStats.defense || 0) * 0.35),
+        );
+        applyHorrorDamageToPlayer(
+          definition.display_name,
+          damage,
+          save.player.cell,
+        );
+      } else {
+        addLog(`${definition.display_name} lunges past Steve.`);
+        playSfx("bump", { volume: 0.18, cooldownMs: 140 });
+      }
+    },
+    [
+      addLog,
+      applyHorrorDamageToPlayer,
+      baseWalkableCells,
+      footprintWalkableCells,
+      playSfx,
+    ],
+  );
+
+  useEffect(() => {
+    if (!thirdPersonAuthored || !activeMap) return;
+    let lastTickAt = performance.now();
+
+    const advanceContinuousEntities = () => {
+      const now = performance.now();
+      const elapsedMs = Math.min(120, Math.max(0, now - lastTickAt));
+      lastTickAt = now;
+      if (document.visibilityState === "hidden") return;
+
+      const map = activeMapRef.current;
+      const store = usePlayStore.getState();
+      const save = store.saveData;
+      if (!map || !save || save.current_map_id !== map.id) return;
+      const gp = getRuntimeGamePackage();
+      const entityById = new Map(
+        gp.entities.map((entity) => [entity.id, entity]),
+      );
+      let entityStates = save.entity_states || {};
+      let changed = false;
+
+      for (let index = 0; index < map.entity_placements.length; index += 1) {
+        const placement = map.entity_placements[index]!;
+        const actorKey = entityPlacementStateKey(map.id, placement, index);
+        const definition = entityById.get(placement.entity_id);
+        const state = entityStates[actorKey] || {};
+        if (
+          state.dead ||
+          state.hidden ||
+          (state.hp ?? definition?.max_hp ?? 1) <= 0
+        ) {
+          continue;
+        }
+        const anchor = (state.cell || placement.cell) as [number, number];
+        const position = resolveFreeActorStart(anchor, state.fine_position);
+        const movement = definition?.independent_movement;
+        const configuredSteps = Math.max(
+          1,
+          Math.min(3, Math.floor(movement?.steps_per_pulse ?? 1)),
+        );
+        const cellsPerSecond = movement?.enabled
+          ? (configuredSteps * 1000) /
+            Math.max(60, movement.interval_ms ?? 650)
+          : Math.max(2, Number(definition?.speed || 6));
+        const nextPosition = advanceFreeActorToward({
+          position,
+          target: anchor,
+          maximumDistance: cellsPerSecond * (elapsedMs / 1000),
+          isBlockedCell: (x, z) =>
+            !baseWalkableCells.has(pathCellKey(x, z)),
+        });
+        const savedPosition = state.fine_position;
+        const positionChanged =
+          !Array.isArray(savedPosition) ||
+          !Number.isFinite(savedPosition[0]) ||
+          !Number.isFinite(savedPosition[1]) ||
+          Math.hypot(
+            nextPosition[0] - Number(savedPosition[0]),
+            nextPosition[1] - Number(savedPosition[1]),
+          ) > 0.0001;
+        if (!positionChanged) continue;
+        if (!changed) {
+          entityStates = { ...entityStates };
+          changed = true;
+        }
+        entityStates[actorKey] = {
+          ...state,
+          fine_position: nextPosition,
+        };
+      }
+
+      if (changed) {
+        store.commitRuntimeSave({
+          ...save,
+          entity_states: entityStates,
+        });
+      }
+    };
+
+    const scheduler = window.setInterval(
+      advanceContinuousEntities,
+      HORROR_CONTROLLER_STEP_MS,
+    );
+    advanceContinuousEntities();
+    return () => window.clearInterval(scheduler);
+  }, [activeMap, baseWalkableCells, thirdPersonAuthored]);
+
+  useEffect(() => {
+    if (!horrorRealtimeMode) {
+      horrorRuntimeRef.current = createHorrorRealtimeRuntime();
+      setHorrorRealtimeUi({
+        stamina: HORROR_PLAYER_MAX_STAMINA,
+        threatActive: false,
+        actions: {},
+      });
+      return;
+    }
+
+    const tick = () => {
+      const now = performance.now();
+      const map = activeMapRef.current;
+      const store = usePlayStore.getState();
+      let save = store.saveData;
+      const runtime = horrorRuntimeRef.current;
+      if (!map || !save) {
+        // Replacing or resetting a run must discard transient windups and
+        // pursuit timers. They are intentionally not persisted in Phase 1.
+        if (
+          runtime.mapId !== null ||
+          runtime.playerAction ||
+          runtime.playerFeedbackAction ||
+          runtime.enemies.size > 0
+        ) {
+          horrorRuntimeRef.current = createHorrorRealtimeRuntime();
+          setHorrorRealtimeUi({
+            stamina: HORROR_PLAYER_MAX_STAMINA,
+            threatActive: false,
+            actions: {},
+          });
+        }
+        return;
+      }
+      if (save.playerStats.hp <= 0) {
+        runtime.lastTickAt = now;
+        return;
+      }
+      if (runtime.mapId !== map.id) {
+        const freshRuntime = createHorrorRealtimeRuntime();
+        freshRuntime.mapId = map.id;
+        freshRuntime.lastTickAt = now;
+        horrorRuntimeRef.current = freshRuntime;
+        publishHorrorRealtimeUi(now);
+        return;
+      }
+      const controllerPaused =
+        horrorControllerPausedRef.current ||
+        document.visibilityState === "hidden";
+      if (controllerPaused) {
+        if (runtime.pausedAt === null) runtime.pausedAt = now;
+        runtime.lastTickAt = now;
+        return;
+      }
+      if (runtime.pausedAt !== null) {
+        const pausedFor = Math.max(0, now - runtime.pausedAt);
+        const shiftAction = (action: HorrorRealtimeAction | null) => {
+          if (action) action.phaseStartedAt += pausedFor;
+        };
+        shiftAction(runtime.playerAction);
+        shiftAction(runtime.playerFeedbackAction);
+        runtime.enemies.forEach((enemy) => {
+          shiftAction(enemy.action);
+          shiftAction(enemy.feedbackAction);
+          enemy.nextPursuitAt += pausedFor;
+        });
+        if (runtime.regenBlockedUntil > runtime.pausedAt) {
+          runtime.regenBlockedUntil += pausedFor;
+        }
+        if (runtime.evadeReadyAt > runtime.pausedAt) {
+          runtime.evadeReadyAt += pausedFor;
+        }
+        if (runtime.contactGraceUntil > runtime.pausedAt) {
+          runtime.contactGraceUntil += pausedFor;
+        }
+        runtime.pausedAt = null;
+        runtime.lastTickAt = now;
+        publishHorrorRealtimeUi(now);
+      }
+
+      const elapsedMs = runtime.lastTickAt
+        ? Math.min(120, Math.max(0, now - runtime.lastTickAt))
+        : HORROR_CONTROLLER_STEP_MS;
+      runtime.lastTickAt = now;
+      let presentationChanged = false;
+      if (
+        runtime.playerFeedbackAction &&
+        now - runtime.playerFeedbackAction.phaseStartedAt >=
+          runtime.playerFeedbackAction.phaseDurationMs
+      ) {
+        runtime.playerFeedbackAction = null;
+        presentationChanged = true;
+      }
+      if (
+        now >= runtime.regenBlockedUntil &&
+        runtime.stamina < HORROR_PLAYER_MAX_STAMINA
+      ) {
+        runtime.stamina = Math.min(
+          HORROR_PLAYER_MAX_STAMINA,
+          runtime.stamina +
+            HORROR_PLAYER_STAMINA_REGEN_PER_SECOND * (elapsedMs / 1000),
+        );
+      }
+
+      const playerAction = runtime.playerAction;
+      if (
+        playerAction &&
+        now - playerAction.phaseStartedAt >= playerAction.phaseDurationMs
+      ) {
+        if (playerAction.phase === "windup") {
+          playerAction.phase = "active";
+          playerAction.phaseStartedAt = now;
+          playerAction.phaseDurationMs = HORROR_PLAYER_ATTACK_ACTIVE_MS;
+          if (playerAction.kind === "attack" && !playerAction.hitResolved) {
+            playerAction.hitResolved = true;
+            resolveHorrorPlayerSwing(playerAction.facing);
+          }
+        } else if (playerAction.phase === "active") {
+          playerAction.phase = "recovery";
+          playerAction.phaseStartedAt = now;
+          playerAction.phaseDurationMs =
+            playerAction.kind === "evade"
+              ? HORROR_PLAYER_EVADE_RECOVERY_MS
+              : HORROR_PLAYER_ATTACK_RECOVERY_MS;
+        } else if (playerAction.phase === "recovery") {
+          runtime.playerAction = null;
+        }
+        presentationChanged = true;
+      }
+
+      save = usePlayStore.getState().saveData;
+      if (!save) return;
+      const gp = getRuntimeGamePackage();
+      const entityById = new Map(
+        gp.entities.map((entity) => [entity.id, entity]),
+      );
+      const party = new Set(save.party_members || []);
+      const livingKeys = new Set<string>();
+      const dueByStride = new Map<number, string[]>();
+      let threatActive = false;
+
+      for (let index = 0; index < map.entity_placements.length; index += 1) {
+        const placement = map.entity_placements[index]!;
+        if (party.has(placement.entity_id)) continue;
+        const definition = entityById.get(placement.entity_id);
+        if (
+          !definition ||
+          definition.is_npc
+        ) {
+          continue;
+        }
+        const profile = definition.horror_combat || {};
+        const movement = definition.independent_movement;
+        const actorKey = entityPlacementStateKey(map.id, placement, index);
+        const state = save.entity_states?.[actorKey] || {};
+        if (state.dead || state.hidden || (state.hp ?? definition.max_hp) <= 0) {
+          runtime.enemies.delete(actorKey);
+          continue;
+        }
+        livingKeys.add(actorKey);
+        const anchorCell = (state.cell || placement.cell) as [number, number];
+        const cell = resolveFreeActorStart(anchorCell, state.fine_position);
+        const pursuit = resolveV1IndependentPursuitTarget(save, actorKey, map.id);
+        const pursuitCell = pursuit?.tracksLiveTarget
+          ? resolveFreePlayerStart(save.player.cell, save.player.fine_position)
+          : pursuit?.cell;
+        const distance = pursuit
+          ? Math.max(
+              Math.abs(cell[0] - pursuitCell![0]),
+              Math.abs(cell[1] - pursuitCell![1]),
+            )
+          : Number.POSITIVE_INFINITY;
+        const pursuitHasStructuralLine = Boolean(
+          pursuit &&
+            hasHorrorStructuralLine(
+              anchorCell,
+              pursuit.cell,
+              (sample) =>
+                !baseWalkableCells.has(pathCellKey(sample[0], sample[1])),
+            ),
+        );
+        const activationRadius = scaleMacroDistanceToFine(
+          movement?.activation_radius ?? 18,
+        );
+        if (pursuit && distance <= activationRadius) threatActive = true;
+
+        let enemy = runtime.enemies.get(actorKey);
+        if (!enemy) {
+          enemy = {
+            action: null,
+            feedbackAction: null,
+            nextPursuitAt:
+              now + (movement?.interval_ms ?? 650),
+            trackedFacing: (state.facing || placement.facing || [0, 1]) as [
+              number,
+              number,
+            ],
+            directionLocked: false,
+          };
+          runtime.enemies.set(actorKey, enemy);
+        }
+
+        if (
+          enemy.feedbackAction &&
+          now - enemy.feedbackAction.phaseStartedAt >=
+            enemy.feedbackAction.phaseDurationMs
+        ) {
+          enemy.feedbackAction = null;
+          presentationChanged = true;
+        }
+
+        if (enemy.action) {
+          const actionElapsed = now - enemy.action.phaseStartedAt;
+          if (enemy.action.phase === "windup") {
+            const lockAt = Math.max(
+              0,
+              Math.min(1, profile.direction_lock_fraction ?? 0.6),
+            );
+            // Before direction lock the attack remains conditional on a
+            // structurally clear tracked route. Losing it cancels cleanly;
+            // after lock the Parasite commits and is allowed to whiff.
+            if (!enemy.directionLocked && !pursuitHasStructuralLine) {
+              enemy.action = null;
+              enemy.directionLocked = false;
+              enemy.nextPursuitAt = now + (movement?.interval_ms ?? 650);
+              presentationChanged = true;
+              continue;
+            }
+            if (
+              pursuit &&
+              !enemy.directionLocked &&
+              actionElapsed < enemy.action.phaseDurationMs * lockAt
+            ) {
+              const tracked = horrorAttackDirectionToward(cell, pursuit.cell);
+              const nextFacing: [number, number] = [tracked[0], tracked[1]];
+              if (
+                nextFacing[0] !== enemy.trackedFacing[0] ||
+                nextFacing[1] !== enemy.trackedFacing[1]
+              ) {
+                enemy.trackedFacing = nextFacing;
+                enemy.action.facing = enemy.trackedFacing;
+                enemy.action.telegraphTargetCells =
+                  resolveHorrorEnemyTelegraphCells(
+                    actorKey,
+                    definition,
+                    cell,
+                    enemy.trackedFacing,
+                    save,
+                    true,
+                  );
+                presentationChanged = true;
+              }
+            } else {
+              enemy.directionLocked = true;
+            }
+          }
+          if (actionElapsed >= enemy.action.phaseDurationMs) {
+            if (enemy.action.phase === "windup") {
+              enemy.directionLocked = true;
+              enemy.action.phase = "active";
+              enemy.action.phaseStartedAt = now;
+              enemy.action.phaseDurationMs = profile.active_ms ?? 120;
+              if (!enemy.action.hitResolved) {
+                enemy.action.hitResolved = true;
+                resolveHorrorEnemyLungeAndStrike(
+                  actorKey,
+                  definition,
+                  enemy.trackedFacing,
+                );
+                save = usePlayStore.getState().saveData || save;
+                const latestState = save.entity_states?.[actorKey] || {};
+                const activeCell = (latestState.cell || placement.cell) as [
+                  number,
+                  number,
+                ];
+                enemy.action.reachFineCells = profile.reach_fine_cells ?? 2;
+                enemy.action.telegraphTargetCells =
+                  resolveHorrorEnemyTelegraphCells(
+                    actorKey,
+                    definition,
+                    activeCell,
+                    enemy.trackedFacing,
+                    save,
+                    false,
+                  );
+              }
+            } else if (enemy.action.phase === "active") {
+              enemy.action.phase = "recovery";
+              enemy.action.phaseStartedAt = now;
+              enemy.action.phaseDurationMs = profile.recovery_ms ?? 900;
+            } else if (enemy.action.phase === "recovery") {
+              enemy.action = null;
+              enemy.directionLocked = false;
+              enemy.nextPursuitAt =
+                now + (movement?.interval_ms ?? 650);
+            }
+            presentationChanged = true;
+          }
+          continue;
+        }
+
+        const attackDistance =
+          FINE_HALF_EXTENT +
+          (profile.reach_fine_cells ?? 2) +
+          (profile.lunge_fine_cells ?? 2);
+        if (
+          pursuit &&
+          pursuitHasStructuralLine &&
+          distance <= attackDistance
+        ) {
+          const resolvedFacing = horrorAttackDirectionToward(cell, pursuit.cell);
+          const facing: [number, number] = [
+            resolvedFacing[0],
+            resolvedFacing[1],
+          ];
+          runtime.sequence += 1;
+          enemy.trackedFacing = facing;
+          enemy.directionLocked = false;
+          enemy.action = {
+            kind: "enemy_attack",
+            phase: "windup",
+            phaseStartedAt: now,
+            phaseDurationMs: profile.windup_ms ?? 550,
+            sequence: runtime.sequence,
+            facing,
+            reachFineCells:
+              (profile.reach_fine_cells ?? 2) +
+              (profile.lunge_fine_cells ?? 2),
+            telegraphTargetCells: resolveHorrorEnemyTelegraphCells(
+              actorKey,
+              definition,
+              cell,
+              facing,
+              save,
+              true,
+            ),
+            hitResolved: false,
+          };
+          presentationChanged = true;
+          playSfx("warning", {
+            volume: 0.2,
+            playbackRate: 0.78,
+            cooldownMs: 160,
+          });
+          continue;
+        }
+
+        if (
+          movement?.enabled &&
+          pursuit &&
+          distance <= activationRadius &&
+          now >= enemy.nextPursuitAt
+        ) {
+          const configuredSteps = Math.max(
+            1,
+            Math.min(
+              3,
+              Math.floor(
+                movement.steps_per_pulse ?? 1,
+              ),
+            ),
+          );
+          // Advance one navigation anchor at a time so the continuous pose can
+          // travel through the full segment instead of skipping between cells.
+          dueByStride.set(1, [
+            ...(dueByStride.get(1) || []),
+            actorKey,
+          ]);
+          enemy.nextPursuitAt =
+            now + (movement.interval_ms ?? 650) / configuredSteps;
+        }
+      }
+
+      runtime.enemies.forEach((_, actorKey) => {
+        if (!livingKeys.has(actorKey)) {
+          runtime.enemies.delete(actorKey);
+          presentationChanged = true;
+        }
+      });
+      const stealthEscapeCompleted =
+        runtime.threatActive &&
+        !threatActive &&
+        livingKeys.size > 0 &&
+        isPlayerStealthActive(save);
+      if (stealthEscapeCompleted) {
+        save = {
+          ...save,
+          flags: {
+            ...(save.flags || {}),
+            immersive_stealth_feedback: {
+              tick: save.clock_minutes || 0,
+              highest_alertness: "oblivious",
+              visible_to_count: 0,
+              alerted_count: 0,
+              strongest_score: 0,
+            },
+          },
+        };
+        store.commitRuntimeSave(save);
+        useFxStore
+          .getState()
+          .addPopup(save.player.cell, "Trail lost", "#c4b5fd", 1.45);
+        addLog("The pursuer loses Steve's trail.");
+        playSfx("ui_back", {
+          volume: 0.2,
+          playbackRate: 0.82,
+          cooldownMs: 240,
+        });
+      }
+      if (runtime.threatActive !== threatActive) presentationChanged = true;
+      runtime.threatActive = threatActive;
+
+      if (dueByStride.size > 0) {
+        let workingSave = usePlayStore.getState().saveData || save;
+        const events: ReturnType<typeof dispatchV1EnemyPulse>["events"] = [];
+        let moved = false;
+        for (const [steps, actorIds] of [...dueByStride.entries()].sort(
+          ([left], [right]) => left - right,
+        )) {
+          const pulse = dispatchV1EnemyPulse({
+            gamePackage: gp,
+            save: workingSave,
+            mapId: map.id,
+            actorIds,
+            movementSteps: steps,
+            allowAttack: false,
+            independentMovement: true,
+          });
+          if (!pulse.ok) continue;
+          workingSave = pulse.save;
+          events.push(...pulse.events);
+          moved =
+            moved ||
+            pulse.events.some(
+              (event) =>
+                event.type === "enemy_turn_resolved" &&
+                (event.payload as unknown as EnemyTurnOutcome).kind === "move",
+            );
+        }
+        if (workingSave !== save) store.commitRuntimeSave(workingSave);
+        if (events.length > 0) store.pushEngineEvents(events);
+        if (moved) {
+          playSfx("footstep_stone", {
+            volume: 0.15,
+            playbackRate: 0.8,
+            cooldownMs: 110,
+          });
+        }
+      }
+
+      if (presentationChanged || now >= runtime.uiDueAt) {
+        runtime.uiDueAt = now + 80;
+        publishHorrorRealtimeUi(now);
+      }
+    };
+
+    const scheduler = window.setInterval(tick, HORROR_CONTROLLER_STEP_MS);
+    tick();
+    return () => {
+      window.clearInterval(scheduler);
+      horrorRuntimeRef.current.lastTickAt = 0;
+    };
+  }, [
+    addLog,
+    baseWalkableCells,
+    horrorRealtimeMode,
+    playSfx,
+    publishHorrorRealtimeUi,
+    resolveHorrorEnemyTelegraphCells,
+    resolveHorrorEnemyLungeAndStrike,
+    resolveHorrorPlayerSwing,
+  ]);
 
   useEffect(() => {
     handleFirstPersonTickRef.current = handleFirstPersonTick;
@@ -8195,6 +10073,10 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   useEffect(() => {
     handleThirdPersonTickRef.current = handleThirdPersonTick;
   }, [handleThirdPersonTick]);
+
+  useEffect(() => {
+    handleBackroomsFreeMoveRef.current = handleBackroomsFreeMove;
+  }, [handleBackroomsFreeMove]);
 
   const confirmThirdPersonGridTarget = useCallback(() => {
     const selectedCell = hoveredCellRef.current;
@@ -9105,13 +10987,18 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     currentSave: PlaySave,
   ): {
     cell: [number, number];
+    step: [number, number];
     placement?: ObjectPlacementData;
     name?: string;
   } => {
-    const cell = facedProbeCell(
-      currentSave.player.cell,
-      currentSave.player.facing,
-    );
+    const pose = resolveFreeInteractionPose({
+      cell: currentSave.player.cell,
+      position: currentSave.player.fine_position,
+      facing: currentSave.player.facing,
+      useContinuousPosition: freeThirdPersonMovement,
+      edgeReach: FINE_HALF_EXTENT + 1,
+    });
+    const cell = pose.probe;
     const placement = effectiveObjectPlacements.find((candidate) => {
       const definition = objectByIdForPlay.get(candidate.object_id);
       return (
@@ -9127,6 +11014,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     });
     return {
       cell,
+      step: pose.step,
       placement,
       name: placement
         ? objectByIdForPlay.get(placement.object_id)?.display_name || "object"
@@ -9148,11 +11036,21 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
 
   const placeCarriedObject = (mode: "place" | "stack") => {
     const currentSave = usePlayStore.getState().saveData;
-    if (!currentSave || !activeMap || currentSave.in_combat) return false;
+    if (
+      !currentSave ||
+      !activeMap ||
+      (currentSave.in_combat && !horrorRealtimeMode)
+    )
+      return false;
     const carried = getPlayerCarriedObject(currentSave, activeMap.id);
     if (!carried) return false;
-    const facing = currentSave.player.facing || [0, 1];
     const faced = facedManipulationTarget(currentSave);
+    const interactionOrigin = freeThirdPersonMovement
+      ? resolveFreePlayerStart(
+          currentSave.player.cell,
+          currentSave.player.fine_position,
+        )
+      : currentSave.player.cell;
 
     let cell: [number, number];
     let stackRootKey: string | undefined;
@@ -9179,10 +11077,10 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         base.stack_root_key || placementOriginKey(base);
       heightOffset = stackIndex * 0.72;
     } else {
-      cell = [
-        currentSave.player.cell[0] + facing[0] * FINE_PER_MACRO,
-        currentSave.player.cell[1] + facing[1] * FINE_PER_MACRO,
-      ];
+      cell = quantizeFreePlayerPosition([
+        interactionOrigin[0] + faced.step[0] * FINE_PER_MACRO,
+        interactionOrigin[1] + faced.step[1] * FINE_PER_MACRO,
+      ]);
       const footprintOpen = actorFootprintCells(cell).every(([x, z]) => {
         const target = getActiveCell(x, z);
         if (!target?.walkable || getContainerAtCell(x, z)) return false;
@@ -9209,7 +11107,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       mapId: activeMap.id,
       placementKey: carried.key,
       cell,
-      facing: [facing[0], facing[1]],
+      facing: [faced.step[0], faced.step[1]],
       stackRootKey,
       stackIndex,
       heightOffset,
@@ -9218,7 +11116,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       ...nextSave,
       playerStats: {
         ...nextSave.playerStats,
-        energy: Math.max(0, (nextSave.playerStats.energy || 0) - 1000),
+        energy: Math.max(
+          0,
+          (nextSave.playerStats.energy || 0) -
+            (horrorRealtimeMode ? 0 : 1000),
+        ),
       },
     });
     const objectName =
@@ -9235,7 +11137,12 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
 
   const carryFacedObject = () => {
     const currentSave = usePlayStore.getState().saveData;
-    if (!currentSave || !activeMap || currentSave.in_combat) return false;
+    if (
+      !currentSave ||
+      !activeMap ||
+      (currentSave.in_combat && !horrorRealtimeMode)
+    )
+      return false;
     if (getPlayerCarriedObject(currentSave, activeMap.id)) {
       addLog("Your hands are already full.");
       playSfx("warning", { volume: 0.22, cooldownMs: 120 });
@@ -9250,7 +11157,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       y: faced.cell[1],
       dx: 0,
       dy: 0,
-      energyCost: 1000,
+      energyCost: horrorRealtimeMode ? 0 : 1000,
     });
     if (!result.ok) {
       addLog(
@@ -9270,16 +11177,20 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
 
   const pullFacedObject = () => {
     const currentSave = usePlayStore.getState().saveData;
-    if (!currentSave || !activeMap || currentSave.in_combat) return false;
+    if (
+      !currentSave ||
+      !activeMap ||
+      (currentSave.in_combat && !horrorRealtimeMode)
+    )
+      return false;
     const faced = facedManipulationTarget(currentSave);
     if (!faced.placement) return false;
-    const facing = currentSave.player.facing || [0, 1];
     const stepBack = dispatchV1MoveEntity({
       gamePackage: getRuntimeGamePackage(),
       save: currentSave,
-      dx: -facing[0],
-      dy: -facing[1],
-      facingOverride: [facing[0], facing[1]],
+      dx: -faced.step[0],
+      dy: -faced.step[1],
+      facingOverride: [faced.step[0], faced.step[1]],
       energyCost: 0,
     });
     if (!stepBack.ok) {
@@ -9292,9 +11203,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       save: stepBack.save,
       x: faced.cell[0],
       y: faced.cell[1],
-      dx: -facing[0],
-      dy: -facing[1],
-      energyCost: 1000,
+      dx: -faced.step[0],
+      dy: -faced.step[1],
+      energyCost: horrorRealtimeMode ? 0 : 1000,
     });
     if (!pulled.ok) {
       addLog(`The ${faced.name || "object"} will not pull free.`);
@@ -9319,12 +11230,20 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     if (presentStealthActionBlock("act")) return;
     
     const gp = getRuntimeGamePackage();
-    const inCombat = !!saveData.in_combat;
-    const actor = getControlledActor(saveData, gp);
+    const inCombat = !!saveData.in_combat && !horrorRealtimeMode;
+    const actor = getControlledActor(saveData, gp, horrorRealtimeMode);
     if (!actor) return; // an enemy is acting
-    if (!inCombat && (saveData.playerStats.energy || 0) < 1000) return;
+    const interactionEnergyCost = horrorRealtimeMode ? 0 : 1000;
+    if (!inCombat && (saveData.playerStats.energy || 0) < interactionEnergyCost)
+      return;
 
-    const actorCell = actor.cell;
+    const actorCell: [number, number] =
+      actor.isPlayer && freeThirdPersonMovement
+        ? resolveFreePlayerStart(
+            saveData.player.cell,
+            saveData.player.fine_position,
+          )
+        : actor.cell;
     const actorFacing = actor.facing;
 
     let turnConsumed = false;
@@ -9338,6 +11257,12 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       [actorCell[0], actorCell[1]],
       [actorFacing[0], actorFacing[1]],
     );
+    const interactionStep = resolveFreeInteractionPose({
+      cell: actorCell,
+      facing: actorFacing,
+      useContinuousPosition: false,
+      edgeReach: FINE_HALF_EXTENT + 1,
+    }).step;
 
     // In combat, Act is a strike: hit the faced hostile or whiff harmlessly.
     // The world's levers (triggers, chests, ground items) wait for peace.
@@ -9441,30 +11366,28 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       return;
     }
 
-    // Check for entity interaction first
-    const entityIndex = activeMap.entity_placements?.findIndex((e, idx) => {
-      if ((saveData.party_members || []).includes(e.entity_id)) return false;
-      const key = entityPlacementStateKey(activeMap.id, e, idx);
-      const est = (saveData.entity_states || {})[key];
-      const cx = est?.cell?.[0] ?? e.cell[0];
-      const cz = est?.cell?.[1] ?? e.cell[1];
-      return footprintIntersectsLeadingEdge(
-        [actorCell[0], actorCell[1]],
-        [actorFacing[0], actorFacing[1]],
-        [cx, cz],
-      ) && !est?.dead && !est?.hidden;
-    });
-
-    const entityPlacement =
-      entityIndex !== undefined && entityIndex >= 0
-        ? activeMap.entity_placements[entityIndex]
-        : undefined;
+    // Check for entity interaction first. The HUD uses this exact resolver so
+    // continuous yaw and seated/furniture-anchored NPCs cannot disagree with
+    // the command that follows.
+    const entityTarget = getDirectionalEntityInteractionTarget(
+      saveData,
+      activeMap,
+      gp,
+      actorCell,
+      actorFacing,
+    );
+    const entityIndex = entityTarget?.placementIndex;
+    const entityPlacement = entityTarget?.placement;
     if (entityPlacement) {
       const entityData = useEngineStore
         .getState()
         .gamePackage.entities.find((e) => e.id === entityPlacement.entity_id);
       if (entityData && !entityData.is_npc) {
-        // Act on a faced hostile = melee attack.
+        // Realtime combat owns hostile attacks exclusively. The dedicated
+        // Attack command supplies windup, stamina, recovery, wall clipping,
+        // and contact latching; Act must never bypass that state machine.
+        if (horrorRealtimeMode) return;
+        // Legacy pulse maps retain faced-hostile Act attacks.
         const entityKey = entityPlacementStateKey(activeMap.id, entityPlacement, entityIndex!);
         executeMeleeAttack(actor, entityKey, entityData);
         return;
@@ -9503,7 +11426,10 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       // "Nothing happened" branch below.
       if (turnConsumed) {
         usePlayStore.getState().updatePlayerStats({
-          energy: (usePlayStore.getState().saveData?.playerStats.energy || saveData.playerStats.energy || 0) - 1000,
+          energy:
+            (usePlayStore.getState().saveData?.playerStats.energy ||
+              saveData.playerStats.energy ||
+              0) - interactionEnergyCost,
         });
         return;
       }
@@ -9528,7 +11454,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           gamePackage: gp,
           save: saveData,
           containerId: container.id,
-          energyCost: 1000,
+          energyCost: interactionEnergyCost,
         });
         if (unlockResult.ok) {
           commitWithFacts(saveData, unlockResult);
@@ -9548,7 +11474,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         gamePackage: gp,
         save: saveData,
         containerId: container.id,
-        energyCost: 1000,
+        energyCost: interactionEnergyCost,
       });
       if (openResult.ok) {
         clearInputState();
@@ -9577,7 +11503,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         save: saveData,
         x: worldItem.cell[0],
         y: worldItem.cell[1],
-        energyCost: 1000,
+        energyCost: interactionEnergyCost,
       });
       if (pickup.ok) {
         let lifecycleSave = pickup.save;
@@ -9609,7 +11535,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           usePlayStore.getState().takeAuthoredWorldItem(activeMap.id, worldItem.id);
         }
         usePlayStore.getState().updatePlayerStats({
-          energy: (saveData.playerStats.energy || 0) - 1000,
+          energy: (saveData.playerStats.energy || 0) - interactionEnergyCost,
         });
         const fallbackSave = usePlayStore.getState().saveData;
         if (fallbackSave && !worldItem.dropped) {
@@ -9656,9 +11582,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         y: tz,
         // Push one fine cell in the facing direction (the probe is several
         // cells out, so its delta is not a unit step).
-        dx: actorFacing[0],
-        dy: actorFacing[1],
-        energyCost: 1000,
+        dx: interactionStep[0],
+        dy: interactionStep[1],
+        energyCost: interactionEnergyCost,
       });
       if (pushResult.ok) {
         commitWithFacts(saveData, pushResult);
@@ -9671,12 +11597,12 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       return;
     }
 
-    const placement = activeMap.custom_object_placements.find((p) => {
-      const objDef = useEngineStore
-        .getState()
-        .gamePackage.object_library.find((o) => o.id === p.object_id);
-      return placementOccupiesCell(p, objDef, tx, tz);
-    });
+    const placement = selectInteractionPlacementAtCell(
+      effectiveObjectPlacements,
+      objectByIdForPlay,
+      tx,
+      tz,
+    );
     const placementObject = placement
       ? gp.object_library.find((o) => o.id === placement.object_id)
       : undefined;
@@ -9695,11 +11621,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         save: saveData,
         x: placement.cell[0],
         y: placement.cell[1],
-        energyCost: 1000,
+        energyCost: interactionEnergyCost,
       });
-      if (doorResult.ok) {
-        commitWithFacts(saveData, doorResult);
-      } else {
+      if (!doorResult.ok) {
         playSfx("bump", { volume: 0.24, cooldownMs: 90 });
         addLog(
           doorResult.reason === "missing key"
@@ -9708,6 +11632,76 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         );
         return;
       }
+
+      // A closed door may itself be the authored map threshold. Opening such
+      // a door is the transition gesture; the player never has to walk into a
+      // now-invisible exit cell afterward.
+      const doorExitContext = buildConditionContext(doorResult.save);
+      const doorExit = activeMap.exits?.find(
+        (candidate) =>
+          sameMacroCoord(
+            [Number(candidate.cell[0] ?? 0), Number(candidate.cell[1] ?? 0)],
+            [Number(placement.cell[0] ?? 0), Number(placement.cell[1] ?? 0)],
+          ) &&
+          isMapExitEligible(candidate, doorExitContext),
+      );
+      if (doorExit) {
+        const exitFacing = doorExit.facing
+          ? ([
+              Number(doorExit.facing[0] ?? 0),
+              Number(doorExit.facing[1] ?? -1),
+            ] as [number, number])
+          : undefined;
+        const mapChange = dispatchV1ChangeMap({
+          gamePackage: gp,
+          save: doorResult.save,
+          targetMapId: doorExit.target_map_id,
+          targetSpawnId: doorExit.target_spawn_id,
+          facing: exitFacing,
+          exitId: doorExit.id,
+        });
+        if (!mapChange.ok) {
+          commitWithFacts(saveData, doorResult);
+          playSfx("warning", { volume: 0.24, cooldownMs: 120 });
+          addLog(`The way is sealed. (${mapChange.reason || "missing map"})`);
+          return;
+        }
+
+        const destinationMap = gp.maps.find(
+          (map) => map.id === mapChange.save.current_map_id,
+        );
+        clearInputState();
+        setHoveredCell(null);
+        setVerbTargeting(null);
+        setAttendedActor(null);
+        setActiveCutscene(null);
+        setCutsceneActionIndex(0);
+        setCameraFocusOverride(null);
+    setCinematicShot(null);
+        perceptionAdvanceKeyRef.current = "";
+        lastExplorationPerceptionRef.current = null;
+        setPerceptionSnapshotState(null);
+        stealthAlertStateRef.current.clear();
+        worldStateAdvanceKeyRef.current = "";
+        worldStateNoticeKeyRef.current = "";
+        chemistryStepRef.current = "";
+        alderamonticoGridStepRef.current = "";
+        alderamonticoGridNoticeRef.current = "";
+        if (destinationMap) {
+          setActiveMap(destinationMap);
+          activeMapRef.current = destinationMap;
+        }
+        commitRuntimeSave(mapChange.save);
+        usePlayStore
+          .getState()
+          .pushEngineEvents([...doorResult.events, ...mapChange.events]);
+        playerFootstepFineStepsRef.current = 0;
+        playSfx("door_transition", { volume: 0.42, cooldownMs: 140 });
+        addLog(`Entered map: ${mapChange.save.current_map_id}`);
+        return;
+      }
+
+      commitWithFacts(saveData, doorResult);
       if (dialogueCanStart(dialogue)) {
         clearInputState();
         usePlayStore
@@ -9781,7 +11775,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     turnConsumed = true;
     if (turnConsumed) {
       usePlayStore.getState().updatePlayerStats({
-        energy: (saveData.playerStats.energy || 0) - 1000,
+        energy: (saveData.playerStats.energy || 0) - interactionEnergyCost,
       });
     }
   };
@@ -10819,6 +12813,19 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
 
   const inCombat = !!saveData.in_combat;
   const playerStealthActive = isPlayerStealthActive(saveData);
+  // Staged seating. The switch is set by the arrival cutscene and persists, so
+  // Steve stays on the cushion for the conversation that follows. His
+  // authoritative cell never enters the sofa — only the rendered body moves.
+  const playerSeatedPose = saveData?.flags?.[HOUSE_ARRIVAL_SEATED_SWITCH]
+    ? {
+        offset: [...STEVE_SOFA_SEATED_RENDER_OFFSET] as [
+          number,
+          number,
+          number,
+        ],
+        facing: [...STEVE_SOFA_SEATED_LOCAL_FACING] as [number, number],
+      }
+    : null;
   const movementHearingSettings = resolveMovementHearingSettings(gamePackage);
   const intercessorCampaign = saveData.intercessor_campaign;
   const currentIntercessor = intercessorCampaign
@@ -10846,7 +12853,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   const activeFocusPos: [number, number] =
     commandingParty && controlledActor
       ? controlledActor.cell
-      : saveData.player.cell || [0, 0];
+      : playerPresentationPosition;
   const activeStats =
     commandingParty && controlledActor
       ? {
@@ -10861,7 +12868,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         }
       : saveData.playerStats;
 
-  const playerPos = saveData.player.cell || [0, 0];
+  const playerPos = playerPresentationPosition;
   const playerFacing = saveData.player.facing || [0, -1];
   const activeMapSpawn = activeMap.spawns[0];
   const saveMatchesRenderedMap = saveData.current_map_id === activeMap.id;
@@ -10938,7 +12945,14 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   const playerLevel = getSaveLevel(saveData);
   const shopConditionCtx = buildConditionContext(saveData);
   const questJournal = buildQuestJournal(saveData, gamePackage);
-  const contextualProbeCell = facedProbeCell(playerPos, playerFacing);
+  const contextualInteractionPose = resolveFreeInteractionPose({
+    cell: saveData.player.cell,
+    position: saveData.player.fine_position,
+    facing: playerFacing,
+    useContinuousPosition: freeThirdPersonMovement,
+    edgeReach: FINE_HALF_EXTENT + 1,
+  });
+  const contextualProbeCell = contextualInteractionPose.probe;
   const contextualManipulationTarget = facedManipulationTarget(saveData);
   const playerCarriedObject = getPlayerCarriedObject(saveData, activeMap.id);
   const contextualWorldItems = getEffectiveWorldItems(
@@ -10949,26 +12963,23 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     contextualWorldItems.find((item) =>
       sameMacroCoord(item.cell, contextualProbeCell),
     ) || selectPlayModePickupCandidate(contextualWorldItems, playerPos);
-  const contextualEntity = getLivingActorAtCell(
+  const contextualEntity = getDirectionalEntityInteractionTarget(
     saveData,
     activeMap,
     gamePackage,
-    contextualProbeCell[0],
-    contextualProbeCell[1],
+    contextualInteractionPose.origin,
+    contextualInteractionPose.facing,
   );
   const contextualContainer = getContainerAtCell(
     contextualProbeCell[0],
     contextualProbeCell[1],
   );
-  const contextualPlacement = effectiveObjectPlacements.find((placement) => {
-    const definition = objectByIdForPlay.get(placement.object_id);
-    return placementOccupiesCell(
-      placement,
-      definition,
-      contextualProbeCell[0],
-      contextualProbeCell[1],
-    );
-  });
+  const contextualPlacement = selectInteractionPlacementAtCell(
+    effectiveObjectPlacements,
+    objectByIdForPlay,
+    contextualProbeCell[0],
+    contextualProbeCell[1],
+  );
   const contextualTrigger = activeMap.triggers?.find(
     (trigger) =>
       trigger.type === "interact" &&
@@ -10987,7 +12998,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       : contextualEntity
         ? contextualEntity.isNpc
           ? `Talk to ${contextualEntity.name}`
-          : `Strike ${contextualEntity.name}`
+          : horrorRealtimeMode
+            ? null
+            : `Strike ${contextualEntity.name}`
         : contextualContainer
           ? `Open ${contextualContainer.display_name || "container"}`
           : contextualWorldItem
@@ -11001,6 +13014,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
               : contextualTrigger || reachableWorkstation
                 ? "Interact"
                 : null;
+  contextualActAvailableRef.current = Boolean(contextualActLabel);
   const contextualActionOptions: Array<{
     id: string;
     label: string;
@@ -11672,6 +13686,10 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       activeDialogueId ||
       activeContainerId,
   );
+  // Conversation alone gets the short caption bar; the browsing panels do not.
+  const dialogueOnlyPanel = Boolean(
+    activeDialogueId && !activeShopId && !activeDocumentId && !activeContainerId,
+  );
   const storyCameraActive = Boolean(
     activeCutscene ||
       cameraFocusOverride ||
@@ -11716,8 +13734,8 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     FINE_PER_MACRO,
   );
   const thirdPersonSubjectCell = getActiveCell(
-    thirdPersonSubjectLogical[0],
-    thirdPersonSubjectLogical[1],
+    Math.round(thirdPersonSubjectLogical[0]),
+    Math.round(thirdPersonSubjectLogical[1]),
   );
   const thirdPersonSubjectWorldY =
     (thirdPersonSubjectCell?.y || 0) +
@@ -11729,6 +13747,44 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   const visualCameraFocus = cameraFocusLogical
     ? logicalCellToWorld(cameraFocusLogical, "fine", FINE_PER_MACRO)
     : null;
+  // Cutscene cells arrive fine-expanded, so convert the shot the same way the
+  // focus point is converted before handing it to the rig. Plain computation,
+  // not a hook: this sits below early returns in the render body.
+  // While Steve is staged on the couch the shot has to hold: the shoulder rig
+  // would swing back behind a seated body that is inside the sofa's collider
+  // and frame the inside of the furniture. Releasing the camera is the
+  // cutscene's job, and it does that by clearing the seated switch.
+  const heldSeatedShot =
+    !cinematicShot && playerSeatedPose
+      ? {
+          cell: fineCenterOfMacro(STEVE_SOFA_SEATED_SHOT_CELL) as unknown as [
+            number,
+            number,
+          ],
+          facing: [...STEVE_SOFA_SEATED_SHOT_FACING] as [number, number],
+          // Continuation of the shot the cutscene already established.
+          cut: true,
+        }
+      : null;
+  const effectiveCinematicShot = cinematicShot || heldSeatedShot;
+  const cinematicShotWorld =
+    effectiveCinematicShot && saveMatchesRenderedMap
+      ? logicalCellToWorld(effectiveCinematicShot.cell, "fine", FINE_PER_MACRO)
+      : null;
+  const visualCinematicShot =
+    effectiveCinematicShot && cinematicShotWorld
+      ? {
+          target: [cinematicShotWorld[0], cinematicShotWorld[1]] as [
+            number,
+            number,
+          ],
+          facing: [
+            effectiveCinematicShot.facing[0],
+            effectiveCinematicShot.facing[1],
+          ] as [number, number],
+          cut: effectiveCinematicShot.cut,
+        }
+      : null;
   const initialCameraPosition = thirdPersonActive
     ? getInitialThirdPersonCameraPosition(
         visualThirdPersonSubject,
@@ -11753,9 +13809,20 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       data-active-dialogue={activeDialogueId || ""}
       data-active-map={activeMap.id}
       data-player-cell={`${saveData.player.cell?.[0] ?? 0},${saveData.player.cell?.[1] ?? 0}`}
-      data-player-facing={`${saveData.player.facing?.[0] ?? 0},${saveData.player.facing?.[1] ?? -1}`}
+      data-player-position={`${renderedPlayerPos[0]},${renderedPlayerPos[1]}`}
+      data-player-facing={`${renderedPlayerFacing[0]},${renderedPlayerFacing[1]}`}
       data-player-name="Steve"
+      data-player-seated={String(Boolean(playerSeatedPose))}
+      data-cinematic-shot={
+        visualCinematicShot
+          ? `${visualCinematicShot.target[0]},${visualCinematicShot.target[1]}@${visualCinematicShot.facing[0]},${visualCinematicShot.facing[1]}`
+          : ""
+      }
       data-view-mode={rendererViewPresentation}
+      data-continuous-movement={String(freeThirdPersonMovement)}
+      data-combat-mode={horrorRealtimeMode ? "horror_realtime" : "pulse"}
+      data-horror-stamina={Math.round(horrorRealtimeUi.stamina)}
+      data-horror-threat={String(horrorRealtimeUi.threatActive)}
       data-player-energy={String(saveData.playerStats.energy || 0)}
       data-stealth-active={String(playerStealthActive)}
       data-player-stance={playerStealthActive ? "stealth" : "normal"}
@@ -11841,7 +13908,12 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             })}
             intervalMs={playFrameIntervalMs}
           />
-          {thirdPersonActive ? (
+          {/* A scripted shot owns the camera outright: the player-following
+              rigs all derive yaw from the player's facing, so they cannot hold
+              a fixed angle on a scene. */}
+          {visualCinematicShot ? (
+            <CinematicCameraRig shot={visualCinematicShot} />
+          ) : thirdPersonActive ? (
             <ThirdPersonCameraRig
               subjectPos={visualThirdPersonSubject}
               subjectFacing={thirdPersonSubjectFacing}
@@ -11903,12 +13975,20 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           <BlackStarLightRig
             playerPos={visualPlayerPos}
             palette={
-              backroomsLevelZeroActive ? "backrooms" : "black_star"
+              backroomsLevelZeroActive
+                ? "backrooms"
+                : activeMap.environment === "exterior"
+                  ? "exterior"
+                  : activeMap.environment === "interior"
+                    ? "interior"
+                    : "black_star"
             }
             ambientLight={
               backroomsLevelZeroActive
                 ? BACKROOMS_LEVEL_ZERO_PLAY_AMBIENT_LIGHT
-                : activeMap.ambient_light ?? 0.08
+                : activeMap.presentation_ambient_light ??
+                  activeMap.ambient_light ??
+                  0.08
             }
             shadowsEnabled={
               !thirdPersonActive &&
@@ -11919,7 +13999,13 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           />
           <AdaptiveQualityProbe
             dpr={effectivePlayDpr}
-            minDpr={visualPreset === "performance" ? 0.75 : Math.min(1.05, visualDprCap)}
+            minDpr={
+              visualPreset === "performance"
+                ? 0.75
+                : performanceFoliageActive && largePlayMap
+                  ? Math.min(0.85, visualDprCap)
+                  : Math.min(1.05, visualDprCap)
+            }
             maxDpr={visualDprCap}
             setDpr={setPlayDpr}
             frameBudgetMs={
@@ -11932,6 +14018,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             fineRatio={FINE_PER_MACRO}
             playerPos={renderedPlayerPos}
             playerFacing={renderedPlayerFacing}
+            playerSeatedPose={playerSeatedPose}
+            continuousPlayerMovement={freeThirdPersonMovement}
+            playerStealthActive={playerStealthActive}
             playerSpriteId={saveData.player?.sprite_id}
             worldItems={worldItemsRender}
             extraPlacements={extraRenderPlacements}
@@ -11960,6 +14049,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             rangeCells={verbTargeting ? verbTargetCells : targetingRangeCells}
             hoveredCell={hoveredCell}
             entityStates={rendererEntityStates}
+            actorActionPresentations={rendererActorActionPresentations}
             actorPhysicalStates={saveData.actor_physical_states}
             partyFollowers={partyFollowers}
             partyMemberIds={partyMemberIds}
@@ -11984,6 +14074,12 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             architectureRadius={playArchitectureRadius}
             renderForward={
               thirdPersonActive ? thirdPersonStreamDirection : undefined
+            }
+            detailForwardDistance={
+              thirdPersonActive ? exteriorForwardDrawDistance : undefined
+            }
+            architectureForwardDistance={
+              thirdPersonActive ? exteriorForwardDrawDistance : undefined
             }
             fogOfWar={fogOfWar}
             fogResolution={(gamePackage.settings?.fog_los_resolution as "macro" | "fine" | undefined) ?? "macro"}
@@ -12016,12 +14112,16 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             viewPresentation={rendererViewPresentation}
             playerVisualYawRef={
               thirdPersonActive &&
-              thirdPersonCameraSubjectSnapshot.key === "player"
+              thirdPersonCameraSubjectSnapshot.key === "player" &&
+              !freeThirdPersonMovement
                 ? thirdPersonVisualYawRef
                 : undefined
             }
           />
-          <ScreenFX inCombat={inCombat} mapId={activeMap.id} />
+          <ScreenFX
+            inCombat={inCombat || horrorRealtimeUi.threatActive}
+            mapId={activeMap.id}
+          />
         </Canvas>
 
         {/* Virtual Joystick touch zone. Third person reserves the right half
@@ -12077,7 +14177,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         )}
 
         {/* Exploration controls stay quiet until the world offers an action. */}
-        {!inCombat &&
+        {(!inCombat || horrorRealtimeMode) &&
           !levelUpOpen &&
           !activeCutscene?.is_blocking &&
           !showInventory &&
@@ -12111,20 +14211,22 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                 ))}
               </div>
             )}
-            <button
-              type="button"
-              data-testid="stealth-stance-toggle"
-              aria-pressed={playerStealthActive}
-              className={`flex h-9 w-9 select-none touch-manipulation items-center justify-center rounded-full border shadow-[0_0_15px_rgba(0,0,0,0.8)] transition-all active:scale-90 active:brightness-150 ${
-                playerStealthActive
-                  ? "border-violet-300/90 bg-violet-950/88 text-violet-100"
-                  : "border-neutral-700/80 bg-black/68 text-neutral-400"
-              }`}
-              onClick={toggleStealthMode}
-              title={`${playerStealthActive ? "Exit" : "Enter"} stealth mode (C)`}
-            >
-              <Eye className="h-4 w-4 drop-shadow-md" />
-            </button>
+            {(!horrorRealtimeMode || thirdPersonActive) && (
+              <button
+                type="button"
+                data-testid="stealth-stance-toggle"
+                aria-pressed={playerStealthActive}
+                className={`flex h-9 w-9 select-none touch-manipulation items-center justify-center rounded-full border shadow-[0_0_15px_rgba(0,0,0,0.8)] transition-all active:scale-90 active:brightness-150 ${
+                  playerStealthActive
+                    ? "border-violet-300/90 bg-violet-950/88 text-violet-100"
+                    : "border-neutral-700/80 bg-black/68 text-neutral-400"
+                }`}
+                onClick={toggleStealthMode}
+                title={`${playerStealthActive ? "Exit" : "Enter"} stealth mode (C)`}
+              >
+                <Eye className="h-4 w-4 drop-shadow-md" />
+              </button>
+            )}
             {!targetingSkillId && !verbTargeting && contextualActLabel ? (
               <button
                 data-testid="context-act-button"
@@ -12174,7 +14276,12 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                   {contextualActLabel}
                   {contextualActionOptions.length > 1 && (
                     <span className="mt-0.5 block text-[7px] tracking-widest text-neutral-500">
-                      Hold for options
+                      Space / Enter · Hold for options
+                    </span>
+                  )}
+                  {contextualActionOptions.length <= 1 && (
+                    <span className="mt-0.5 block text-[7px] tracking-widest text-neutral-500">
+                      Space / Enter
                     </span>
                   )}
                 </span>
@@ -12182,6 +14289,54 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             ) : null}
           </div>
         )}
+
+        {horrorRealtimeMode &&
+          !levelUpOpen &&
+          !activeCutscene?.is_blocking &&
+          !overlayOpen && (
+            <div
+              data-testid="horror-combat-bar"
+              className="absolute bottom-3 left-1/2 z-20 flex -translate-x-1/2 items-end gap-2 pointer-events-auto"
+            >
+              <div className="min-w-32 rounded-sm border border-neutral-700/80 bg-black/76 px-3 py-2 shadow-[0_0_20px_rgba(0,0,0,0.88)] backdrop-blur-sm">
+                <div className="mb-1 flex items-center justify-between gap-3 font-[family-name:var(--font-display)] text-[8px] font-bold uppercase tracking-[0.2em] text-neutral-400">
+                  <span>Breath</span>
+                  {horrorRealtimeUi.threatActive && (
+                    <span className="text-red-300">Danger</span>
+                  )}
+                </div>
+                <div className="h-1.5 overflow-hidden rounded-full bg-neutral-900">
+                  <div
+                    className="h-full bg-gradient-to-r from-amber-700 via-amber-300 to-neutral-100 transition-[width] duration-75"
+                    style={{
+                      width: `${Math.max(
+                        0,
+                        Math.min(100, horrorRealtimeUi.stamina),
+                      )}%`,
+                    }}
+                  />
+                </div>
+              </div>
+              <button
+                type="button"
+                data-testid="horror-attack-button"
+                onClick={commitHorrorAttack}
+                className="min-h-12 rounded-sm border border-neutral-600 bg-black/82 px-4 py-2 font-[family-name:var(--font-display)] text-[10px] font-bold uppercase tracking-widest text-neutral-100 shadow-[0_0_18px_rgba(0,0,0,0.9)] transition active:scale-95 active:bg-neutral-800"
+              >
+                Attack
+                <span className="mt-0.5 block text-[7px] text-neutral-500">1 · 20</span>
+              </button>
+              <button
+                type="button"
+                data-testid="horror-evade-button"
+                onClick={commitHorrorEvade}
+                className="min-h-12 rounded-sm border border-neutral-700 bg-black/74 px-4 py-2 font-[family-name:var(--font-display)] text-[10px] font-bold uppercase tracking-widest text-neutral-200 shadow-[0_0_18px_rgba(0,0,0,0.86)] transition active:scale-95 active:bg-neutral-800"
+              >
+                Evade
+                <span className="mt-0.5 block text-[7px] text-neutral-500">Shift / 3 · 30</span>
+              </button>
+            </div>
+          )}
 
         {/* Paged ability bar — skills and former wheel verbs share one launcher. */}
         {abilityBarVisible && (
@@ -12782,7 +14937,10 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
 
           {/* Danger panel — who's hunting you, how hurt they are.
               In combat the initiative strip carries this information. */}
-          {showPerceptionDebug && !inCombat && visibleNearbyHostiles.length > 0 && (
+          {showPerceptionDebug &&
+            !horrorRealtimeMode &&
+            !inCombat &&
+            visibleNearbyHostiles.length > 0 && (
             <div
               className="px-4 py-3 bg-ui-panel border-[#8b1c1c] rounded-sm shadow-[0_0_20px_rgba(0,0,0,0.8)] flex flex-col gap-2.5 w-48 mt-1"
               style={{ borderStyle: "solid", borderWidth: "1px" }}
@@ -13952,6 +16110,16 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                               playSfx("warning", { volume: 0.24, cooldownMs: 120 });
                               addLog(error);
                             } else {
+                              // Mid-action persistence is deliberately deferred.
+                              // A same-map load therefore starts a clean realtime
+                              // controller instead of inheriting stale windups.
+                              horrorRuntimeRef.current = createHorrorRealtimeRuntime();
+                              setHorrorRealtimeUi({
+                                stamina: HORROR_PLAYER_MAX_STAMINA,
+                                threatActive: false,
+                                actions: {},
+                              });
+                              clearInputState();
                               playSfx("ui_click", { volume: 0.22, cooldownMs: 120 });
                               setShowSaveMenu(false);
                             }
@@ -13985,9 +16153,14 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         </div>
       )}
 
-      {/* Bottom Panel — only visible for dialogue / shop / document interactions */}
+      {/* Bottom Panel — only visible for dialogue / shop / document interactions.
+          Kept in flow: the playtest shell letterboxes this root to 16:9, so an
+          absolutely positioned panel pins itself to the bottom of the LETTERBOX
+          and leaves a black gap between the scene and the text. Conversation is
+          a caption bar and stays short, which keeps the canvas nearly full size;
+          shops, documents, and containers are browsing UI and keep the sheet. */}
       <div
-        className={`shrink-0 transition-all duration-300 ${bottomPanelOpen ? `h-[18rem] sm:h-[22rem] z-30 border-t-2 border-ui-accent ${dialogueHasSceneImage ? "bg-black/25" : "bg-ui-surface"} shadow-[0_-10px_30px_rgba(0,0,0,0.9)]` : "h-0 overflow-hidden"} flex flex-col justify-center items-center relative`}
+        className={`shrink-0 transition-all duration-300 ${bottomPanelOpen ? `${dialogueOnlyPanel ? "h-[7.5rem] sm:h-[8.5rem]" : "h-[18rem] sm:h-[22rem]"} z-30 border-t-2 border-ui-accent ${dialogueHasSceneImage ? "bg-black/25" : "bg-ui-surface"} shadow-[0_-10px_30px_rgba(0,0,0,0.9)]` : "h-0 overflow-hidden"} flex flex-col justify-center items-center relative`}
       >
         {activeShopId ? (
           (() => {
@@ -14743,14 +16916,14 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                 />
               )}
               <div className={`w-full ${hasSceneImage ? "max-w-3xl bg-black/68 backdrop-blur-[2px] border-x border-[var(--color-ui-accent)]/55 shadow-[0_0_34px_rgba(0,0,0,0.8)]" : "max-w-2xl bg-black/45 backdrop-blur-[1px] border-x border-[var(--color-ui-accent-dark)]/40 shadow-[0_0_28px_rgba(0,0,0,0.55)]"} h-full flex flex-col relative z-20`}>
-                <div className={`px-4 py-2 sm:px-6 sm:py-4 flex flex-col items-center justify-center border-b ${hasSceneImage ? "border-[var(--color-ui-accent)]/45" : "border-[var(--color-ui-accent-dark)]"} relative`}>
-                  <h3 className="font-[family-name:var(--font-display)] text-base sm:text-xl font-bold text-[var(--color-ui-accent)] uppercase tracking-[0.2em] text-accent-glow">
+                {/* Paddings are tuned for the short caption bar, not the tall
+                    browsing sheet: this branch only ever renders conversation. */}
+                <div className={`px-4 py-1 sm:px-6 sm:py-1.5 flex flex-col items-center justify-center border-b ${hasSceneImage ? "border-[var(--color-ui-accent)]/45" : "border-[var(--color-ui-accent-dark)]"} relative`}>
+                  <h3 className="font-[family-name:var(--font-display)] text-sm sm:text-base font-bold text-[var(--color-ui-accent)] uppercase tracking-[0.2em] text-accent-glow">
                     {node.speaker}
                   </h3>
-                  {/* Ornate decorative accent below speaker */}
-                  <div className="w-24 h-0.5 bg-gradient-to-r from-transparent via-[var(--color-ui-accent-dark)] to-transparent mt-1 sm:mt-2"></div>
                 </div>
-                <div className="px-4 py-2 sm:p-6 flex-1 overflow-y-auto">
+                <div className="px-4 py-1.5 sm:px-6 sm:py-2 flex-1 overflow-y-auto">
                   <p className={`${hasSceneImage ? "text-neutral-100 drop-shadow-[0_2px_6px_rgba(0,0,0,0.9)]" : "text-[var(--color-ui-text)] drop-shadow-sm"} font-serif text-sm sm:text-lg leading-relaxed text-center`}>
                     {node.text}
                   </p>
@@ -14845,8 +17018,15 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   );
 }
 
+const BUNDLED_TITLE_VIDEO_URL = "/title/fractal-title-background-ping-pong.mp4";
+const BUNDLED_TITLE_LOGO_URL = "/title/crimson-moon-tower-backrooms-title.png";
+
 export function PlayMode() {
-  const [state, setState] = useState<"title" | "playing" | "end">("title");
+  const [state, setState] = useState<
+    "title" | "prologue" | "loading" | "playing" | "end"
+  >(() =>
+    shouldEnterRequestedPlaytestMap(window.location.href) ? "loading" : "title",
+  );
   const { gamePackage } = useEngineStore();
   const hasSave = !!usePlayStore((s) => s.saveData);
   const titleMusicUrl =
@@ -14855,7 +17035,16 @@ export function PlayMode() {
       gamePackage.settings?.music_tracks?.[gamePackage.settings.title_music_id]) as
       | string
       | undefined);
+  const openingMusicUrl =
+    (gamePackage.settings?.opening_music_url as string | undefined) ||
+    BUNDLED_OPENING_MUSIC_URL;
   const titleImageUrl = gamePackage.settings?.title_image_url as string | undefined;
+  const titleVideoUrl =
+    (gamePackage.settings?.title_video_url as string | undefined) ||
+    (titleImageUrl ? undefined : BUNDLED_TITLE_VIDEO_URL);
+  const titleLogoUrl =
+    (gamePackage.settings?.title_logo_url as string | undefined) ||
+    BUNDLED_TITLE_LOGO_URL;
   const endTitle =
     (gamePackage.settings?.end_title as string | undefined) ||
     "Feature Demo Complete";
@@ -14876,8 +17065,24 @@ export function PlayMode() {
       } else {
         stopMusic();
       }
+    } else if (state === "prologue") {
+      if (openingMusicUrl) {
+        playMusic(openingMusicUrl);
+      } else {
+        stopMusic();
+      }
     }
-  }, [state, titleMusicUrl]);
+  }, [openingMusicUrl, state, titleMusicUrl]);
+
+  useEffect(() => {
+    if (state !== "loading") return;
+    // Give the browser one painted frame to release both title/prologue video
+    // decoders before allocating the WebGL play scene. On integrated GPUs,
+    // mounting all three pipelines in the same commit intermittently left the
+    // playtest blank or caused the tab to be discarded.
+    const frame = window.requestAnimationFrame(() => setState("playing"));
+    return () => window.cancelAnimationFrame(frame);
+  }, [state]);
 
   if (state === "end") {
     return (
@@ -14903,10 +17108,30 @@ export function PlayMode() {
     );
   }
 
+  if (state === "prologue") {
+    return <OpeningPrologue onComplete={() => setState("loading")} />;
+  }
+
+  if (state === "loading") {
+    return (
+      <div
+        className="flex h-full items-center justify-center bg-black text-neutral-500"
+        data-playtest-loading
+        aria-label="Loading game"
+      >
+        <span className="font-[family-name:var(--font-display)] text-xs font-bold uppercase tracking-[0.28em]">
+          Loading
+        </span>
+      </div>
+    );
+  }
+
   if (state === "title") {
     return (
       <div className="h-full bg-neutral-950 text-white relative overflow-hidden">
-        {titleImageUrl ? (
+        {titleVideoUrl ? (
+          <ManagedLoopingVideo src={titleVideoUrl} />
+        ) : titleImageUrl ? (
           <img
             src={titleImageUrl}
             alt=""
@@ -14917,23 +17142,22 @@ export function PlayMode() {
         ) : (
           <div className="absolute inset-0 bg-[linear-gradient(rgba(148,163,184,0.08)_1px,transparent_1px),linear-gradient(90deg,rgba(148,163,184,0.08)_1px,transparent_1px)] bg-[size:48px_48px]" />
         )}
-        <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(5,8,12,0.94)_0%,rgba(7,12,18,0.7)_38%,rgba(7,12,18,0.28)_70%,rgba(5,8,12,0.5)_100%)]" />
-        <div className="absolute inset-0 bg-[linear-gradient(0deg,rgba(0,0,0,0.82)_0%,rgba(0,0,0,0.18)_34%,rgba(0,0,0,0.3)_100%)]" />
+        <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(5,8,12,0.72)_0%,rgba(7,12,18,0.42)_42%,rgba(7,12,18,0.16)_72%,rgba(5,8,12,0.34)_100%)]" />
+        <div className="absolute inset-0 bg-[linear-gradient(0deg,rgba(0,0,0,0.72)_0%,rgba(0,0,0,0.12)_42%,rgba(0,0,0,0.22)_100%)]" />
 
-        <div className="relative z-10 flex h-full w-full flex-col justify-end px-6 pb-8 pt-8 sm:px-12 sm:pb-12 lg:px-16">
-          <div className="max-w-[46rem]">
-            <h1 className="font-[family-name:var(--font-display)] text-5xl font-black uppercase tracking-[0.18em] text-[var(--color-ui-text)] drop-shadow-[0_5px_20px_rgba(0,0,0,0.95)] sm:text-7xl lg:text-8xl">
-              Backrooms
-            </h1>
-            <div className="mt-4 h-px w-44 bg-gradient-to-r from-[var(--color-ui-accent)] via-[var(--color-ui-accent-dark)] to-transparent" />
-            <p className="mt-4 font-[family-name:var(--font-display)] text-xs font-bold uppercase tracking-[0.34em] text-[var(--color-ui-accent)] drop-shadow-[0_2px_10px_rgba(0,0,0,0.9)]">
-              Stay quiet. Keep moving.
-            </p>
+        <div className="relative z-10 flex h-full w-full flex-col px-6 pb-8 pt-8 sm:px-12 sm:pb-12 lg:px-16">
+          <div className="-mt-16 max-w-[31rem] sm:-mt-20">
+            <img
+              src={titleLogoUrl}
+              alt="Crimson Moon Tower Backrooms"
+              className="max-h-[34vh] w-full max-w-[31rem] object-contain object-left-bottom drop-shadow-[0_12px_32px_rgba(0,0,0,0.88)]"
+              draggable={false}
+            />
           </div>
 
-          <div className="mt-8 flex w-full max-w-sm flex-col gap-3 sm:max-w-none sm:flex-row">
+          <div className="mt-auto flex w-full max-w-sm flex-col gap-3 sm:max-w-none sm:flex-row">
           <button
-            className="border border-[var(--color-ui-accent-dark)] bg-black/68 px-7 py-4 text-left font-[family-name:var(--font-display)] text-base font-bold uppercase tracking-[0.22em] text-[var(--color-ui-text)] shadow-[0_0_18px_rgba(0,0,0,0.75)] transition-all hover:border-[var(--color-ui-accent)] hover:bg-black/82 hover:text-[var(--color-ui-accent)] active:scale-[0.98] sm:min-w-52 sm:text-center"
+            className="border border-red-950 bg-black/68 px-7 py-4 text-left font-[family-name:var(--font-display)] text-base font-bold uppercase tracking-[0.22em] text-[var(--color-ui-text)] shadow-[0_0_18px_rgba(0,0,0,0.75)] transition-all hover:border-red-500 hover:bg-black/82 hover:text-red-300 active:scale-[0.98] sm:min-w-52 sm:text-center"
             onClick={() => {
               if (
                 hasSave &&
@@ -14946,7 +17170,13 @@ export function PlayMode() {
               playTitleSfx("ui_click");
               usePlayStore.getState().resetRun();
               usePlayStore.setState({ saveData: null });
-              setState("playing");
+              // A `?map=...` or Studio Play handoff is a preview target, not
+              // the campaign start. Clear it explicitly because the gameplay
+              // component remounts after the title/prologue and therefore
+              // cannot distinguish this New Game from the preview's first
+              // mount using component-local state alone.
+              useEngineStore.getState().setSelectedMapId(null);
+              setState("prologue");
             }}
           >
             New Game
@@ -14954,7 +17184,7 @@ export function PlayMode() {
           <button
             className={`border px-7 py-4 text-left font-[family-name:var(--font-display)] text-base font-bold uppercase tracking-[0.22em] shadow-[0_0_18px_rgba(0,0,0,0.65)] transition-all sm:min-w-52 sm:text-center ${
               hasSave
-                ? "border-[var(--color-ui-accent-dark)] bg-black/54 text-[var(--color-ui-text-muted)] hover:border-[var(--color-ui-accent)] hover:bg-black/78 hover:text-[var(--color-ui-accent)] active:scale-[0.98]"
+                ? "border-red-950 bg-black/54 text-[var(--color-ui-text-muted)] hover:border-red-500 hover:bg-black/78 hover:text-red-300 active:scale-[0.98]"
                 : "cursor-not-allowed border-neutral-800/70 bg-black/34 text-neutral-600"
             }`}
             onClick={() => {

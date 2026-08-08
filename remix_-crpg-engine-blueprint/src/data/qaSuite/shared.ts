@@ -5,10 +5,18 @@
 
 import type { CellData, GamePackage } from "../../schema/game";
 import {
+  FINE_HALF_EXTENT,
+  FINE_PER_MACRO,
+} from "../../engine-core/gridCoordinates";
+import {
   BACKROOMS_LEVEL_ZERO_LIGHT_OBJECT_ID,
   INSTITUTIONAL_CEILING_LIGHT_OBJECT_ID,
 } from "../../schema/presets";
-import { PEOPLE_HORROR_SPRITES, peopleHorrorSpriteId } from "../animatedSprites";
+import { LONELY_STREET_INTERIOR_CEILING_BULB_OBJECT_ID } from "../lonelyStreetHouseInteriorAssets";
+import {
+  PEOPLE_HORROR_SPRITES,
+  peopleHorrorSpriteId,
+} from "../animatedSprites";
 
 export type MapData = GamePackage["maps"][number];
 export type EntityData = GamePackage["entities"][number];
@@ -23,9 +31,13 @@ export type QuestData = GamePackage["quests"][number];
 export type DocumentData = GamePackage["documents"][number];
 export type BarkData = GamePackage["barks"][number];
 export type SimulationProcessData = GamePackage["simulation_processes"][number];
-export type SimulationWorkstationData = GamePackage["simulation_workstations"][number];
+export type SimulationWorkstationData =
+  GamePackage["simulation_workstations"][number];
 export type TriggerData = MapData["triggers"][number];
 export type ObjectPlacementData = MapData["custom_object_placements"][number];
+export type FineCellOverrideData = NonNullable<
+  MapData["fine_cell_overrides"]
+>[number];
 
 export const key = (x: number, z: number) => `${x}:${z}`;
 
@@ -49,6 +61,32 @@ export const cell = (
 });
 
 export type CellOverrides = Record<string, Partial<CellData>>;
+
+/**
+ * Authors a genuine one-fine-cell-thick wall inside each named macro tile.
+ * The wall/floor payloads are applied after normal 3x3 expansion, so rendering,
+ * collision, and line-of-sight all agree on the narrow partition.
+ */
+export const oneMicrotileWallOverrides = (
+  macroCells: readonly (readonly [number, number])[],
+  orientation: "horizontal" | "vertical",
+  wall: Partial<CellData>,
+  floor: Partial<CellData>,
+): FineCellOverrideData[] =>
+  macroCells.flatMap(([macroX, macroZ]) => {
+    const overrides: FineCellOverrideData[] = [];
+    for (let offsetX = 0; offsetX < FINE_PER_MACRO; offsetX += 1) {
+      for (let offsetZ = 0; offsetZ < FINE_PER_MACRO; offsetZ += 1) {
+        const crossAxisOffset = orientation === "vertical" ? offsetX : offsetZ;
+        overrides.push({
+          macro_cell: [macroX, macroZ],
+          fine_offset: [offsetX, offsetZ],
+          overrides: crossAxisOffset === FINE_HALF_EXTENT ? wall : floor,
+        });
+      }
+    }
+    return overrides;
+  });
 
 // Stamp a rectangle of overrides (inclusive bounds) into an override record —
 // merged onto any earlier stamp so later stamps win per-field.
@@ -126,7 +164,9 @@ export const exit = (
 export const QA_START_MAP_ID = "qa_suite_hub";
 export const QA_START_SPAWN_ID = "spawn_suite_start";
 
-export const hubReturnExit = (cellPos: [number, number]): MapData["exits"][number] =>
+export const hubReturnExit = (
+  cellPos: [number, number],
+): MapData["exits"][number] =>
   exit(cellPos, QA_START_MAP_ID, QA_START_SPAWN_ID);
 
 // An exit cell must be walkable floor even in a wall ring.
@@ -160,6 +200,7 @@ const QA_CEILING_LIGHT_MAX_FIXTURES = 8;
 const QA_CEILING_LIGHT_OBJECT_IDS = new Set([
   INSTITUTIONAL_CEILING_LIGHT_OBJECT_ID,
   BACKROOMS_LEVEL_ZERO_LIGHT_OBJECT_ID,
+  LONELY_STREET_INTERIOR_CEILING_BULB_OBJECT_ID,
 ]);
 
 const qaCeilingEligibleCells = (map: MapData): [number, number][] => {
@@ -167,11 +208,12 @@ const qaCeilingEligibleCells = (map: MapData): [number, number][] => {
     .filter((entry) => entry.active !== false && entry.walkable)
     .map((entry) => [entry.x, entry.z] as [number, number]);
   const walkableKeys = new Set(walkable.map(([x, z]) => key(x, z)));
-  const buffered = walkable.filter(([x, z]) =>
-    walkableKeys.has(key(x + 1, z)) &&
-    walkableKeys.has(key(x - 1, z)) &&
-    walkableKeys.has(key(x, z + 1)) &&
-    walkableKeys.has(key(x, z - 1)),
+  const buffered = walkable.filter(
+    ([x, z]) =>
+      walkableKeys.has(key(x + 1, z)) &&
+      walkableKeys.has(key(x - 1, z)) &&
+      walkableKeys.has(key(x, z + 1)) &&
+      walkableKeys.has(key(x, z - 1)),
   );
   return buffered.length ? buffered : walkable;
 };
@@ -184,6 +226,10 @@ const qaCeilingEligibleCells = (map: MapData): [number, number][] => {
  * light without becoming simulation/perception stimuli.
  */
 export const withQaRoomCeilingArchitecture = (map: MapData): MapData => {
+  if (map.environment === "exterior" || map.auto_ceiling_lights === false) {
+    return map;
+  }
+
   const walkableCount = map.cells.filter(
     (entry) => entry.active !== false && entry.walkable,
   ).length;
@@ -211,8 +257,8 @@ export const withQaRoomCeilingArchitecture = (map: MapData): MapData => {
       Math.ceil(walkableCount / QA_CEILING_LIGHT_CELLS_PER_FIXTURE),
     ),
   );
-  const existing = normalizedMap.custom_object_placements.filter(
-    (placement) => QA_CEILING_LIGHT_OBJECT_IDS.has(placement.object_id),
+  const existing = normalizedMap.custom_object_placements.filter((placement) =>
+    QA_CEILING_LIGHT_OBJECT_IDS.has(placement.object_id),
   );
   if (existing.length >= targetCount) return normalizedMap;
 
@@ -232,7 +278,9 @@ export const withQaRoomCeilingArchitecture = (map: MapData): MapData => {
   const needed = targetCount - selected.length;
 
   for (let index = 0; index < needed; index += 1) {
-    const remaining = candidates.filter(([x, z]) => !unavailable.has(key(x, z)));
+    const remaining = candidates.filter(
+      ([x, z]) => !unavailable.has(key(x, z)),
+    );
     if (!remaining.length) break;
     remaining.sort((left, right) => {
       const score = (candidate: [number, number]) => {
@@ -245,15 +293,12 @@ export const withQaRoomCeilingArchitecture = (map: MapData): MapData => {
         return Math.min(
           ...selected.map(
             (anchor) =>
-              (candidate[0] - anchor[0]) ** 2 +
-              (candidate[1] - anchor[1]) ** 2,
+              (candidate[0] - anchor[0]) ** 2 + (candidate[1] - anchor[1]) ** 2,
           ),
         );
       };
       return (
-        score(right) - score(left) ||
-        left[1] - right[1] ||
-        left[0] - right[0]
+        score(right) - score(left) || left[1] - right[1] || left[0] - right[0]
       );
     });
     const chosen = remaining[0];
@@ -378,7 +423,9 @@ const hashId = (id: string) =>
   [...id].reduce((sum, char) => sum + char.charCodeAt(0), 0);
 
 export const animatedSpriteForEntity = (entity: EntityData) => {
-  const pool = entity.is_npc ? animatedEntitySpritePools.npc : animatedEntitySpritePools.hostile;
+  const pool = entity.is_npc
+    ? animatedEntitySpritePools.npc
+    : animatedEntitySpritePools.hostile;
   return pool[hashId(entity.id) % pool.length];
 };
 
@@ -405,7 +452,13 @@ export const npc = (
 export const hostile = (
   id: string,
   display_name: string,
-  stats: { hp: number; attack: number; defense: number; speed: number; xp: number },
+  stats: {
+    hp: number;
+    attack: number;
+    defense: number;
+    speed: number;
+    xp: number;
+  },
   extras: Partial<EntityData> = {},
 ): EntityData => ({
   id,
@@ -445,7 +498,8 @@ export const say = (
 // hand-authored QA conversations concise while still producing fully parsed
 // package records (the legacy `dlg` / `say` helpers remain migration fixtures).
 export const keywordResponse = (
-  input: Pick<DialogueResponse, "id" | "text"> & Partial<Omit<DialogueResponse, "id" | "text">>,
+  input: Pick<DialogueResponse, "id" | "text"> &
+    Partial<Omit<DialogueResponse, "id" | "text">>,
 ): DialogueResponse => ({
   id: input.id,
   text: input.text,
@@ -488,7 +542,10 @@ export const keywordDlg = (
 });
 
 // ── Package assembly helpers ─────────────────────────────────────────────────
-export const mergeById = <T extends { id: string }>(base: T[], additions: T[]) => {
+export const mergeById = <T extends { id: string }>(
+  base: T[],
+  additions: T[],
+) => {
   const byId = new Map<string, T>();
   base.forEach((item) => byId.set(item.id, item));
   additions.forEach((item) => byId.set(item.id, item));
@@ -520,9 +577,7 @@ export interface QaWing {
 }
 
 export const mergeWings = (wings: QaWing[]): Required<QaWing> => ({
-  maps: wings
-    .flatMap((wing) => wing.maps)
-    .map(withQaRoomCeilingArchitecture),
+  maps: wings.flatMap((wing) => wing.maps).map(withQaRoomCeilingArchitecture),
   entities: wings.flatMap((wing) => wing.entities || []),
   keywords: wings.flatMap((wing) => wing.keywords || []),
   dynamicTopics: wings.flatMap((wing) => wing.dynamicTopics || []),

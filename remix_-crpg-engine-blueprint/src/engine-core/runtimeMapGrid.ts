@@ -44,12 +44,27 @@ const fineCenter = (cell: readonly unknown[]): [number, number] => {
   return [result[0], result[1]];
 };
 
+const finePlacementCenter = (
+  cell: readonly unknown[],
+  fineOffset?: readonly unknown[],
+): [number, number] => {
+  const center = fineCenter(cell);
+  return [
+    center[0] + Number(fineOffset?.[0] || 0),
+    center[1] + Number(fineOffset?.[1] || 0),
+  ];
+};
+
 export class RuntimeMapGrid {
   readonly map: MapData;
   readonly bounds: RuntimeGridBounds;
   readonly cellsByCoord = new Map<string, CellData[]>();
   readonly sectors = new Map<string, CellData[]>();
   readonly placementsBySector = new Map<string, ObjectPlacementData[]>();
+  private fineOverridesByCoord = new Map<
+    string,
+    NonNullable<MapData["fine_cell_overrides"]>
+  >();
   private fineSectorCache = new Map<string, CellData[]>();
 
   constructor(map: MapData) {
@@ -83,6 +98,25 @@ export class RuntimeMapGrid {
       list.push(placement);
       this.placementsBySector.set(sectorKey(sector[0], sector[1]), list);
     }
+    for (const override of map.fine_cell_overrides || []) {
+      const [offsetX, offsetZ] = override.fine_offset;
+      if (offsetX >= FINE_PER_MACRO || offsetZ >= FINE_PER_MACRO) continue;
+      const origin = fineOfMacro([
+        Number(override.macro_cell[0] || 0),
+        Number(override.macro_cell[1] || 0),
+      ] as GridCoord);
+      const coord = key(origin[0] + offsetX, origin[1] + offsetZ);
+      const list = this.fineOverridesByCoord.get(coord) || [];
+      list.push(override);
+      this.fineOverridesByCoord.set(coord, list);
+    }
+  }
+
+  private applyFineOverrides(source: CellData, x: number, z: number): CellData {
+    return (this.fineOverridesByCoord.get(key(x, z)) || []).reduce(
+      (cell, override) => ({ ...cell, ...override.overrides, x, z }),
+      { ...source, x, z },
+    );
   }
 
   sectorOfMacro(x: number, z: number): [number, number] {
@@ -105,7 +139,7 @@ export class RuntimeMapGrid {
   getFineCell(x: number, z: number): CellData | undefined {
     const macro = macroOfFine([x, z]);
     const source = this.getMacroCell(macro[0], macro[1]);
-    return source ? { ...source, x, z } : undefined;
+    return source ? this.applyFineOverrides(source, x, z) : undefined;
   }
 
   queryMacroCells(bounds: RuntimeGridBounds): CellData[] {
@@ -147,7 +181,9 @@ export class RuntimeMapGrid {
       const origin = fineOfMacro([cell.x, cell.z]);
       for (let dx = 0; dx < FINE_PER_MACRO; dx += 1) {
         for (let dz = 0; dz < FINE_PER_MACRO; dz += 1) {
-          fine.push({ ...cell, x: origin[0] + dx, z: origin[1] + dz });
+          const x = origin[0] + dx;
+          const z = origin[1] + dz;
+          fine.push(this.applyFineOverrides(cell, x, z));
         }
       }
     }
@@ -178,10 +214,14 @@ export class RuntimeMapGrid {
       width: this.map.width * FINE_PER_MACRO,
       height: this.map.height * FINE_PER_MACRO,
       cells,
+      fine_cell_overrides: [],
       spawns: this.map.spawns.map((spawn) => ({ ...spawn, cell: fineCenter(spawn.cell) })),
       custom_object_placements: (this.map.custom_object_placements || [])
         .filter((placement) => inActiveBounds(placement.cell))
-        .map((placement) => ({ ...placement, cell: fineCenter(placement.cell) })),
+        .map((placement) => ({
+          ...placement,
+          cell: finePlacementCenter(placement.cell, placement.fine_offset),
+        })),
       entity_placements: (this.map.entity_placements || [])
         .filter((placement) => inActiveBounds(placement.cell))
         .map((placement) => ({

@@ -6,6 +6,7 @@ import {
   type ObjectData,
   type ObjectPlacementData,
 } from "../schema/game";
+import { canAutomaticallyStepBetween } from "../utils/traversal";
 import { isBuildingDoorPlacement } from "../utils/doorPlacement";
 import {
   getMacroPlacementFootprint,
@@ -389,9 +390,9 @@ const buildNavigation = (
       if (!allowed.has(coordinateKey(next[0], next[1]))) continue;
       const target = topByCoordinate.get(coordinateKey(next[0], next[1]));
       if (!target) continue;
-      // This mirrors the active runtime rule: upward movement greater than one
-      // visual-height unit is blocked; downward movement is legal.
-      if (target.visual_height - current.visual_height > 1) continue;
+      // This mirrors the active runtime rule: an ordinary step may change the
+      // standing surface by at most one visual-height unit in either direction.
+      if (!canAutomaticallyStepBetween(current, target)) continue;
       result.push(next);
     }
     if (current.portal_id) {

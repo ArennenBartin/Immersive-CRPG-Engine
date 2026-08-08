@@ -1,2 +1,29 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Declare the binary asset formats explicitly rather than leaving them to
+# Git's NUL-byte heuristic. The heuristic does classify all of these correctly
+# today (verified: stored blobs are byte-identical to the working files), but
+# this repo carries ~180 MB of models, animation, audio, and video, and a
+# single misdetected file would be silently LF-corrupted on checkout — a
+# broken mesh or unplayable clip that looks like a code bug. Being explicit
+# costs nothing and covers formats added later.
+*.glb   binary
+*.gltf  binary
+*.fbx   binary
+*.blend binary
+*.blend1 binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.webp  binary
+*.mp4   binary
+*.webm  binary
+*.ogg   binary
+*.mp3   binary
+*.wav   binary
+*.ttf   binary
+*.otf   binary
+*.woff  binary
+*.woff2 binary

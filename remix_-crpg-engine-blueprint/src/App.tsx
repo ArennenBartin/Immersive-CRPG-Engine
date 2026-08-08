@@ -5,6 +5,8 @@
 
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { AppShell } from "./components/AppShell";
+import { PlaytestShell } from "./components/PlaytestShell";
+import { readPlaytestRequest } from "./utils/playtestWindow";
 
 class AppErrorBoundary extends Component<
   { children: ReactNode },
@@ -49,9 +51,10 @@ class AppErrorBoundary extends Component<
 }
 
 export default function App() {
+  const playtest = readPlaytestRequest(window.location.href);
   return (
     <AppErrorBoundary>
-      <AppShell />
+      {playtest.enabled ? <PlaytestShell /> : <AppShell />}
     </AppErrorBoundary>
   );
 }

@@ -82,10 +82,22 @@ export const BACKROOMS_PARASITE_ENTITY: EntityData = {
     activation_radius: 60,
     steps_per_pulse: 2,
   },
+  horror_combat: {
+    windup_ms: 500,
+    active_ms: 120,
+    recovery_ms: 850,
+    reach_fine_cells: 2,
+    lunge_fine_cells: 2,
+    direction_lock_fraction: 0.6,
+  },
   sensory_profile: {
     id: "backrooms_predator",
+    // Once geometry breaks sight, the Parasite goes to the last confirmed
+    // position and checks only a couple of nearby branches. Quiet movement can
+    // therefore break a chase; ordinary footsteps keep supplying fresh clues.
     memory_ticks: 300,
     search_ticks: 240,
+    search_steps: 2,
     channels: [
       {
         id: "predator_sight",

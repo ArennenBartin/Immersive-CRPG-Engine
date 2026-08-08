@@ -4,7 +4,7 @@
 // them into a package for the explicit builders in qaSuiteInstaller.ts.
 //
 // The suite is the engine's living acceptance test: a hub, eleven labs, and a
-// reusable Level Zero environment that prove the fine-grid movement rebuild,
+// reusable Level Zero and outdoor street environments that prove the fine-grid movement rebuild,
 // flowing chemistry, emotional layer, dialogue/cutscene/quest/story systems,
 // combat, world simulation, persistence, and authored corridor traversal.
 // Everything is authored in MACRO tiles — fineWorld expands it at load.
@@ -19,7 +19,10 @@ import {
 } from "../schema/presets";
 import { peopleHorrorSpriteId } from "./animatedSprites";
 import { BACKROOMS_PARASITE_MODEL_OBJECT_ID } from "./backroomsEntityAssets";
-import { DEFAULT_UNLOCKED_ABILITY_IDS, mergeDefaultAbilities } from "./defaultAbilities";
+import {
+  DEFAULT_UNLOCKED_ABILITY_IDS,
+  mergeDefaultAbilities,
+} from "./defaultAbilities";
 import {
   QA_START_MAP_ID,
   QA_START_SPAWN_ID,
@@ -30,6 +33,12 @@ import {
 } from "./qaSuite/shared";
 import { hubWing } from "./qaSuite/hub";
 import { backroomsWing } from "./qaSuite/backroomsWing";
+import {
+  LONELY_STREET_MAP_ID,
+  LONELY_STREET_OBJECT_IDS,
+  LONELY_STREET_SPAWN_ID,
+  lonelyStreetWing,
+} from "./qaSuite/lonelyStreetWing";
 import { chemistryWing } from "./qaSuite/chemistryWing";
 import { storyWing } from "./qaSuite/storyWing";
 import { combatWing } from "./qaSuite/combatWing";
@@ -44,15 +53,18 @@ import {
 
 export const TEST_SUITE_START_MAP_ID = QA_START_MAP_ID;
 export const TEST_SUITE_START_SPAWN_ID = QA_START_SPAWN_ID;
+export const BUNDLED_GAME_START_MAP_ID = LONELY_STREET_MAP_ID;
+export const BUNDLED_GAME_START_SPAWN_ID = LONELY_STREET_SPAWN_ID;
 export const TEST_SUITE_PLAYER_SPRITE_ID = peopleHorrorSpriteId(1, 1);
 // Bump on any suite-content change: persisted packages refresh their qa_*
 // content when this differs (engineStore hydration), and stale play saves
 // rebuild against the new version.
-export const TEST_SUITE_VERSION = "3.5.0";
+export const TEST_SUITE_VERSION = "3.10.0";
 
 const wings = mergeWings([
   hubWing,
   backroomsWing,
+  lonelyStreetWing,
   chemistryWing,
   storyWing,
   combatWing,
@@ -68,6 +80,7 @@ const QA_ARCHITECTURE_OBJECT_IDS = new Set([
   BACKROOMS_LEVEL_ZERO_WALL_OBJECT_ID,
   BACKROOMS_LEVEL_ZERO_LIGHT_OBJECT_ID,
   BACKROOMS_PARASITE_MODEL_OBJECT_ID,
+  ...LONELY_STREET_OBJECT_IDS,
 ]);
 const qaArchitectureObjects = objectLibraryPresets.filter((object) =>
   QA_ARCHITECTURE_OBJECT_IDS.has(object.id),
@@ -83,12 +96,15 @@ export const withTestingMapSuite = (
   options: { preserveStart?: boolean } = {},
 ): GamePackage => {
   const preserveStart = Boolean(
-    options.preserveStart && TEST_SUITE_MAP_ID_SET.has(pkg.metadata.start_map_id),
+    options.preserveStart &&
+    TEST_SUITE_MAP_ID_SET.has(pkg.metadata.start_map_id),
   );
-  const mergedEntities = mergeById(pkg.entities, wings.entities).map((entity) => ({
-    ...entity,
-    sprite_id: animatedSpriteForEntity(entity),
-  }));
+  const mergedEntities = mergeById(pkg.entities, wings.entities).map(
+    (entity) => ({
+      ...entity,
+      sprite_id: animatedSpriteForEntity(entity),
+    }),
+  );
 
   return {
     ...pkg,
@@ -96,8 +112,12 @@ export const withTestingMapSuite = (
       ...pkg.metadata,
       title: "CRPG Engine Feature Test Suite",
       version: TEST_SUITE_VERSION,
-      start_map_id: preserveStart ? pkg.metadata.start_map_id : TEST_SUITE_START_MAP_ID,
-      start_spawn_id: preserveStart ? pkg.metadata.start_spawn_id : TEST_SUITE_START_SPAWN_ID,
+      start_map_id: preserveStart
+        ? pkg.metadata.start_map_id
+        : BUNDLED_GAME_START_MAP_ID,
+      start_spawn_id: preserveStart
+        ? pkg.metadata.start_spawn_id
+        : BUNDLED_GAME_START_SPAWN_ID,
     },
     settings: {
       ...pkg.settings,

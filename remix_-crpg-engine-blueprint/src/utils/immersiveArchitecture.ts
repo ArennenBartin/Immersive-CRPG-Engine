@@ -1,4 +1,6 @@
 import type { AuthoredViewMode } from "./firstPersonControls";
+import type { ObjectData, ObjectPlacementData } from "../schema/game";
+import { getPlacementFootprint } from "./objectFootprint";
 
 export const IMMERSIVE_WALL_HEIGHT_SCALE = 1.5;
 export const IMMERSIVE_CEILING_HEIGHT = 2.85;
@@ -6,6 +8,32 @@ export const IMMERSIVE_CEILING_HEIGHT = 2.85;
 export const isImmersiveCeilingView = (
   viewMode: AuthoredViewMode,
 ): boolean => viewMode === "first_person" || viewMode === "third_person";
+
+/**
+ * Derived room ceilings must not cap a staircase's vertical volume. Stair
+ * assets already carry a fitted fine footprint, so the same authored geometry
+ * that drives collision also defines the opening without map-specific magic
+ * coordinates.
+ */
+export const resolveDerivedCeilingOpeningCellKeys = (
+  placements: readonly ObjectPlacementData[],
+  objectById: ReadonlyMap<string, ObjectData>,
+): Set<string> => {
+  const result = new Set<string>();
+  placements.forEach((placement) => {
+    const object = objectById.get(placement.object_id);
+    if (
+      !object?.tags?.includes("stairs") ||
+      !object.tags.includes("structure")
+    ) {
+      return;
+    }
+    getPlacementFootprint(placement, object).forEach(([x, z]) => {
+      result.add(`${x}:${z}`);
+    });
+  });
+  return result;
+};
 
 export const resolveImmersiveWallHeight = (
   authoredHeight: number,
@@ -47,6 +75,13 @@ export const IMMERSIVE_STREAM_SECTOR_HYSTERESIS_RADIANS =
   (3 * Math.PI) / 180;
 const IMMERSIVE_DIRECTIONAL_BASE_LATERAL_SCALE = 0.62;
 const IMMERSIVE_DIRECTIONAL_FORWARD_LATERAL_SCALE = 0.22;
+// Outdoor sightlines do not have walls or a ceiling hiding the edge of the
+// streamed field. The ordinary indoor corridor is intentionally narrow, but
+// it is narrower than the third-person camera frustum after stream yaw is
+// quantized. A half-width that grows by 0.5 per forward cell keeps that
+// quantization guard band outside the visible street without paying for a
+// full circular field behind the player.
+export const IMMERSIVE_EXTERIOR_FORWARD_LATERAL_SCALE = 0.5;
 
 const wrapImmersiveYaw = (yaw: number) =>
   Math.atan2(Math.sin(yaw), Math.cos(yaw));
@@ -107,12 +142,14 @@ export const isWithinImmersiveDirectionalWindow = ({
   forward,
   radius,
   forwardBonus = 0,
+  forwardLateralScale = IMMERSIVE_DIRECTIONAL_FORWARD_LATERAL_SCALE,
 }: {
   cell: readonly [number, number];
   center: readonly [number, number];
   forward?: readonly [number, number] | null;
   radius: number;
   forwardBonus?: number;
+  forwardLateralScale?: number;
 }): boolean => {
   const safeRadius = Math.max(0, radius);
   const dx = cell[0] - center[0];
@@ -138,9 +175,12 @@ export const isWithinImmersiveDirectionalWindow = ({
 
   const lateralDistance = Math.abs(dx * -fz + dz * fx);
   const distanceBeyondCircle = forwardDistance - safeRadius;
+  const safeForwardLateralScale = Number.isFinite(forwardLateralScale)
+    ? Math.max(0, forwardLateralScale)
+    : IMMERSIVE_DIRECTIONAL_FORWARD_LATERAL_SCALE;
   const lateralLimit =
     safeRadius * IMMERSIVE_DIRECTIONAL_BASE_LATERAL_SCALE +
-    distanceBeyondCircle * IMMERSIVE_DIRECTIONAL_FORWARD_LATERAL_SCALE;
+    distanceBeyondCircle * safeForwardLateralScale;
   return lateralDistance <= lateralLimit;
 };
 
@@ -152,6 +192,7 @@ export const isWithinDistantArchitectureBand = ({
   forward,
   detailForwardBonus = 0,
   architectureForwardBonus = 0,
+  forwardLateralScale,
 }: {
   cell: readonly [number, number];
   center: readonly [number, number];
@@ -160,6 +201,7 @@ export const isWithinDistantArchitectureBand = ({
   forward?: readonly [number, number] | null;
   detailForwardBonus?: number;
   architectureForwardBonus?: number;
+  forwardLateralScale?: number;
 }): boolean => {
   return (
     !isWithinImmersiveDirectionalWindow({
@@ -168,6 +210,7 @@ export const isWithinDistantArchitectureBand = ({
       forward,
       radius: detailRadius,
       forwardBonus: detailForwardBonus,
+      forwardLateralScale,
     }) &&
     isWithinImmersiveDirectionalWindow({
       cell,
@@ -175,6 +218,7 @@ export const isWithinDistantArchitectureBand = ({
       forward,
       radius: architectureRadius,
       forwardBonus: architectureForwardBonus,
+      forwardLateralScale,
     })
   );
 };

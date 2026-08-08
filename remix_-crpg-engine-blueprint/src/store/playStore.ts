@@ -71,6 +71,10 @@ interface PlayState {
   extendCombatQueue: (ids: string[]) => void;
   queueCombatExperience: (amount: number) => void;
   updatePlayer: (cell: [number, number], facing: [number, number]) => void;
+  updatePlayerFinePosition: (
+    position: [number, number],
+    facing: [number, number],
+  ) => void;
   movePlayer: (
     cell: [number, number],
     facing: [number, number],
@@ -159,18 +163,6 @@ type PersistedPlayState = Pick<
   PlayState,
   | "saveData"
   | "logMessages"
-  | "activeDialogueId"
-  | "activeDialogueNodeId"
-  | "activeConversationResponseId"
-  | "activeConversationParticipantKey"
-  | "activeConversationEntityId"
-  | "activeConversationLocalTopicIds"
-  | "activeConversationLocalDynamicTopicIds"
-  | "activeConversationRecentTopicKeys"
-  | "activeConversationShownItemId"
-  | "activeConversationEnding"
-  | "activeShopId"
-  | "activeContainerId"
 >;
 
 const AUTOSAVE_WRITE_DELAY_MS = 850;
@@ -197,6 +189,10 @@ const flushQueuedAutosave = () => {
     console.error("Failed to write runtime autosave", err);
   }
 };
+
+// Playtest tabs hydrate from localStorage. Expose a narrow synchronous flush so
+// a Studio launch cannot race the debounced runtime reset from the source tab.
+export const flushPlayAutosave = () => flushQueuedAutosave();
 
 const deferredAutosaveStorage: PersistStorage<PersistedPlayState, void> = {
   getItem: (name) => {
@@ -483,9 +479,23 @@ export const usePlayStore = create<PlayState>()(
             saveData: {
               ...state.saveData,
               player: {
+                ...state.saveData.player,
                 cell,
                 facing,
-                sprite_id: state.saveData.player.sprite_id,
+              },
+            },
+          };
+        }),
+      updatePlayerFinePosition: (position, facing) =>
+        set((state) => {
+          if (!state.saveData) return state;
+          return {
+            saveData: {
+              ...state.saveData,
+              player: {
+                ...state.saveData.player,
+                facing,
+                fine_position: position,
               },
             },
           };
@@ -508,6 +518,7 @@ export const usePlayStore = create<PlayState>()(
                 cell,
                 facing,
                 sprite_id: state.saveData.player.sprite_id,
+                fine_position: undefined,
               },
               playerStats,
             },
@@ -870,6 +881,7 @@ export const usePlayStore = create<PlayState>()(
                 cell,
                 facing,
                 sprite_id: state.saveData.player.sprite_id,
+                fine_position: undefined,
               },
             },
             logMessages: [...state.logMessages, `Entered map: ${mapId}`].slice(-20),
@@ -1081,29 +1093,33 @@ export const usePlayStore = create<PlayState>()(
       partialize: (state): PersistedPlayState => ({
         saveData: state.saveData,
         logMessages: state.logMessages,
-        activeDialogueId: state.activeDialogueId,
-        activeDialogueNodeId: state.activeDialogueNodeId,
-        activeConversationResponseId: state.activeConversationResponseId,
-        activeConversationParticipantKey: state.activeConversationParticipantKey,
-        activeConversationEntityId: state.activeConversationEntityId,
-        activeConversationLocalTopicIds: state.activeConversationLocalTopicIds,
-        activeConversationLocalDynamicTopicIds: state.activeConversationLocalDynamicTopicIds,
-        activeConversationRecentTopicKeys: state.activeConversationRecentTopicKeys,
-        activeConversationShownItemId: state.activeConversationShownItemId,
-        activeConversationEnding: state.activeConversationEnding,
-        activeShopId: state.activeShopId,
-        activeContainerId: state.activeContainerId,
       }),
       merge: (persisted, current) => {
         const saved = persisted as Partial<PersistedPlayState> | undefined;
         return {
           ...current,
-          ...(saved || {}),
+          logMessages: Array.isArray(saved?.logMessages)
+            ? saved.logMessages
+            : current.logMessages,
           // engineEvents are transient debug data — never restore them.
           engineEvents: [],
           saveData: saved?.saveData
             ? normalizeRuntimeSave(saved.saveData)
             : (saved?.saveData ?? current.saveData),
+          // Panels describe ephemeral UI, not durable run progress. Restoring
+          // one without its mounted node can create an invisible input lock.
+          activeDialogueId: null,
+          activeDialogueNodeId: null,
+          activeConversationResponseId: null,
+          activeConversationParticipantKey: null,
+          activeConversationEntityId: null,
+          activeConversationLocalTopicIds: [],
+          activeConversationLocalDynamicTopicIds: [],
+          activeConversationRecentTopicKeys: [],
+          activeConversationShownItemId: null,
+          activeConversationEnding: false,
+          activeShopId: null,
+          activeContainerId: null,
         };
       },
     },

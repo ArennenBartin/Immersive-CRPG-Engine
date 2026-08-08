@@ -74,6 +74,20 @@ export const logicalCellWorldSize = (
   fineRatio = FINE_PER_MACRO,
 ): number => (gridSpace === "fine" ? 1 / fineRatio : 1);
 
+type RenderSizedCell = CellData & { __render_cell_size?: number };
+
+// Most runtime terrain is collapsed back to one full-size macro mesh. A macro
+// block containing explicit fine-cell geometry keeps its individual cells and
+// carries this private render-only footprint instead.
+export const renderedCellWorldSize = (cell: CellData): number =>
+  Math.max(0.001, Number((cell as RenderSizedCell).__render_cell_size) || 1);
+
+// Detailed and lightweight distant terrain meet along a moving stream
+// boundary. They must use the exact same vertical plane or a low third-person
+// camera can see the clear color through the tiny step between them.
+export const renderedTerrainPlaneY = (cell: CellData): number =>
+  Number(cell.y || 0) + 0.001;
+
 export const logicalCellToMacro = (
   cell: readonly unknown[],
   gridSpace: RendererGridSpace,
@@ -105,17 +119,73 @@ export const worldPointToWorldMacroCell = (
 const positiveModulo = (value: number, divisor: number) =>
   ((value % divisor) + divisor) % divisor;
 
+const terrainRenderSignature = (cell: CellData) =>
+  [
+    cell.active,
+    cell.walkable,
+    cell.blocks_los,
+    cell.height,
+    cell.visual_height,
+    cell.terrain || "",
+    cell.object_id || "",
+    cell.region_id || "",
+    cell.room_id || "",
+    cell.tag || "",
+    cell.hazard || "",
+    cell.infection || "",
+    cell.portal_id || "",
+    cell.surface_tag || "",
+  ].join("|");
+
 export const dedupeFineTerrainCellsFor3D = (
   cells: CellData[],
   fineRatio = FINE_PER_MACRO,
-): CellData[] =>
-  cells
-    .filter(
-      (cell) =>
-        positiveModulo(cell.x, fineRatio) === 0 &&
-        positiveModulo(cell.z, fineRatio) === 0,
-    )
-    .map((cell) => {
-      const macro = logicalCellToMacro([cell.x, cell.z], "fine");
-      return { ...cell, x: macro[0], z: macro[1] };
+): CellData[] => {
+  const blocks = new Map<string, CellData[]>();
+  for (const cell of cells) {
+    const macro = logicalCellToMacro([cell.x, cell.z], "fine");
+    const key = `${macro[0]}:${cell.y || 0}:${macro[1]}`;
+    const block = blocks.get(key) || [];
+    block.push(cell);
+    blocks.set(key, block);
+  }
+
+  const rendered: CellData[] = [];
+  for (const block of blocks.values()) {
+    const representative =
+      block.find(
+        (cell) =>
+          positiveModulo(cell.x, fineRatio) === 0 &&
+          positiveModulo(cell.z, fineRatio) === 0,
+      ) || block[0];
+    const signature = terrainRenderSignature(representative);
+    const uniform = block.every(
+      (cell) => terrainRenderSignature(cell) === signature,
+    );
+
+    if (uniform) {
+      const macro = logicalCellToMacro(
+        [representative.x, representative.z],
+        "fine",
+      );
+      rendered.push({ ...representative, x: macro[0], z: macro[1] });
+      continue;
+    }
+
+    const renderSize = 1 / fineRatio;
+    block.forEach((cell) => {
+      const [x, z] = logicalCellToWorld(
+        [cell.x, cell.z],
+        "fine",
+        fineRatio,
+      );
+      rendered.push({
+        ...cell,
+        x,
+        z,
+        __render_cell_size: renderSize,
+      } as RenderSizedCell);
     });
+  }
+  return rendered;
+};

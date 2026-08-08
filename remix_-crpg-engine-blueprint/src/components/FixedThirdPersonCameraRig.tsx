@@ -18,10 +18,6 @@ import {
   type ThirdPersonCameraStepState,
   type ThirdPersonCameraVec3,
 } from "../utils/thirdPersonCamera";
-import {
-  IMMERSIVE_STREAM_SECTOR_SIZE,
-  resolveImmersiveStreamSector,
-} from "../utils/immersiveArchitecture";
 
 export {
   THIRD_PERSON_CAMERA_PROFILES,
@@ -435,10 +431,9 @@ export function ThirdPersonCameraRig({
    */
   onVisualYawChange?: (visualYaw: number) => void;
   /**
-   * Publishes a coarse horizontal view direction for asymmetric world
-   * streaming. Quantization keeps pointer look and collision correction off
-   * the per-frame React path while still extending detail where the camera is
-   * actually looking.
+   * Publishes the continuous horizontal view direction for asymmetric world
+   * streaming. A small angular threshold avoids a React update every frame
+   * without forcing the camera-facing render field into eight sectors.
    */
   onStreamDirectionChange?: (direction: readonly [number, number]) => void;
 }) {
@@ -452,7 +447,7 @@ export function ThirdPersonCameraRig({
   const collisionDistanceRef = useRef(Number.POSITIVE_INFINITY);
   const lastLookRef = useRef(new THREE.Vector3());
   const lastPublishedYawRef = useRef(Number.NaN);
-  const lastPublishedStreamSectorRef = useRef(Number.NaN);
+  const lastPublishedStreamYawRef = useRef(Number.NaN);
 
   useEffect(() => {
     thirdPersonLookRef.ready = true;
@@ -641,17 +636,16 @@ export function ThirdPersonCameraRig({
     const viewZ = stepped.look[2] - finalEye[2];
     if (viewX * viewX + viewZ * viewZ > 0.000001) {
       const viewYaw = Math.atan2(viewX, viewZ);
-      const sector = resolveImmersiveStreamSector(
-        viewYaw,
-        lastPublishedStreamSectorRef.current,
-      );
-      if (sector !== lastPublishedStreamSectorRef.current) {
-        lastPublishedStreamSectorRef.current = sector;
-        const quantizedYaw =
-          sector * IMMERSIVE_STREAM_SECTOR_SIZE;
+      const lastViewYaw = lastPublishedStreamYawRef.current;
+      if (
+        !Number.isFinite(lastViewYaw) ||
+        Math.abs(wrapThirdPersonCameraYaw(viewYaw - lastViewYaw)) >=
+          THREE.MathUtils.degToRad(3)
+      ) {
+        lastPublishedStreamYawRef.current = viewYaw;
         onStreamDirectionChange?.([
-          Math.sin(quantizedYaw),
-          Math.cos(quantizedYaw),
+          Math.sin(viewYaw),
+          Math.cos(viewYaw),
         ]);
       }
     }

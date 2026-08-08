@@ -19,6 +19,7 @@ import {
   clampThirdPersonYawOffset,
   facingToThirdPersonYaw,
   isThirdPersonCameraActive,
+  isThirdPersonFreeMovementActive,
   isThirdPersonStructuralCameraCell,
   quantizeYawToFacing,
   resolveHeldThirdPersonIntent,
@@ -77,6 +78,7 @@ import {
   IMMERSIVE_CEILING_HEIGHT,
   IMMERSIVE_ARCHITECTURE_FORWARD_BONUS,
   IMMERSIVE_DETAIL_FORWARD_BONUS,
+  IMMERSIVE_EXTERIOR_FORWARD_LATERAL_SCALE,
   IMMERSIVE_STREAM_SECTOR_SIZE,
   IMMERSIVE_WALL_HEIGHT_SCALE,
   isWithinImmersiveDirectionalWindow,
@@ -90,6 +92,21 @@ import {
 import {
   resolveImmersiveVisibilityPresentationPolicy,
 } from "../src/utils/fogOfWar";
+import { renderedTerrainPlaneY } from "../src/utils/renderSpace";
+import {
+  advanceFreeActorToward,
+  BACKROOMS_FREE_COLLISION_RADIUS_FINE,
+  normalizeFreeFacing,
+  quantizeFreePlayerPosition,
+  resolveFacedInteractionProbe,
+  resolveFreeActorStart,
+  resolveFreeInteractionPose,
+  resolveFreeInteractionStep,
+  freePlayerPositionIntersectsBounds,
+  resolveFreePlayerMovement,
+  resolveFreePlayerStart,
+  rotateFreeFacing,
+} from "../src/utils/freePlayerMovement";
 
 const EPSILON = 0.000001;
 
@@ -151,6 +168,26 @@ assert.equal(isThirdPersonCameraActive("third_person", "tactical"), true);
 assert.equal(isThirdPersonCameraActive("third_person", "story"), true);
 assert.equal(isThirdPersonCameraActive("first_person", "explore"), false);
 assert.equal(isThirdPersonCameraActive("isometric", "tactical"), false);
+assert.equal(
+  isThirdPersonFreeMovementActive("third_person", false, false),
+  true,
+  "all authored third-person exploration maps use continuous movement",
+);
+assert.equal(
+  isThirdPersonFreeMovementActive("third_person", true, true),
+  true,
+  "realtime horror combat retains continuous movement",
+);
+assert.equal(
+  isThirdPersonFreeMovementActive("third_person", true, false),
+  false,
+  "legacy pulse combat retains exact tactical cells",
+);
+assert.equal(
+  isThirdPersonFreeMovementActive("isometric", false, false),
+  false,
+  "isometric maps retain their authored grid controls",
+);
 
 // ── Strict eight-way tank intent ───────────────────────────────────────────
 assert.equal(THIRD_PERSON_FACING_RING.length, 8);
@@ -458,6 +495,16 @@ assert.ok(
     }),
   "immersive far architecture fills only the cheap field beyond full detail",
 );
+assertNear(
+  renderedTerrainPlaneY({ x: 0, y: 0, z: 0 } as any),
+  0.001,
+  "near and distant ground share the same base render plane",
+);
+assertNear(
+  renderedTerrainPlaneY({ x: 0, y: 0.5, z: 0 } as any),
+  0.501,
+  "raised terrain preserves the shared render-plane offset",
+);
 assert.equal(
   isWithinImmersiveDirectionalWindow({
     cell: [0, -21],
@@ -514,6 +561,57 @@ assert.equal(
   true,
   "the minimum detail preset reaches the opposite wall despite maximum chunk lag",
 );
+assert.equal(
+  isWithinImmersiveDirectionalWindow({
+    cell: [-8, -82],
+    center: [0, 24],
+    forward: [0, -1],
+    radius: 9,
+    forwardBonus: 110,
+  }),
+  true,
+  "the weakest exterior detail field reaches the doubled street's far corner from spawn",
+);
+assert.equal(
+  isWithinImmersiveDirectionalWindow({
+    cell: [5, -75],
+    center: [0, 24],
+    forward: [0, -1],
+    radius: 11,
+    forwardBonus: 110,
+  }),
+  true,
+  "the full-detail placement field keeps the far roadside house drawn from spawn",
+);
+assert.equal(
+  isWithinImmersiveDirectionalWindow({
+    cell: [0, 130],
+    center: [0, 24],
+    forward: [0, -1],
+    radius: 9,
+    forwardBonus: 110,
+  }),
+  false,
+  "the full-street exterior field still excludes the equally distant rear edge",
+);
+for (const sectorOffset of [-1, 0, 1]) {
+  const yaw = Math.PI + sectorOffset * IMMERSIVE_STREAM_SECTOR_SIZE;
+  const forward = [Math.sin(yaw), Math.cos(yaw)] as const;
+  for (let z = 23; z >= -82; z -= 1) {
+    assert.equal(
+      isWithinImmersiveDirectionalWindow({
+        cell: [0, z],
+        center: [0, 24],
+        forward,
+        radius: 9,
+        forwardBonus: 110,
+        forwardLateralScale: IMMERSIVE_EXTERIOR_FORWARD_LATERAL_SCALE,
+      }),
+      true,
+      `the exterior guard band keeps street row ${z} drawn at stream-sector offset ${sectorOffset}`,
+    );
+  }
+}
 const architectureOuterRadius =
   resolveImmersiveDirectionalWindowOuterRadius({
     radius: 22,
@@ -1451,6 +1549,166 @@ assert.equal(THIRD_PERSON_WALL_EXIT_MS, 500);
     at60.tetherYaw,
     "20/60Hz final tether yaw",
     0.02,
+  );
+}
+
+// ── Backrooms continuous player locomotion ────────────────────────────────
+{
+  const arbitraryFacing = rotateFreeFacing([0, -1], 1, 1 / 3);
+  assertNear(
+    Math.hypot(arbitraryFacing[0], arbitraryFacing[1]),
+    1,
+    "continuous turning preserves a normalized heading",
+  );
+  assert.ok(
+    Math.abs(arbitraryFacing[0]) > 0.1 &&
+      Math.abs(arbitraryFacing[1]) > 0.1 &&
+      Math.abs(arbitraryFacing[0]) !== Math.abs(arbitraryFacing[1]),
+    "Backrooms facing is not quantized to the eight-direction ring",
+  );
+  assertNear(
+    facingToThirdPersonYaw(arbitraryFacing),
+    Math.atan2(arbitraryFacing[0], arbitraryFacing[1]),
+    "the physical third-person camera follows the exact continuous heading",
+  );
+  assertVecNear(
+    normalizeFreeFacing([0.2, -0.7]),
+    [0.2747211279, -0.9615239476],
+    "arbitrary saved headings normalize without quantization",
+    1e-8,
+  );
+}
+{
+  const open = resolveFreePlayerMovement({
+    position: [0, 0],
+    delta: [0.37, -0.21],
+    isBlockedCell: () => false,
+  });
+  assertVecNear(open, [0.37, -0.21], "free motion retains sub-cell position");
+  assert.deepEqual(
+    quantizeFreePlayerPosition(open),
+    [0, 0],
+    "gameplay anchor does not move until the fine-cell boundary is crossed",
+  );
+}
+{
+  const wall = resolveFreePlayerMovement({
+    position: [0, 0],
+    delta: [5, 0],
+    isBlockedCell: (x) => x === 2,
+  });
+  assert.ok(
+    wall[0] <= 1.5 - BACKROOMS_FREE_COLLISION_RADIUS_FINE + 0.001,
+    "swept free movement cannot tunnel through a wall",
+  );
+
+  const slide = resolveFreePlayerMovement({
+    position: [0, 0],
+    delta: [2, 2],
+    isBlockedCell: (x) => x === 2,
+  });
+  assert.ok(slide[0] < 0.5, "collision retains the safe wall distance");
+  assert.ok(slide[1] > 1, "collision slides along the free tangent");
+
+  const fittedFurniture = {
+    minX: 1,
+    maxX: 2,
+    minZ: -0.5,
+    maxZ: 0.5,
+  };
+  assert.equal(
+    freePlayerPositionIntersectsBounds([0.7, 0], 0.4, fittedFurniture),
+    true,
+    "continuous furniture collision respects the player's radius",
+  );
+  assert.equal(
+    freePlayerPositionIntersectsBounds([0, 0], 0.4, fittedFurniture),
+    false,
+    "continuous furniture collision does not create a whole-cell halo",
+  );
+  const fittedStop = resolveFreePlayerMovement({
+    position: [0, 0],
+    delta: [3, 0],
+    isBlockedCell: () => false,
+    radius: 0.4,
+    intersectsBlockedPosition: (position, radius) =>
+      freePlayerPositionIntersectsBounds(position, radius, fittedFurniture),
+  });
+  assert.ok(
+    fittedStop[0] < fittedFurniture.minX - 0.39,
+    "swept free movement cannot tunnel through a fitted furniture bound",
+  );
+}
+{
+  assertVecNear(
+    resolveFreePlayerStart([9, 4], [-20, 30]),
+    [9, 4],
+    "a teleport discards a stale continuous coordinate",
+  );
+  assertVecNear(
+    resolveFreePlayerStart([9, 4], [9.3, 3.8]),
+    [9.3, 3.8],
+    "a nearby saved sub-cell coordinate resumes exactly",
+  );
+}
+{
+  const diagonalFacing = normalizeFreeFacing([0.64, -0.77]);
+  const pose = resolveFreeInteractionPose({
+    cell: [12, -9],
+    position: [12.42, -8.76],
+    facing: diagonalFacing,
+    useContinuousPosition: true,
+  });
+  assertVecNear(
+    pose.origin,
+    [12.42, -8.76],
+    "context prompts use Steve's continuous presentation position",
+  );
+  assert.deepEqual(
+    pose.probe,
+    resolveFacedInteractionProbe(pose.origin, diagonalFacing),
+    "prompt and action share one faced interaction probe",
+  );
+  assert.ok(
+    pose.probe.every(Number.isInteger),
+    "continuous headings resolve to an integer-backed interaction target",
+  );
+  assert.deepEqual(
+    pose.step,
+    [1, -1],
+    "continuous headings resolve to an integer eight-way manipulation step",
+  );
+  assert.deepEqual(
+    resolveFreeInteractionStep([0.2, -0.98]),
+    [0, -1],
+    "near-cardinal headings do not send fractional movement commands",
+  );
+  assert.deepEqual(
+    resolveFacedInteractionProbe([6, 4], [1, 1]),
+    [8, 6],
+    "legacy diagonal interaction reach remains at the square footprint edge",
+  );
+}
+{
+  const advanced = advanceFreeActorToward({
+    position: [2.15, -1.4],
+    target: [3, -1],
+    maximumDistance: 0.25,
+    isBlockedCell: () => false,
+  });
+  assertNear(
+    Math.hypot(advanced[0] - 2.15, advanced[1] + 1.4),
+    0.25,
+    "independent actors advance continuously toward their navigation anchor",
+  );
+  assert.ok(
+    Math.abs(advanced[0] - Math.round(advanced[0])) > 0.01,
+    "an independently moving actor is not pinned to a grid center",
+  );
+  assertVecNear(
+    resolveFreeActorStart([3, -1], advanced),
+    advanced,
+    "entity continuous positions survive while their anchor leads them",
   );
 }
 

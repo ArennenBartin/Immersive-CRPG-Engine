@@ -9,6 +9,7 @@ import {
   dispatchV1MoveEntity,
   dispatchV1TakeItem,
   isPlayerStealthActive,
+  resolveV1IndependentPursuitTarget,
   resolveMovementHearingSettings,
   setPlayerStealthActive,
   stealthBlockedActionMessage,
@@ -432,6 +433,55 @@ console.log("hearing/stealth contract: sound evidence is positional, finite, and
   check(
     "the same route in stealth can fall below the hunter's audible radius",
     quiet.save.entity_states[hunterKey]?.last_detection_cause !== "heard",
+  );
+}
+
+console.log("hearing/stealth contract: lost-contact searches are author-bounded");
+{
+  const evidenceCell: [number, number] = [-3, -3];
+  const pursuit = resolveV1IndependentPursuitTarget(
+    makeSave([5, 5], {
+      entity_states: {
+        [hunterKey]: {
+          alertness: "searching",
+          alert_score: 0.7,
+          last_known_position: evidenceCell,
+          last_evidence_tick: 1,
+          perception_memory_expires_at_tick: 90,
+          perception_tracks_live_target: false,
+        },
+      },
+      map_deltas: {
+        [map.id]: {
+          npc_tasks: [
+            {
+              id: "task_perception_1_hunter_sound",
+              actor_id: hunterKey,
+              task_type: "investigate",
+              source_kind: "sound",
+              target_cell: evidenceCell,
+              origin_cell: [-5, -5],
+              priority: 7,
+              state: "queued",
+              created_at_tick: 1,
+              updated_at_tick: 1,
+              expires_at_tick: 90,
+              search_origin_cell: evidenceCell,
+              search_step: 0,
+              search_steps: 2,
+            },
+          ],
+        },
+      },
+    }),
+    hunterKey,
+    map.id,
+  );
+  check(
+    "an unheard hidden player is searched for at the evidence point, not live-tracked forever",
+    pursuit?.tracksLiveTarget === false &&
+      sameCell(pursuit?.cell, evidenceCell) &&
+      pursuit?.searchSteps === 2,
   );
 }
 

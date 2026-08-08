@@ -7,6 +7,13 @@ import {
 
 type FootprintOffset = [number, number];
 
+export interface PlacementCollisionBounds2D {
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+}
+
 const rotateOffset = (
   [x, z]: FootprintOffset,
   facing: [number, number] = [0, 1],
@@ -43,6 +50,26 @@ export const getPlacementFootprint = (
     Number(placement.facing?.[1] ?? 1),
   ];
 
+  const fineFootprint = objectDef?.collision?.fine_footprint;
+  if (fineFootprint?.length) {
+    for (const offset of fineFootprint) {
+      const [rx, rz] = rotateOffset(
+        [Number(offset[0] || 0), Number(offset[1] || 0)],
+        facing,
+      );
+      const cell: FootprintOffset = [
+        placement.cell[0] + rx,
+        placement.cell[1] + rz,
+      ];
+      const key = fineCoordKey(cell[0], cell[1]);
+      if (!seen.has(key)) {
+        seen.add(key);
+        cells.push(cell);
+      }
+    }
+    return cells;
+  }
+
   // Footprint offsets are authored in MACRO tiles; the placement cell is the
   // macro-center fine cell (fineWorld expansion). Each authored offset scales
   // by FINE_PER_MACRO and rasterizes to its full fine block so an object
@@ -64,6 +91,44 @@ export const getPlacementFootprint = (
   }
 
   return cells;
+};
+
+/**
+ * Returns a continuous, model-sized collider for fitted furniture.
+ *
+ * Fine footprints remain useful for discrete pathfinding, interaction probes,
+ * and authored collision previews. Free third-person movement should not turn
+ * every touched fine cell into a full solid square, though: doing so adds up to
+ * half a fine cell of invisible bulk on every edge and can seal a narrow aisle
+ * where two pieces of furniture approach one another. Objects that opt into a
+ * fine footprint therefore use their real X/Z bounds for swept player motion.
+ */
+export const getPlacementContinuousCollisionBounds = (
+  placement: ObjectPlacementData,
+  objectDef?: ObjectData,
+): PlacementCollisionBounds2D | null => {
+  if (!placementHasCollision(placement, objectDef)) return null;
+  if (!objectDef?.collision?.fine_footprint?.length) return null;
+
+  const facingX = Number(placement.facing?.[0] ?? 0);
+  const facingZ = Number(placement.facing?.[1] ?? 1);
+  const rotateQuarterTurn = Math.abs(facingX) > Math.abs(facingZ);
+  const authoredWidth = Math.max(0, Number(objectDef.bounds?.[0] || 0));
+  const authoredDepth = Math.max(0, Number(objectDef.bounds?.[2] || 0));
+  const widthFine =
+    (rotateQuarterTurn ? authoredDepth : authoredWidth) * FINE_PER_MACRO;
+  const depthFine =
+    (rotateQuarterTurn ? authoredWidth : authoredDepth) * FINE_PER_MACRO;
+  if (widthFine <= 0 || depthFine <= 0) return null;
+
+  const centerX = Number(placement.cell[0] || 0);
+  const centerZ = Number(placement.cell[1] || 0);
+  return {
+    minX: centerX - widthFine * 0.5,
+    maxX: centerX + widthFine * 0.5,
+    minZ: centerZ - depthFine * 0.5,
+    maxZ: centerZ + depthFine * 0.5,
+  };
 };
 
 export const placementOccupiesCell = (

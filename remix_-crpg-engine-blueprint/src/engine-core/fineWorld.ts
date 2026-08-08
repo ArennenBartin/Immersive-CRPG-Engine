@@ -56,8 +56,61 @@ const expandCells = (cells: CellData[]): CellData[] => {
   return fine;
 };
 
+const applyFineCellOverrides = (map: MapData, cells: CellData[]): CellData[] => {
+  const authoredOverrides = map.fine_cell_overrides || [];
+  if (!authoredOverrides.length) return cells;
+
+  const indicesByCoord = new Map<string, number[]>();
+  cells.forEach((cell, index) => {
+    const coord = `${cell.x}:${cell.z}`;
+    const indices = indicesByCoord.get(coord) || [];
+    indices.push(index);
+    indicesByCoord.set(coord, indices);
+  });
+
+  const result = [...cells];
+  for (const override of authoredOverrides) {
+    const [offsetX, offsetZ] = override.fine_offset;
+    // Keep an override inside the macro tile it names. This remains runtime
+    // validation rather than a schema max so changing FINE_PER_MACRO does not
+    // require a schema migration.
+    if (
+      offsetX >= FINE_PER_MACRO ||
+      offsetZ >= FINE_PER_MACRO
+    ) {
+      continue;
+    }
+    const origin = fineOfMacro([
+      Number(override.macro_cell[0] || 0),
+      Number(override.macro_cell[1] || 0),
+    ] as GridCoord);
+    const x = origin[0] + offsetX;
+    const z = origin[1] + offsetZ;
+    for (const index of indicesByCoord.get(`${x}:${z}`) || []) {
+      result[index] = {
+        ...result[index],
+        ...override.overrides,
+        x,
+        z,
+      };
+    }
+  }
+  return result;
+};
+
 const expandEventAction = (action: EventActionData): EventActionData =>
   action.cell ? { ...action, cell: mustFineCenter(action.cell) } : action;
+
+const mustFinePlacementCenter = (
+  cell: readonly unknown[],
+  fineOffset?: readonly unknown[],
+): [number, number] => {
+  const center = mustFineCenter(cell);
+  return [
+    center[0] + Number(fineOffset?.[0] || 0),
+    center[1] + Number(fineOffset?.[1] || 0),
+  ];
+};
 
 // Exported for callers that synthesize a single authored map outside a
 // package (e.g. PlayMode's built-in fallback test map).
@@ -68,11 +121,15 @@ const expandMapEager = (map: MapData): MapData => ({
   ...map,
   width: map.width * FINE_PER_MACRO,
   height: map.height * FINE_PER_MACRO,
-  cells: expandCells(map.cells),
+  cells: applyFineCellOverrides(map, expandCells(map.cells)),
+  // Overrides have been baked into the runtime cells. Clearing the authored
+  // instructions prevents downstream consumers from treating them as live
+  // geometry a second time.
+  fine_cell_overrides: [],
   spawns: map.spawns.map((spawn) => ({ ...spawn, cell: mustFineCenter(spawn.cell) })),
   custom_object_placements: (map.custom_object_placements || []).map((placement) => ({
     ...placement,
-    cell: mustFineCenter(placement.cell),
+    cell: mustFinePlacementCenter(placement.cell, placement.fine_offset),
   })),
   entity_placements: (map.entity_placements || []).map((placement) => ({
     ...placement,

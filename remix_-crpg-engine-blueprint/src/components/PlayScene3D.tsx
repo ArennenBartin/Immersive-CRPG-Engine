@@ -12,6 +12,7 @@ import {
   resolveFirstPersonPitchTarget,
   type PlayAtmosphereProfile,
 } from "../utils/firstPersonControls";
+import { resolveExteriorEnvironmentLightLevels } from "../utils/lightRendering";
 
 export * from "./FixedThirdPersonCameraRig";
 
@@ -492,32 +493,79 @@ export function BlackStarLightRig({
   playerPos: [number, number];
   ambientLight?: number;
   shadowsEnabled?: boolean;
-  palette?: "black_star" | "backrooms";
+  palette?: "black_star" | "backrooms" | "interior" | "exterior";
 }) {
   // This is a deliberately weak readability fill. Mechanical sources are
   // rendered by the world layer; the old player-following point light made
   // authored darkness visually impossible and contradicted perception.
   const ambient = THREE.MathUtils.clamp(ambientLight, 0, 1);
+  if (palette === "exterior") {
+    const levels = resolveExteriorEnvironmentLightLevels(ambient);
+    return (
+      <>
+        <hemisphereLight
+          color="#D7CBFF"
+          groundColor="#294535"
+          intensity={levels.hemisphere}
+        />
+        <ambientLight color="#FFE6C8" intensity={levels.ambient} />
+        <directionalLight
+          position={[-12, 18, -9]}
+          color="#FFD6A3"
+          intensity={levels.key}
+          castShadow={shadowsEnabled}
+        />
+        <directionalLight
+          position={[11, 9, 10]}
+          color="#AFC2FF"
+          intensity={levels.rim}
+        />
+      </>
+    );
+  }
   if (palette === "backrooms") {
     return (
       <>
         <hemisphereLight
-          color="#D5CCB4"
-          // A fluorescent room has warm carpet/wall bounce. Down-facing
+          color="#D2D2B8"
+          // A fluorescent room has muted carpet/wall bounce. Down-facing
           // ceiling and fixture normals otherwise sample near-black here and
           // turn the housing into a void despite the lit room beneath it.
-          groundColor="#786640"
+          groundColor="#676044"
           intensity={0.045 + ambient * 0.45}
         />
         <ambientLight
-          color="#EFE5CC"
+          color="#E4E2CC"
           intensity={0.03 + ambient * 0.35}
         />
         <directionalLight
           position={[-9, 20, -7]}
-          color="#FFF2CC"
+          color="#F5F2D1"
           intensity={0.14 + ambient * 0.65}
           castShadow={shadowsEnabled}
+        />
+      </>
+    );
+  }
+  if (palette === "interior") {
+    return (
+      <>
+        <hemisphereLight
+          color="#D8C7AA"
+          groundColor="#30241B"
+          intensity={ambient * 1.15}
+        />
+        <ambientLight color="#B39B83" intensity={ambient * 0.83} />
+        <directionalLight
+          position={[-9, 18, -7]}
+          color="#FFD3A0"
+          intensity={ambient * 2}
+          castShadow={shadowsEnabled}
+        />
+        <directionalLight
+          position={[8, 8, 9]}
+          color="#8290AD"
+          intensity={ambient * 0.375}
         />
       </>
     );
@@ -619,6 +667,101 @@ export function AdaptiveQualityProbe({
     } else {
       stableChecksRef.current = 0;
     }
+  });
+
+  return null;
+}
+
+// ── Cinematic ───────────────────────────────────────────────────────────────
+// A scripted shot: the camera is placed in the world and aimed, instead of
+// riding the player. The shoulder and isometric rigs both derive their yaw
+// from the player's facing, so neither can frame an actor from the front —
+// a reverse shot across a couch is impossible without this.
+//
+// `target` is the world point the shot looks at. `facing` is the direction the
+// CAMERA looks, so the eye sits back along -facing. Both come from the cutscene
+// verb; nothing here reads player state, which is what makes the shot stable
+// while the actors move inside it.
+
+const CINEMATIC_BLEND_DAMPING = 4.2;
+const cineEyeVec = new THREE.Vector3();
+const cineLookVec = new THREE.Vector3();
+const cineSeedVec = new THREE.Vector3();
+/** How far ahead the seeded look point sits when a move starts. */
+const CINEMATIC_SEED_LOOK_DISTANCE = 3;
+
+export interface CinematicShot {
+  /** World point to look at. */
+  target: [number, number];
+  /** Direction the camera looks, in world XZ. */
+  facing: [number, number];
+  /** Metres back along -facing. */
+  distance?: number;
+  /** Eye height above the target's floor. */
+  height?: number;
+  /** Height of the point being looked at (chest of a seated actor ≈ 1). */
+  targetHeight?: number;
+  /** Jump straight to the framing instead of travelling to it. */
+  cut?: boolean;
+}
+
+export function CinematicCameraRig({ shot }: { shot: CinematicShot }) {
+  const { camera } = useThree();
+  const eyeRef = useRef(new THREE.Vector3(Number.NaN, Number.NaN, Number.NaN));
+  const lookRef = useRef(new THREE.Vector3(Number.NaN, Number.NaN, Number.NaN));
+  const shotKeyRef = useRef("");
+
+  useFrame((_state, delta) => {
+    // A shot with a duration is a MOVE: it starts wherever the camera already
+    // is — over the player's shoulder — and travels to the framing, which is
+    // what reads as "he looks over at her". A cut (duration 0) jumps, because
+    // it happens behind a fade and gliding would still be arriving when the
+    // picture comes back.
+    // Interiors here are ~5 m deep, so a shot much further back than this puts
+    // the eye through the far wall and the room renders as a black slab across
+    // the lower half of the frame. Author a larger distance only outdoors.
+    const distance = shot.distance ?? 1.8;
+    const height = shot.height ?? 1.45;
+    const targetHeight = shot.targetHeight ?? 1.1;
+    const length = Math.hypot(shot.facing[0], shot.facing[1]) || 1;
+    const dirX = shot.facing[0] / length;
+    const dirZ = shot.facing[1] / length;
+
+    cineLookVec.set(shot.target[0], targetHeight, shot.target[1]);
+    cineEyeVec.set(
+      shot.target[0] - dirX * distance,
+      height,
+      shot.target[1] - dirZ * distance,
+    );
+
+    // Re-seed whenever the shot itself changes, not only on mount: the scene
+    // cuts between framings while this rig stays mounted the whole time.
+    const shotKey = `${shot.target[0]},${shot.target[1]}@${dirX},${dirZ}`;
+    const isNewShot = shotKeyRef.current !== shotKey;
+    if (isNewShot) shotKeyRef.current = shotKey;
+
+    if (isNewShot || Number.isNaN(eyeRef.current.x)) {
+      if (shot.cut) {
+        eyeRef.current.copy(cineEyeVec);
+        lookRef.current.copy(cineLookVec);
+      } else {
+        // Seed from the live camera so the move begins on the player rather
+        // than teleporting to the destination and standing still.
+        eyeRef.current.copy(camera.position);
+        camera.getWorldDirection(cineSeedVec);
+        lookRef.current
+          .copy(camera.position)
+          .addScaledVector(cineSeedVec, CINEMATIC_SEED_LOOK_DISTANCE);
+      }
+    } else {
+      const amount = 1 - Math.exp(-CINEMATIC_BLEND_DAMPING * delta);
+      eyeRef.current.lerp(cineEyeVec, amount);
+      lookRef.current.lerp(cineLookVec, amount);
+    }
+
+    camera.position.copy(eyeRef.current);
+    camera.lookAt(lookRef.current);
+    camera.updateProjectionMatrix();
   });
 
   return null;

@@ -1,13 +1,18 @@
 import React, { useEffect, useRef, useState } from "react";
-import { useEngineStore, EditorMode } from "../store/engineStore";
-import { usePlayStore } from "../store/playStore";
-import { Home, Play, Map, Box, MessageSquare, BookOpen, Swords, FileJson, Upload, Menu, X, Image as ImageIcon, Undo2, Redo2, Sparkles, Briefcase, FileText, Activity, Settings2, Layers3, ArrowLeft, RotateCcw, ShieldCheck, AlertTriangle } from "lucide-react";
+import {
+  useEngineStore,
+  EditorMode,
+  persistEngineWorkspaceNow,
+} from "../store/engineStore";
+import { flushPlayAutosave, usePlayStore } from "../store/playStore";
+import { Home, Play, Map, Box, MessageSquare, BookOpen, Swords, FileJson, Upload, Menu, X, Image as ImageIcon, Undo2, Redo2, Sparkles, Briefcase, FileText, Activity, Settings2, Layers3, ArrowLeft, RotateCcw, ShieldCheck, AlertTriangle, Clapperboard } from "lucide-react";
 import { PlayMode } from "./PlayMode";
 import { GameEditor } from "./GameEditor";
 import { MapEditor } from "./MapEditor";
 import { ModelMaker } from "./ModelMaker";
+import { AnimationMaker } from "./AnimationMaker";
 import { SpriteCreator } from "./SpriteCreator";
-import { DialogueEditor } from "./DialogueEditor";
+import { StandardDialogueEditor } from "./StandardDialogueEditor";
 import { QuestEditor } from "./QuestEditor";
 import { EntityEditor } from "./EntityEditor";
 import { CutsceneEditor } from "./CutsceneEditor";
@@ -31,10 +36,44 @@ import {
   getPlayerModelOptions,
   resolvePlayerModelObject,
 } from "../data/playerModelAssets";
+import { openPlaytestWindow } from "../utils/playtestWindow";
 
 export function AppShell() {
-  const { storageHydrated, mode, setMode, undo, redo, undoStack, redoStack } = useEngineStore();
+  const {
+    storageHydrated,
+    mode,
+    setMode,
+    selectedMapId,
+    undo,
+    redo,
+    undoStack,
+    redoStack,
+  } = useEngineStore();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  const activateEditorMode = (nextMode: EditorMode) => {
+    if (nextMode !== "play") {
+      setMode(nextMode);
+      return;
+    }
+
+    void openPlaytestWindow({
+      mapId: selectedMapId,
+      prepare: async () => {
+        flushPlayAutosave();
+        await persistEngineWorkspaceNow();
+      },
+    })
+      .then((opened) => {
+        if (!opened) {
+          window.alert("The playtest tab was blocked. Allow popups for this site and try again.");
+        }
+      })
+      .catch((error) => {
+        console.error("Could not open playtest", error);
+        window.alert("The playtest could not be prepared. Your Studio project is unchanged.");
+      });
+  };
 
   // Group nav items by primary and secondary for mobile
   const mainNavItems: { id: EditorMode; label: string; icon: React.ReactNode }[] = [
@@ -47,6 +86,7 @@ export function AppShell() {
     { id: "game_editor", label: "Game", icon: <Settings2 className="w-5 h-5" /> },
     { id: "dungeon_generator", label: "Dungeons", icon: <Layers3 className="w-5 h-5" /> },
     { id: "model_maker", label: "Models", icon: <Box className="w-5 h-5" /> },
+    { id: "animation_maker", label: "Animations", icon: <Clapperboard className="w-5 h-5" /> },
     { id: "sprite_creator", label: "Sprites", icon: <ImageIcon className="w-5 h-5" /> },
     { id: "dialogue_editor", label: "Dialogue", icon: <MessageSquare className="w-5 h-5" /> },
     { id: "quest_editor", label: "Quests", icon: <BookOpen className="w-5 h-5" /> },
@@ -88,7 +128,7 @@ export function AppShell() {
             {allNavItems.map((item) => (
               <li key={item.id}>
                 <button
-                  onClick={() => setMode(item.id)}
+                  onClick={() => activateEditorMode(item.id)}
                   className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${
                     mode === item.id
                       ? "bg-neutral-800 text-white font-medium"
@@ -138,7 +178,7 @@ export function AppShell() {
               <li key={item.id}>
                 <button
                   onClick={() => {
-                    setMode(item.id);
+                    activateEditorMode(item.id);
                     setMobileMenuOpen(false);
                   }}
                   className={`w-full flex items-center gap-4 px-4 py-4 rounded-xl text-base transition-colors ${
@@ -190,8 +230,9 @@ export function AppShell() {
           {mode === "game_editor" && <GameEditor />}
           {mode === "dungeon_generator" && <DungeonGeneratorPanel />}
           {mode === "model_maker" && <ModelMaker />}
+          {mode === "animation_maker" && <AnimationMaker />}
           {mode === "sprite_creator" && <SpriteCreator />}
-          {mode === "dialogue_editor" && <DialogueEditor />}
+          {mode === "dialogue_editor" && <StandardDialogueEditor />}
           {mode === "quest_editor" && <QuestEditor />}
           {mode === "entity_editor" && <EntityEditor />}
           {mode === "cutscene_editor" && <CutsceneEditor />}
@@ -209,7 +250,7 @@ export function AppShell() {
           <button
             key={item.id}
             onClick={() => {
-              setMode(item.id);
+              activateEditorMode(item.id);
               setMobileMenuOpen(false);
             }}
             className={`flex flex-col items-center justify-center w-full h-full gap-1 transition-colors ${

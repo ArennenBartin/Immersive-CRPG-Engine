@@ -36,6 +36,8 @@ export interface ImmersiveResolvedLightSource {
   map_id: string;
   source_kind: ImmersiveLightSourceKind;
   cell: [number, number];
+  /** Absolute presentation height for a placed fixture, when authored. */
+  render_height?: number;
   intensity: number;
   radius: number;
   color?: string;
@@ -145,6 +147,7 @@ interface LightSourceProfile {
   radius: number;
   duration_ticks?: number;
   color?: string;
+  source_height_offset?: number;
   active_by_default: boolean;
   extinguishable: boolean;
   mobility: Exclude<ImmersiveLightMobility, "runtime">;
@@ -251,6 +254,7 @@ const inferredLightProfile = (
   const intensity = clamp01(Number(raw?.intensity ?? 0.75));
   const radiusValue = Number(raw?.radius ?? 6);
   const durationValue = Number(raw?.duration_ticks);
+  const sourceHeightValue = Number(raw?.source_height_offset);
   const mobility = validMobility(raw?.mobility) ? raw.mobility : defaultMobility;
   const stimulusTags = Array.isArray(raw?.stimulus_tags)
     ? raw.stimulus_tags.filter((tag): tag is string => typeof tag === "string")
@@ -263,6 +267,9 @@ const inferredLightProfile = (
         ? Math.max(1, Math.floor(durationValue))
         : undefined,
     color: typeof raw?.color === "string" ? raw.color : "#facc15",
+    source_height_offset: Number.isFinite(sourceHeightValue)
+      ? sourceHeightValue
+      : undefined,
     active_by_default: raw?.active_by_default !== false,
     extinguishable: raw?.extinguishable !== false,
     mobility,
@@ -350,6 +357,7 @@ const profileSource = ({
   profile,
   createdAtTick,
   carrierActorId,
+  renderHeight,
 }: {
   gamePackage: GamePackage;
   save: PlaySave;
@@ -361,6 +369,7 @@ const profileSource = ({
   profile: LightSourceProfile;
   createdAtTick?: number;
   carrierActorId?: string;
+  renderHeight?: number;
 }): ImmersiveResolvedLightSource | undefined => {
   const tick = currentTick(save);
   const expiryOverrides = lightExpiryOverrides(save);
@@ -389,6 +398,10 @@ const profileSource = ({
     map_id: mapId,
     source_kind: sourceKind,
     cell: asCell(cell),
+    render_height:
+      typeof renderHeight === "number" && Number.isFinite(renderHeight)
+        ? round4(renderHeight)
+        : undefined,
     intensity: profile.intensity,
     radius: round4(profile.radius * spatialRatio(gamePackage)),
     color: profile.color,
@@ -479,6 +492,16 @@ export const resolveImmersiveLightSources = (
     const profile = inferredLightProfile(definition as unknown as Record<string, unknown>, "fixed", false);
     if (!profile) return;
     const moved = delta?.moved_objects?.[placementKey];
+    // Only publish an absolute render height when the fixture explicitly
+    // authors an emitter offset. Legacy lights without that contract retain
+    // the renderer's established height heuristic.
+    const hasAuthoredRenderHeight =
+      profile.source_height_offset !== undefined;
+    const renderHeight = hasAuthoredRenderHeight
+      ? Number(moved?.height_offset ?? authored.height_offset ?? 0) +
+        Number(profile.source_height_offset || 0) +
+        (definition.tags?.includes("light_ceiling") ? 0 : 0.01)
+      : undefined;
     const source = profileSource({
       gamePackage,
       save,
@@ -488,6 +511,7 @@ export const resolveImmersiveLightSources = (
       sourceKind: moved ? "moved_object" : "authored_object",
       cell: asCell(moved?.cell || authored.cell),
       profile,
+      renderHeight,
     });
     if (source) sources.push(source);
   });
