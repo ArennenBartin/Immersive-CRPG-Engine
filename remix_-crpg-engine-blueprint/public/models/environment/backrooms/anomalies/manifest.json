@@ -1,0 +1,548 @@
+{
+  "kit_id": "backrooms_phase7_anomaly_kit",
+  "version": 2,
+  "units": "meters",
+  "coordinate_contract": {
+    "origin": "center_floor",
+    "blender_up": "+Z",
+    "blender_front": "-Y",
+    "engine_up": "+Y",
+    "engine_front": "+Z"
+  },
+  "assets": [
+    {
+      "id": "backrooms_office_desk",
+      "display_name": "Worn Office Desk",
+      "filename": "office-desk.glb",
+      "url": "/models/environment/backrooms/anomalies/office-desk.glb",
+      "origin": "center_floor",
+      "anchor": "floor",
+      "front_axis_blender": "-Y",
+      "front_axis_engine": "+Z",
+      "collision_policy": "runtime_placement_metadata",
+      "triangle_budget": 3000,
+      "mesh_count": 2,
+      "vertices": 784,
+      "triangles": 1512,
+      "bounds_blender": [
+        0.96,
+        0.58,
+        0.76
+      ],
+      "min_blender": [
+        -0.48,
+        -0.29,
+        0.0
+      ],
+      "max_blender": [
+        0.48,
+        0.29,
+        0.76
+      ],
+      "bounds_engine": [
+        0.96,
+        0.76,
+        0.58
+      ],
+      "source_min_engine": [
+        -0.48,
+        0.0,
+        -0.29
+      ],
+      "source_max_engine": [
+        0.48,
+        0.76,
+        0.29
+      ],
+      "materials": [
+        "MAT_DeskOxidizedMetal",
+        "MAT_WornDeskLaminate"
+      ],
+      "bytes": 436920
+    },
+    {
+      "id": "backrooms_filing_cabinet",
+      "display_name": "Worn Filing Cabinet",
+      "filename": "filing-cabinet.glb",
+      "url": "/models/environment/backrooms/anomalies/filing-cabinet.glb",
+      "origin": "center_floor",
+      "anchor": "floor",
+      "front_axis_blender": "-Y",
+      "front_axis_engine": "+Z",
+      "collision_policy": "runtime_placement_metadata",
+      "triangle_budget": 2000,
+      "mesh_count": 2,
+      "vertices": 680,
+      "triangles": 1252,
+      "bounds_blender": [
+        0.46,
+        0.674,
+        1.32
+      ],
+      "min_blender": [
+        -0.23,
+        -0.364,
+        0.0
+      ],
+      "max_blender": [
+        0.23,
+        0.31,
+        1.32
+      ],
+      "bounds_engine": [
+        0.46,
+        1.32,
+        0.674
+      ],
+      "source_min_engine": [
+        -0.23,
+        0.0,
+        -0.31
+      ],
+      "source_max_engine": [
+        0.23,
+        1.32,
+        0.364
+      ],
+      "materials": [
+        "MAT_CabinetDarkHardware",
+        "MAT_CabinetYellowedPaint"
+      ],
+      "bytes": 310852
+    },
+    {
+      "id": "backrooms_wrong_clock",
+      "display_name": "Many-Handed Wrong Clock",
+      "filename": "wrong-clock.glb",
+      "url": "/models/environment/backrooms/anomalies/wrong-clock.glb",
+      "origin": "center_floor",
+      "anchor": "wall",
+      "front_axis_blender": "-Y",
+      "front_axis_engine": "+Z",
+      "collision_policy": "collision_mode_none",
+      "triangle_budget": 2500,
+      "mesh_count": 2,
+      "vertices": 600,
+      "triangles": 1168,
+      "bounds_blender": [
+        0.54,
+        0.1145,
+        0.54
+      ],
+      "min_blender": [
+        -0.27,
+        -0.0795,
+        0.0
+      ],
+      "max_blender": [
+        0.27,
+        0.035,
+        0.54
+      ],
+      "bounds_engine": [
+        0.54,
+        0.54,
+        0.1145
+      ],
+      "source_min_engine": [
+        -0.27,
+        0.0,
+        -0.035
+      ],
+      "source_max_engine": [
+        0.27,
+        0.54,
+        0.0795
+      ],
+      "materials": [
+        "MAT_AnomalyDarkMetal",
+        "MAT_AnomalyPalePlastic"
+      ],
+      "bytes": 407096
+    },
+    {
+      "id": "backrooms_vertical_fluorescent",
+      "display_name": "Vertical Wall Fluorescent",
+      "filename": "vertical-fluorescent.glb",
+      "url": "/models/environment/backrooms/anomalies/vertical-fluorescent.glb",
+      "origin": "center_floor",
+      "anchor": "wall",
+      "front_axis_blender": "-Y",
+      "front_axis_engine": "+Z",
+      "collision_policy": "collision_mode_none",
+      "triangle_budget": 1800,
+      "mesh_count": 2,
+      "vertices": 224,
+      "triangles": 432,
+      "bounds_blender": [
+        0.22,
+        0.1085,
+        1.24
+      ],
+      "min_blender": [
+        -0.11,
+        -0.0385,
+        0.0
+      ],
+      "max_blender": [
+        0.11,
+        0.07,
+        1.24
+      ],
+      "bounds_engine": [
+        0.22,
+        1.24,
+        0.1085
+      ],
+      "source_min_engine": [
+        -0.11,
+        0.0,
+        -0.07
+      ],
+      "source_max_engine": [
+        0.11,
+        1.24,
+        0.0385
+      ],
+      "materials": [
+        "MAT_AnomalyDarkMetal",
+        "MAT_AnomalyFluorescentGlow"
+      ],
+      "bytes": 226172
+    },
+    {
+      "id": "backrooms_backwards_desk",
+      "display_name": "Backwards Office Desk",
+      "filename": "backwards-desk.glb",
+      "url": "/models/environment/backrooms/anomalies/backwards-desk.glb",
+      "origin": "center_floor",
+      "anchor": "floor",
+      "front_axis_blender": "-Y",
+      "front_axis_engine": "+Z",
+      "collision_policy": "collision_mode_none",
+      "triangle_budget": 3000,
+      "mesh_count": 2,
+      "vertices": 784,
+      "triangles": 1512,
+      "bounds_blender": [
+        0.96,
+        0.58,
+        0.76
+      ],
+      "min_blender": [
+        -0.48,
+        -0.29,
+        0.0
+      ],
+      "max_blender": [
+        0.48,
+        0.29,
+        0.76
+      ],
+      "bounds_engine": [
+        0.96,
+        0.76,
+        0.58
+      ],
+      "source_min_engine": [
+        -0.48,
+        0.0,
+        -0.29
+      ],
+      "source_max_engine": [
+        0.48,
+        0.76,
+        0.29
+      ],
+      "materials": [
+        "MAT_DeskOxidizedMetal",
+        "MAT_WornDeskLaminate"
+      ],
+      "bytes": 436984
+    },
+    {
+      "id": "backrooms_impossible_filing_cabinet",
+      "display_name": "Impossible Filing Cabinet",
+      "filename": "impossible-filing-cabinet.glb",
+      "url": "/models/environment/backrooms/anomalies/impossible-filing-cabinet.glb",
+      "origin": "center_floor",
+      "anchor": "floor",
+      "front_axis_blender": "-Y",
+      "front_axis_engine": "+Z",
+      "collision_policy": "collision_mode_none",
+      "triangle_budget": 3500,
+      "mesh_count": 2,
+      "vertices": 872,
+      "triangles": 1604,
+      "bounds_blender": [
+        0.46,
+        0.73,
+        1.32
+      ],
+      "min_blender": [
+        -0.23,
+        -0.364,
+        0.0
+      ],
+      "max_blender": [
+        0.23,
+        0.366,
+        1.32
+      ],
+      "bounds_engine": [
+        0.46,
+        1.32,
+        0.73
+      ],
+      "source_min_engine": [
+        -0.23,
+        0.0,
+        -0.366
+      ],
+      "source_max_engine": [
+        0.23,
+        1.32,
+        0.364
+      ],
+      "materials": [
+        "MAT_CabinetDarkHardware",
+        "MAT_CabinetYellowedPaint"
+      ],
+      "bytes": 337596
+    },
+    {
+      "id": "backrooms_wrong_exit_sign",
+      "display_name": "Wrong Exit Sign",
+      "filename": "wrong-exit-sign.glb",
+      "url": "/models/environment/backrooms/anomalies/wrong-exit-sign.glb",
+      "origin": "center_floor",
+      "anchor": "wall",
+      "front_axis_blender": "-Y",
+      "front_axis_engine": "+Z",
+      "collision_policy": "collision_mode_none",
+      "triangle_budget": 1800,
+      "mesh_count": 2,
+      "vertices": 368,
+      "triangles": 680,
+      "bounds_blender": [
+        0.92,
+        0.096,
+        0.5034
+      ],
+      "min_blender": [
+        -0.46,
+        -0.056,
+        0.0
+      ],
+      "max_blender": [
+        0.46,
+        0.04,
+        0.5034
+      ],
+      "bounds_engine": [
+        0.92,
+        0.5034,
+        0.096
+      ],
+      "source_min_engine": [
+        -0.46,
+        0.0,
+        -0.04
+      ],
+      "source_max_engine": [
+        0.46,
+        0.5034,
+        0.056
+      ],
+      "materials": [
+        "MAT_AnomalyExitGreen",
+        "MAT_AnomalyPalePlastic"
+      ],
+      "bytes": 396764
+    },
+    {
+      "id": "backrooms_recursive_chair",
+      "display_name": "Recursive Office Chair",
+      "filename": "recursive-chair.glb",
+      "url": "/models/environment/backrooms/anomalies/recursive-chair.glb",
+      "origin": "center_floor",
+      "anchor": "floor",
+      "front_axis_blender": "-Y",
+      "front_axis_engine": "+Z",
+      "collision_policy": "collision_mode_none",
+      "triangle_budget": 3500,
+      "mesh_count": 2,
+      "vertices": 848,
+      "triangles": 1644,
+      "bounds_blender": [
+        0.6589,
+        0.6537,
+        1.115
+      ],
+      "min_blender": [
+        -0.2989,
+        -0.3268,
+        0.0
+      ],
+      "max_blender": [
+        0.36,
+        0.3268,
+        1.115
+      ],
+      "bounds_engine": [
+        0.6589,
+        1.115,
+        0.6537
+      ],
+      "source_min_engine": [
+        -0.2989,
+        0.0,
+        -0.3268
+      ],
+      "source_max_engine": [
+        0.36,
+        1.115,
+        0.3268
+      ],
+      "materials": [
+        "MAT_AnomalyChairFabric",
+        "MAT_AnomalyDarkMetal"
+      ],
+      "bytes": 421124
+    },
+    {
+      "id": "backrooms_half_wall_bisected_desk",
+      "display_name": "Half-Wall Bisected Desk",
+      "filename": "half-wall-bisected-desk.glb",
+      "url": "/models/environment/backrooms/anomalies/half-wall-bisected-desk.glb",
+      "origin": "center_floor",
+      "anchor": "partition",
+      "front_axis_blender": "-Y",
+      "front_axis_engine": "+Z",
+      "collision_policy": "collision_mode_none",
+      "triangle_budget": 6500,
+      "mesh_count": 4,
+      "vertices": 896,
+      "triangles": 1728,
+      "bounds_blender": [
+        0.96,
+        1.28,
+        1.1575
+      ],
+      "min_blender": [
+        -0.48,
+        -0.64,
+        0.0
+      ],
+      "max_blender": [
+        0.48,
+        0.64,
+        1.1575
+      ],
+      "bounds_engine": [
+        0.96,
+        1.1575,
+        1.28
+      ],
+      "source_min_engine": [
+        -0.48,
+        0.0,
+        -0.64
+      ],
+      "source_max_engine": [
+        0.48,
+        1.1575,
+        0.64
+      ],
+      "materials": [
+        "MAT_AnomalyAgedWallpaper",
+        "MAT_AnomalyDarkMetal",
+        "MAT_DeskOxidizedMetal",
+        "MAT_WornDeskLaminate"
+      ],
+      "bytes": 774848
+    },
+    {
+      "id": "backrooms_wall_clipped_filing_cabinet",
+      "display_name": "Wall-Clipped Filing Cabinet",
+      "filename": "wall-clipped-filing-cabinet.glb",
+      "url": "/models/environment/backrooms/anomalies/wall-clipped-filing-cabinet.glb",
+      "origin": "center_floor",
+      "anchor": "wall",
+      "front_axis_blender": "-Y",
+      "front_axis_engine": "+Z",
+      "collision_policy": "collision_mode_none",
+      "triangle_budget": 6000,
+      "mesh_count": 4,
+      "vertices": 744,
+      "triangles": 1372,
+      "bounds_blender": [
+        1.47,
+        0.674,
+        2.32
+      ],
+      "min_blender": [
+        -0.735,
+        -0.154,
+        0.0
+      ],
+      "max_blender": [
+        0.735,
+        0.52,
+        2.32
+      ],
+      "bounds_engine": [
+        1.47,
+        2.32,
+        0.674
+      ],
+      "source_min_engine": [
+        -0.735,
+        0.0,
+        -0.52
+      ],
+      "source_max_engine": [
+        0.735,
+        2.32,
+        0.154
+      ],
+      "materials": [
+        "MAT_AnomalyAgedWallpaper",
+        "MAT_AnomalyDarkMetal",
+        "MAT_CabinetDarkHardware",
+        "MAT_CabinetYellowedPaint"
+      ],
+      "bytes": 642056
+    }
+  ],
+  "staged_review": {
+    "filename": "backrooms-anomaly-kit-review.glb",
+    "url": "/models/environment/backrooms/anomalies/backrooms-anomaly-kit-review.glb",
+    "bytes": 2161248,
+    "preview": "backrooms-anomaly-kit-preview.png"
+  },
+  "phase7_contract": {
+    "minimum_validated_kit": 8,
+    "complex_clipped_modules": [
+      "backrooms_half_wall_bisected_desk",
+      "backrooms_wall_clipped_filing_cabinet"
+    ],
+    "glb_collision_meshes": "none",
+    "runtime_collision_owner": "ObjectPlacementData.collision_mode",
+    "embedded_collision_mode": "none",
+    "opaque_backing_required": true,
+    "runtime_transforms": [
+      "scale",
+      "rotation_offset",
+      "plan_offset",
+      "height_offset"
+    ]
+  },
+  "validation": {
+    "status": "PASS",
+    "asset_count": 10,
+    "total_triangles": 12904,
+    "materials_per_asset": 2,
+    "failures": []
+  }
+}
