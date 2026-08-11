@@ -12,6 +12,51 @@ export const BACKROOMS_FREE_TURN_RATE_RADIANS_PER_SECOND =
 export const BACKROOMS_FREE_COLLISION_RADIUS_FINE = 1.08;
 export const BACKROOMS_FREE_MAX_FRAME_SECONDS = 0.05;
 export const BACKROOMS_FREE_MAX_SWEEP_STEP_FINE = 0.2;
+// The live third-person pose already drives Steve and the camera directly on
+// every RAF. This is only a crash/reload safety checkpoint for sub-cell turns
+// and positions; gameplay cell crossings, input release, interactions, blur,
+// and panels all force an exact commit separately. Keeping the safety pulse at
+// 5 Hz avoids republishing the complete save/Play tree 30 times per second.
+export const FREE_PLAYER_DURABLE_POSE_HZ = 5;
+export const FREE_PLAYER_DURABLE_POSE_INTERVAL_MS =
+  1000 / FREE_PLAYER_DURABLE_POSE_HZ;
+
+/** Keeps render-only pose integration off the durable save's hot path. */
+export const shouldCommitFreePlayerDurablePose = (options: {
+  dirty: boolean;
+  force?: boolean;
+  nowMs: number;
+  lastCommitAtMs: number;
+}) =>
+  options.dirty &&
+  (Boolean(options.force) ||
+    options.nowMs - options.lastCommitAtMs >=
+      FREE_PLAYER_DURABLE_POSE_INTERVAL_MS);
+
+/**
+ * Settles the player-only exploration energy clock without constructing the
+ * NPC scheduler. Generated Level Zero maps commonly contain no active entity
+ * placements, so this is the hot path for every fine-cell crossing there.
+ */
+export const resolveEntityFreeExplorationSettlement = (options: {
+  energy: number;
+  speed: number;
+  actionThreshold?: number;
+}): Readonly<{ energy: number; elapsedTicks: number }> => {
+  const actionThreshold = options.actionThreshold ?? 1000;
+  const speed = Math.max(1, options.speed || 10);
+  if (options.energy >= actionThreshold) {
+    return { energy: options.energy, elapsedTicks: 0 };
+  }
+  const elapsedTicks = Math.max(
+    1,
+    Math.ceil((actionThreshold - options.energy) / speed),
+  );
+  return {
+    energy: options.energy + speed * elapsedTicks,
+    elapsedTicks,
+  };
+};
 
 const EPSILON = 1e-6;
 

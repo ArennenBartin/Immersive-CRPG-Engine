@@ -105,6 +105,7 @@ import {
   getRuntimeMapGrid,
   isLargeAuthoredMap,
   materializeLargeMapWindow,
+  resolveNearestRuntimeWalkableFineCell,
   footprintContainsCell,
   footprintIntersectsLeadingEdge,
   footprintsOverlap,
@@ -137,6 +138,7 @@ import {
   buildConditionContext,
   getAvailableShopStock,
   getVisibleDialogueOptions,
+  findEligibleRegionTransitionTriggers,
   findEligibleSwitchChangeTriggers,
   isTriggerEligible,
   isMapExitEligible,
@@ -208,9 +210,14 @@ import {
   thirdPersonLookRef,
   THIRD_PERSON_FOV,
   type ThirdPersonCameraBlocker,
+  type ThirdPersonLivePoseRef,
   type PlayCameraMode,
 } from "./PlayScene3D";
 import { ScreenFX } from "./ScreenFX";
+import {
+  TransitionPresentationLayer,
+  type ActiveTransitionPresentation,
+} from "./TransitionPresentationLayer";
 import { BACKROOMS_LEVEL_ZERO_FLOOR_OBJECT_ID } from "../schema/presets";
 import { SpatialInventoryGrid } from "./SpatialInventoryGrid";
 import {
@@ -229,6 +236,8 @@ import {
   resolvePlayPointLightBudget,
   resolvePlayRenderRadiusMacro,
   shouldDispatchHeldInputRepeat,
+  shouldEnableThirdPersonShadowMaps,
+  shouldUseThirdPersonDirectionalStreaming,
   shouldPreserveHeldInputOnCombatStart,
   shouldDriveDemandFrames,
 } from "../utils/playInput";
@@ -358,11 +367,20 @@ import {
 import { getJamEngineVisualHeight } from "../utils/legacyJamCompatibility";
 import { canAutomaticallyStepBetween } from "../utils/traversal";
 import {
+  advanceBackroomsRuntimeObservation,
+  backroomsRoomIdAtFineCell,
+  leaveBackroomsRuntimeLevel,
+  resolveBackroomsPortalTraversal,
+} from "../backroomsGen/runtimeState";
+import { transitionPresentationForExit } from "../backroomsGen/transitions";
+import {
   advanceFreeActorToward,
   BACKROOMS_FREE_MAX_FRAME_SECONDS,
+  shouldCommitFreePlayerDurablePose,
   freePlayerPositionIntersectsBounds,
   quantizeFreePlayerPosition,
   resolveFacedInteractionProbe,
+  resolveEntityFreeExplorationSettlement,
   resolveFreeActorStart,
   resolveFreeInteractionPose,
   resolveFreePlayerMovement,
@@ -496,6 +514,15 @@ const withRuntimePackageArrays = (pkg: GamePackage): GamePackage => {
     simulation_materials: arrayOrEmpty(partial.simulation_materials),
     simulation_processes: arrayOrEmpty(partial.simulation_processes),
     simulation_workstations: arrayOrEmpty(partial.simulation_workstations),
+    backrooms_recipes: arrayOrEmpty(partial.backrooms_recipes),
+    backrooms_level_profiles: arrayOrEmpty(partial.backrooms_level_profiles),
+    backrooms_transition_rules: arrayOrEmpty(partial.backrooms_transition_rules),
+    transition_presentation_profiles: arrayOrEmpty(
+      partial.transition_presentation_profiles,
+    ),
+    backrooms_motifs: arrayOrEmpty(partial.backrooms_motifs),
+    backrooms_event_profiles: arrayOrEmpty(partial.backrooms_event_profiles),
+    backrooms_anomaly_profiles: arrayOrEmpty(partial.backrooms_anomaly_profiles),
     validators: partial.validators || {},
   };
 };
@@ -534,6 +561,24 @@ const MOVEMENT_CHORD_BUFFER_MS = 24;
 // advanced the simulation faster than the rendered actor could catch up and
 // could dispatch thirty full exploration updates per second.
 const MOVEMENT_REPEAT_INTERVAL_MS = 240 / FINE_PER_MACRO;
+// Continuous locomotion integrates on every browser frame, but the durable
+// save (and therefore the large React/simulation tree) only samples that pose
+// at a bounded cadence. Fine-cell crossings and input release still flush
+// immediately because they have gameplay meaning.
+const FREE_MOVEMENT_POSE_EPSILON = 0.000001;
+
+type FreeMovementTransientPose = {
+  active: boolean;
+  mapId: string;
+  position: [number, number];
+  facing: [number, number];
+  moving: boolean;
+  dirty: boolean;
+  lastCommitAt: number;
+  durableCell: [number, number];
+  durablePosition: [number, number];
+  durableFacing: [number, number];
+};
 const PLAYER_FOOTSTEP_FINE_STEP_INTERVAL = FINE_PER_MACRO;
 // Keep the audio cooldown below the normalized held cadence so footsteps do
 // not silently collapse multiple macro distances into one sound.
@@ -541,6 +586,7 @@ const PLAYER_FOOTSTEP_COOLDOWN_MS = 70;
 const COMBAT_ACTOR_SWITCH_INPUT_DELAY_MS = 180;
 const EMPTY_ENGINE_EVENTS: ReturnType<typeof usePlayStore.getState>["engineEvents"] = [];
 const EMPTY_EXPLORED_CELL_KEYS: string[] = [];
+const EMPTY_OBJECT_RENDER_PLACEMENTS: ObjectPlacementData[] = [];
 
 // Cap nearby physical lights by preset. Senses and fog still use the complete
 // authoritative illumination field. Room fixtures have a separate smaller
@@ -2450,6 +2496,45 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   );
   const freeThirdPersonMovementRef = useRef(false);
   freeThirdPersonMovementRef.current = freeThirdPersonMovement;
+  const initialFreePlayerPosition = resolveFreePlayerStart(
+    saveData?.player.cell || [0, 0],
+    saveData?.player.fine_position,
+  );
+  const initialFreePlayerFacing = (saveData?.player.facing || [0, -1]) as [
+    number,
+    number,
+  ];
+  const freeMovementPoseRef = useRef<FreeMovementTransientPose>({
+    active: freeThirdPersonMovement,
+    mapId: saveData?.current_map_id || "",
+    position: [initialFreePlayerPosition[0], initialFreePlayerPosition[1]],
+    facing: [initialFreePlayerFacing[0], initialFreePlayerFacing[1]],
+    moving: false,
+    dirty: false,
+    lastCommitAt: 0,
+    durableCell: [
+      saveData?.player.cell?.[0] || 0,
+      saveData?.player.cell?.[1] || 0,
+    ],
+    durablePosition: [
+      initialFreePlayerPosition[0],
+      initialFreePlayerPosition[1],
+    ],
+    durableFacing: [initialFreePlayerFacing[0], initialFreePlayerFacing[1]],
+  });
+  const thirdPersonLivePoseRef = useRef({
+    active: freeThirdPersonMovement,
+    worldPosition: logicalCellToWorld(
+      initialFreePlayerPosition,
+      "fine",
+      FINE_PER_MACRO,
+    ) as [number, number],
+    facing: [initialFreePlayerFacing[0], initialFreePlayerFacing[1]] as [
+      number,
+      number,
+    ],
+    moving: false,
+  }) as ThirdPersonLivePoseRef;
   const controlledActorSnapshot = getControlledActor(
     saveData,
     gamePackage,
@@ -2567,11 +2652,43 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     if (!mapId || !playerCell) return;
     const authored = rawGamePackage.maps.find((map) => map.id === mapId);
     if (!authored || !isLargeAuthoredMap(authored)) return;
+    const grid = getRuntimeMapGrid(authored);
+    const resolvedPlayerCell = resolveNearestRuntimeWalkableFineCell(
+      authored,
+      playerCell,
+    );
+    if (!resolvedPlayerCell) return;
+    if (
+      resolvedPlayerCell[0] !== playerCell[0] ||
+      resolvedPlayerCell[1] !== playerCell[1]
+    ) {
+      // Never install an empty sector window for a stale save coordinate. Use
+      // the latest store snapshot so an effect delayed behind a real movement
+      // commit cannot pull the player back to an older cell.
+      const current = usePlayStore.getState().saveData;
+      if (
+        !current ||
+        current.current_map_id !== mapId ||
+        current.player.cell[0] !== playerCell[0] ||
+        current.player.cell[1] !== playerCell[1]
+      ) {
+        return;
+      }
+      commitRuntimeSave({
+        ...current,
+        player: {
+          ...current.player,
+          cell: resolvedPlayerCell,
+          fine_position: resolvedPlayerCell,
+        },
+      });
+      return;
+    }
     // Runtime sectors are anchored to the authored map bounds, which may be
     // negative. A zero-origin division leaves the old materialized window in
     // place after crossing a real sector boundary and eventually makes both
     // player and enemy movement hit missing cells.
-    const [sectorX, sectorZ] = getRuntimeMapGrid(authored).sectorOfFine(
+    const [sectorX, sectorZ] = grid.sectorOfFine(
       playerCell[0],
       playerCell[1],
     );
@@ -2597,6 +2714,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     setActiveMap(windowMap);
   }, [
     activeMapState,
+    commitRuntimeSave,
     rawGamePackage.maps,
     saveData?.current_map_id,
     saveData?.player?.cell,
@@ -2780,11 +2898,32 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     opacity: 0,
     duration: 600,
   });
+  const transitionPresentationSequenceRef = useRef(0);
+  const [transitionPresentation, setTransitionPresentation] =
+    useState<ActiveTransitionPresentation | null>(null);
   const [playDpr, setPlayDpr] = useState(PLAY_DPR_MAX);
   const visualPreset = useVisualSettingsStore((s) => s.preset);
   const setVisualPreset = useVisualSettingsStore((s) => s.setPreset);
   const fogOfWar = useVisualSettingsStore((s) => s.fogOfWar);
   const setFogOfWar = useVisualSettingsStore((s) => s.setFogOfWar);
+  const transitionReducedMotion = useVisualSettingsStore(
+    (s) => s.transitionReducedMotion,
+  );
+  const setTransitionReducedMotion = useVisualSettingsStore(
+    (s) => s.setTransitionReducedMotion,
+  );
+  const transitionPhotosensitivity = useVisualSettingsStore(
+    (s) => s.transitionPhotosensitivity,
+  );
+  const setTransitionPhotosensitivity = useVisualSettingsStore(
+    (s) => s.setTransitionPhotosensitivity,
+  );
+  const transitionAudioComfort = useVisualSettingsStore(
+    (s) => s.transitionAudioComfort,
+  );
+  const setTransitionAudioComfort = useVisualSettingsStore(
+    (s) => s.setTransitionAudioComfort,
+  );
   const [pageVisible, setPageVisible] = useState(
     () => typeof document === "undefined" || document.visibilityState !== "hidden",
   );
@@ -2987,6 +3126,17 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       ),
     [activeMap?.cells],
   );
+  const authoredArchitectureMap = useMemo(() => {
+    if (!activeMap || !backroomsLevelZeroActive) return undefined;
+    const authored = rawGamePackage.maps.find(
+      (map) => map.id === activeMap.id,
+    );
+    return authored && isLargeAuthoredMap(authored) ? authored : undefined;
+  }, [
+    activeMap?.id,
+    backroomsLevelZeroActive,
+    rawGamePackage.maps,
+  ]);
   const visualDprCap = Math.min(
     PLAY_DPR_MAX,
     resolvePlayDprCap(
@@ -3000,6 +3150,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   const playFrameIntervalMs = resolvePlayFrameIntervalMs(
     visualPreset,
     activeMapCellCount,
+    Boolean(authoredArchitectureMap),
   );
   const playRenderRadius = scaleMacroDistanceToFine(
     resolvePlayRenderRadiusMacro(visualPreset, activeMapCellCount),
@@ -3417,6 +3568,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       ) => void)
     | null
   >(null);
+  const flushFreePlayerPoseRef = useRef<(() => void) | null>(null);
   const handleActRef = useRef<(() => void) | null>(null);
   const contextualActAvailableRef = useRef(false);
   const commitHorrorAttackRef = useRef<(() => void) | null>(null);
@@ -3520,6 +3672,51 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     },
     [pulseForSfx],
   );
+  const beginTransitionPresentation = useCallback(
+    (exit: MapData["exits"][number]) => {
+      const resolved = transitionPresentationForExit(
+        getRuntimeGamePackage(),
+        exit,
+        {
+          reducedMotion: transitionReducedMotion,
+          photosensitivity: transitionPhotosensitivity,
+          audioComfort: transitionAudioComfort,
+        },
+      );
+      if (!resolved) return;
+      for (const action of resolved.actions) {
+        if (action.type !== "play_sound") continue;
+        const settings = getRuntimeGamePackage().settings || {};
+        playSound(action.soundId, {
+          volume: action.volume,
+          playbackRate: action.playbackRate,
+          channel: "map-transition",
+          customSounds: settings.sound_effects || {},
+        });
+      }
+      const visualActions = resolved.actions.filter(
+        (action) => action.type !== "play_sound",
+      );
+      if (visualActions.length === 0) return;
+      const sequence = transitionPresentationSequenceRef.current + 1;
+      transitionPresentationSequenceRef.current = sequence;
+      setTransitionPresentation({
+        sequence,
+        profileId: resolved.profile.id,
+        actions: resolved.actions,
+      });
+    },
+    [
+      transitionAudioComfort,
+      transitionPhotosensitivity,
+      transitionReducedMotion,
+    ],
+  );
+  const completeTransitionPresentation = useCallback((sequence: number) => {
+    setTransitionPresentation((current) =>
+      current?.sequence === sequence ? null : current,
+    );
+  }, []);
   const publishHorrorRealtimeUi = useCallback((now = performance.now()) => {
     const runtime = horrorRuntimeRef.current;
     const actions: HorrorRealtimeUi["actions"] = {};
@@ -4608,6 +4805,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       commitRuntimeSave,
       presentSkillOutcome,
       advanceCombatTurnCore,
+      beginTransitionPresentation,
       playSfx,
     ],
   );
@@ -4745,7 +4943,10 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         ((targetingSkillId || verbTargeting) &&
           !thirdPersonActiveRef.current),
     );
-    if (inputBlockedRef.current) resetRepeatInputState();
+    if (inputBlockedRef.current) {
+      flushFreePlayerPoseRef.current?.();
+      resetRepeatInputState();
+    }
     if (levelUpOpen) keysDownRef.current.clear();
   }, [
     activeCutscene,
@@ -4796,6 +4997,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   // Flush all held keys and joystick state — call before opening any blocking panel so
   // inputs can't re-fire the moment the panel closes.
   const clearInputState = () => {
+    flushFreePlayerPoseRef.current?.();
     keysDownRef.current.clear();
     consumedMovementTapKeysRef.current.clear();
     joystickKeysRef.current.forEach((k) => simulateKey(k, false));
@@ -5502,7 +5704,10 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   useEffect(() => {
     // Realtime horror is advanced by the unified controller below. Keeping
     // this timer alive as well would grant each enemy two independent clocks.
-    if (horrorRealtimeMode) {
+    if (
+      horrorRealtimeMode ||
+      (activeMap?.entity_placements || []).length === 0
+    ) {
       independentEnemyDueAtRef.current.clear();
       independentEnemyMapIdRef.current = null;
       return;
@@ -5519,6 +5724,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       ) {
         return;
       }
+      if ((map.entity_placements || []).length === 0) return;
 
       if (independentEnemyMapIdRef.current !== map.id) {
         independentEnemyMapIdRef.current = map.id;
@@ -5650,7 +5856,13 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       independentEnemyDueAtRef.current.clear();
       independentEnemyMapIdRef.current = null;
     };
-  }, [horrorRealtimeMode, playSfx, presentMeleeOutcome]);
+  }, [
+    activeMap?.id,
+    activeMap?.entity_placements?.length,
+    horrorRealtimeMode,
+    playSfx,
+    presentMeleeOutcome,
+  ]);
 
   // Overwatch is a combat stance — disarm it when combat ends so the flag
   // doesn't linger into exploration.
@@ -6339,11 +6551,13 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       };
 
       if (inputBlockedRef.current) {
+        flushFreePlayerPoseRef.current?.();
         releaseLookPitch();
         resetRepeatInputState();
         return;
       }
       if (isCombatInputGateActive(time)) {
+        flushFreePlayerPoseRef.current?.();
         releaseLookPitch();
         resetRepeatInputState();
         return;
@@ -6353,6 +6567,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         currentSave?.playerStats.hp !== undefined &&
         currentSave.playerStats.hp <= 0
       ) {
+        flushFreePlayerPoseRef.current?.();
         releaseLookPitch();
         resetRepeatInputState();
         return;
@@ -6368,6 +6583,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         // Targeting pauses simulation movement but deliberately leaves Q/E
         // and pointer look alive so the center ray can still be aimed.
         if (targetingSkillIdRef.current || verbTargetingRef.current) {
+          flushFreePlayerPoseRef.current?.();
           resetRepeatInputState();
           return;
         }
@@ -6379,12 +6595,14 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         if (freeThirdPersonMovementRef.current) {
           const state = repeatStateRef.current;
           if (intent.wait) {
+            flushFreePlayerPoseRef.current?.();
             if (!state.active) waitRef.current?.();
             state.active = true;
             state.wait = true;
             return;
           }
           if (intent.forward === 0 && intent.turn === 0) {
+            flushFreePlayerPoseRef.current?.();
             resetRepeatInputState();
             return;
           }
@@ -6396,6 +6614,8 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           );
           return;
         }
+
+        flushFreePlayerPoseRef.current?.();
 
         const isHolding =
           intent.forward !== 0 || intent.turn !== 0 || intent.wait;
@@ -6782,6 +7002,14 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
 
       // single press actions
       if (!e.repeat) {
+        if (
+          freeThirdPersonMovementRef.current &&
+          !isMovementCommandKey(key)
+        ) {
+          // Interactions, attacks, menus, and scripted actions must observe
+          // the exact pose visible on this frame, not the last 30 Hz sample.
+          flushFreePlayerPoseRef.current?.();
+        }
         // Targeting mode: Esc backs out without spending the turn.
         if (
           key === "escape" &&
@@ -6981,6 +7209,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         combatInputHeldKeysRef.current.delete(key);
         releaseCombatInputGateIfReady();
         if (![...keysDownRef.current].some(isMovementCommandKey)) {
+          flushFreePlayerPoseRef.current?.();
           // Do not leave a released direction active until the next RAF. A
           // fast opposite-direction tap can arrive in that gap and must be
           // treated as a fresh one-step input.
@@ -6990,6 +7219,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     };
 
     const clearHeldInput = () => {
+      flushFreePlayerPoseRef.current?.();
       keysDownRef.current.clear();
       horrorContactLatchRef.current = null;
       combatInputHeldKeysRef.current.clear();
@@ -7321,6 +7551,32 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       let playerEnergy = sData.playerStats.energy || 0;
       const playerSpeed = Math.max(1, sData.playerStats.speed || 10);
       let playerCell = [...sData.player.cell];
+
+      // Level Zero previews intentionally begin without active actors. Their
+      // fine-step movement still needs identical energy/clock settlement, but
+      // it should not allocate occupancy grids, task indexes, world-fact
+      // histories, pathfinding closures, and NPC scheduler state every time
+      // Steve crosses one fine cell.
+      if (!(activeMap.entity_placements?.length)) {
+        const settlement = resolveEntityFreeExplorationSettlement({
+          energy: playerEnergy,
+          speed: playerSpeed,
+        });
+        const clockStart = sData.clock_minutes ?? 0;
+        return {
+          saveData: {
+            ...sData,
+            playerStats: {
+              ...sData.playerStats,
+              energy: settlement.energy,
+            },
+            clock_minutes:
+              clockStart +
+              settlement.elapsedTicks * clockMinutesPerTick(gp.settings),
+          },
+          logMessages: state.logMessages,
+        };
+      }
 
       const messages: string[] = [];
       const originalEntities = sData.entity_states || {};
@@ -8728,6 +8984,10 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                   : previewMapChange;
               if (mapChange.ok) {
                 const destinationMap = gp.maps.find((map) => map.id === mapChange.save.current_map_id);
+                // Presentation is event-driven and resolves independently of
+                // the already-valid logical destination above. Comfort modes
+                // may reduce or remove it without affecting the map change.
+                beginTransitionPresentation(playerExit);
                 clearInputState();
                 setHoveredCell(null);
                 setVerbTargeting(null);
@@ -8776,7 +9036,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
               [actorCell[0], actorCell[1]],
               [nx, nz],
             );
-            const trigger = enteredNewMacroTile
+            const stepTrigger = enteredNewMacroTile
               ? activeMap.triggers?.find(
                   (candidate) =>
                     candidate.type === "step" &&
@@ -8789,7 +9049,18 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                     !(candidate.once && flags[`trig_run_${candidate.id}`]),
                 )
               : undefined;
-            if (trigger) {
+            const regionTriggers = enteredNewMacroTile
+              ? findEligibleRegionTransitionTriggers(
+                  activeMap.triggers,
+                  getActiveCell(actorCell[0], actorCell[1])?.region_id,
+                  getActiveCell(nx, nz)?.region_id,
+                  triggerConditionCtx,
+                )
+              : [];
+            for (const trigger of [
+              ...regionTriggers,
+              ...(stepTrigger ? [stepTrigger] : []),
+            ]) {
               const triggerResult = dispatchV1FireTrigger({
                 gamePackage: gp,
                 save: settledBaseSave,
@@ -8799,10 +9070,23 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                 settledBaseSave = triggerResult.save;
                 settledEvents.push(...triggerResult.events);
                 // Fine-expanded package: action cells arrive converted.
-                triggeredCutscene = getRuntimeGamePackage().cutscenes.find(
+                triggeredCutscene ??= getRuntimeGamePackage().cutscenes.find(
                   (candidate) => candidate.id === trigger.cutscene_id,
                 );
               }
+            }
+          }
+
+          if (actor.isPlayer) {
+            const authoredBackroomsMap = rawGamePackage.maps.find((map) =>
+              map.id === activeMap.id &&
+              map.generation?.generatorId === "backrooms");
+            if (authoredBackroomsMap) {
+              settledBaseSave = resolveBackroomsPortalTraversal(
+                settledBaseSave,
+                authoredBackroomsMap,
+                [nx, nz],
+              ).save;
             }
           }
 
@@ -8948,8 +9232,153 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       presentStealthActionBlock,
       presentWorldStateBlockFeedback,
       publishHorrorRealtimeUi,
+      rawGamePackage.maps,
     ],
   );
+
+  const publishFreePlayerPose = useCallback(
+    (pose: FreeMovementTransientPose) => {
+      const worldPosition = logicalCellToWorld(
+        pose.position,
+        "fine",
+        FINE_PER_MACRO,
+      );
+      const live = thirdPersonLivePoseRef.current;
+      live.active = pose.active;
+      live.worldPosition = [worldPosition[0], worldPosition[1]];
+      live.facing = [pose.facing[0], pose.facing[1]];
+      live.moving = pose.moving;
+      thirdPersonVisualYawRef.current = facingToThirdPersonYaw(pose.facing);
+    },
+    [],
+  );
+
+  const syncFreePlayerPoseFromSave = useCallback(
+    (currentSave: PlaySave, active = freeThirdPersonMovementRef.current) => {
+      const position = resolveFreePlayerStart(
+        currentSave.player.cell,
+        currentSave.player.fine_position,
+      );
+      const facing = currentSave.player.facing || [0, -1];
+      const pose = freeMovementPoseRef.current;
+      pose.active = active;
+      pose.mapId = currentSave.current_map_id;
+      pose.position = [position[0], position[1]];
+      pose.facing = [facing[0], facing[1]];
+      pose.moving = false;
+      pose.dirty = false;
+      pose.lastCommitAt = inputNow();
+      pose.durableCell = [
+        currentSave.player.cell[0],
+        currentSave.player.cell[1],
+      ];
+      pose.durablePosition = [position[0], position[1]];
+      pose.durableFacing = [facing[0], facing[1]];
+      publishFreePlayerPose(pose);
+      return pose;
+    },
+    [publishFreePlayerPose],
+  );
+
+  const setFreePlayerTransientPose = useCallback(
+    (
+      position: readonly [number, number],
+      facing: readonly [number, number],
+      moving: boolean,
+    ) => {
+      const pose = freeMovementPoseRef.current;
+      pose.position = [position[0], position[1]];
+      pose.facing = [facing[0], facing[1]];
+      pose.moving = moving;
+      pose.dirty =
+        Math.hypot(
+          pose.position[0] - pose.durablePosition[0],
+          pose.position[1] - pose.durablePosition[1],
+        ) > FREE_MOVEMENT_POSE_EPSILON ||
+        Math.hypot(
+          pose.facing[0] - pose.durableFacing[0],
+          pose.facing[1] - pose.durableFacing[1],
+        ) > FREE_MOVEMENT_POSE_EPSILON;
+      publishFreePlayerPose(pose);
+      return pose;
+    },
+    [publishFreePlayerPose],
+  );
+
+  const commitFreePlayerPose = useCallback(
+    (force = false, now = inputNow()) => {
+      const pose = freeMovementPoseRef.current;
+      if (!pose.active) return false;
+      if (
+        !shouldCommitFreePlayerDurablePose({
+          dirty: pose.dirty,
+          force,
+          nowMs: now,
+          lastCommitAtMs: pose.lastCommitAt,
+        })
+      ) {
+        return false;
+      }
+      const store = usePlayStore.getState();
+      const currentSave = store.saveData;
+      if (!currentSave || currentSave.current_map_id !== pose.mapId) {
+        if (currentSave) syncFreePlayerPoseFromSave(currentSave);
+        return false;
+      }
+
+      const durablePosition = resolveFreePlayerStart(
+        currentSave.player.cell,
+        currentSave.player.fine_position,
+      );
+      const durableFacing = currentSave.player.facing || [0, -1];
+      const durableChangedOutsideChannel =
+        currentSave.player.cell[0] !== pose.durableCell[0] ||
+        currentSave.player.cell[1] !== pose.durableCell[1] ||
+        Math.hypot(
+          durablePosition[0] - pose.durablePosition[0],
+          durablePosition[1] - pose.durablePosition[1],
+        ) > FREE_MOVEMENT_POSE_EPSILON ||
+        Math.hypot(
+          durableFacing[0] - pose.durableFacing[0],
+          durableFacing[1] - pose.durableFacing[1],
+        ) > FREE_MOVEMENT_POSE_EPSILON;
+      if (durableChangedOutsideChannel) {
+        syncFreePlayerPoseFromSave(currentSave);
+        return false;
+      }
+
+      // A boundary crossing is a gameplay move and must go through
+      // handleMove. Never smuggle a new fine-cell anchor through this cheap
+      // presentation sampler.
+      const sampledCell = quantizeFreePlayerPosition(pose.position);
+      if (
+        sampledCell[0] !== currentSave.player.cell[0] ||
+        sampledCell[1] !== currentSave.player.cell[1]
+      ) {
+        return false;
+      }
+
+      pose.lastCommitAt = now;
+      pose.dirty = false;
+      pose.durablePosition = [pose.position[0], pose.position[1]];
+      pose.durableFacing = [pose.facing[0], pose.facing[1]];
+      store.updatePlayerFinePosition(
+        [pose.position[0], pose.position[1]],
+        [pose.facing[0], pose.facing[1]],
+      );
+      return true;
+    },
+    [syncFreePlayerPoseFromSave],
+  );
+
+  const flushFreePlayerPose = useCallback(() => {
+    const pose = freeMovementPoseRef.current;
+    if (!pose.active) return;
+    pose.moving = false;
+    publishFreePlayerPose(pose);
+    commitFreePlayerPose(true);
+  }, [commitFreePlayerPose, publishFreePlayerPose]);
+  flushFreePlayerPoseRef.current = flushFreePlayerPose;
 
   const handleBackroomsFreeMove = useCallback(
     (
@@ -8966,23 +9395,44 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       );
       if (!actor?.isPlayer) return;
 
-      const start = resolveFreePlayerStart(
+      let pose = freeMovementPoseRef.current;
+      const savedPosition = resolveFreePlayerStart(
         currentSave.player.cell,
         currentSave.player.fine_position,
       );
+      const savedFacing = currentSave.player.facing || [0, -1];
+      const durableChangedOutsideChannel =
+        !pose.active ||
+        pose.mapId !== currentSave.current_map_id ||
+        currentSave.player.cell[0] !== pose.durableCell[0] ||
+        currentSave.player.cell[1] !== pose.durableCell[1] ||
+        Math.hypot(
+          savedPosition[0] - pose.durablePosition[0],
+          savedPosition[1] - pose.durablePosition[1],
+        ) > FREE_MOVEMENT_POSE_EPSILON ||
+        Math.hypot(
+          savedFacing[0] - pose.durableFacing[0],
+          savedFacing[1] - pose.durableFacing[1],
+        ) > FREE_MOVEMENT_POSE_EPSILON;
+      if (durableChangedOutsideChannel) {
+        pose = syncFreePlayerPoseFromSave(currentSave, true);
+      }
+
+      const start: [number, number] = [pose.position[0], pose.position[1]];
       const facing = rotateFreeFacing(
-        currentSave.player.facing,
+        pose.facing,
         intent.turn,
         deltaSeconds,
       );
-      thirdPersonVisualYawRef.current = facingToThirdPersonYaw(facing);
 
       if (intent.forward === 0) {
-        updatePlayerFinePosition(start, facing);
+        setFreePlayerTransientPose(start, facing, false);
+        commitFreePlayerPose(false);
         return;
       }
       if ((currentSave.playerStats.energy || 0) < ENERGY_PER_FINE_STEP) {
-        updatePlayerFinePosition(start, facing);
+        setFreePlayerTransientPose(start, facing, false);
+        commitFreePlayerPose(false);
         return;
       }
 
@@ -9013,30 +9463,102 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             freePlayerPositionIntersectsBounds(position, radius, bounds),
           ),
       });
+      const moved =
+        Math.hypot(
+          nextPosition[0] - start[0],
+          nextPosition[1] - start[1],
+        ) > FREE_MOVEMENT_POSE_EPSILON;
+      setFreePlayerTransientPose(nextPosition, facing, moved);
+
       const nextCell = quantizeFreePlayerPosition(nextPosition);
       const dx = nextCell[0] - currentSave.player.cell[0];
       const dz = nextCell[1] - currentSave.player.cell[1];
 
       if (dx === 0 && dz === 0) {
-        updatePlayerFinePosition(nextPosition, facing);
+        commitFreePlayerPose(false);
         return;
       }
       if (Math.abs(dx) <= 1 && Math.abs(dz) <= 1) {
+        // Fine-cell crossings keep the complete movement pipeline: energy,
+        // collision, exits, triggers, followers, sound, and perception.
         handleMove(dx, dz, {
           facingOverride: facing,
           continuousPosition: nextPosition,
         });
+        const committedSave = usePlayStore.getState().saveData;
+        if (committedSave) {
+          pose = syncFreePlayerPoseFromSave(
+            committedSave,
+            committedSave.current_map_id === activeMap.id &&
+              freeThirdPersonMovementRef.current,
+          );
+          const crossed =
+            committedSave.current_map_id === activeMap.id &&
+            (committedSave.player.cell[0] !== currentSave.player.cell[0] ||
+              committedSave.player.cell[1] !== currentSave.player.cell[1]);
+          pose.moving = crossed && moved;
+          publishFreePlayerPose(pose);
+        }
       }
     },
     [
       activeMap,
+      commitFreePlayerPose,
       freeMovementPrecisePlacementBounds,
       freeMovementWalkableCells,
       getActiveCell,
       handleMove,
-      updatePlayerFinePosition,
+      publishFreePlayerPose,
+      setFreePlayerTransientPose,
+      syncFreePlayerPoseFromSave,
     ],
   );
+
+  useEffect(() => {
+    const currentSave = usePlayStore.getState().saveData;
+    if (!currentSave) return;
+    const pose = freeMovementPoseRef.current;
+    if (!freeThirdPersonMovement) {
+      flushFreePlayerPose();
+      pose.active = false;
+      pose.moving = false;
+      publishFreePlayerPose(pose);
+      return;
+    }
+    const savedPosition = resolveFreePlayerStart(
+      currentSave.player.cell,
+      currentSave.player.fine_position,
+    );
+    const savedFacing = currentSave.player.facing || [0, -1];
+    const durableChangedOutsideChannel =
+      !pose.active ||
+      pose.mapId !== currentSave.current_map_id ||
+      currentSave.player.cell[0] !== pose.durableCell[0] ||
+      currentSave.player.cell[1] !== pose.durableCell[1] ||
+      Math.hypot(
+        savedPosition[0] - pose.durablePosition[0],
+        savedPosition[1] - pose.durablePosition[1],
+      ) > FREE_MOVEMENT_POSE_EPSILON ||
+      Math.hypot(
+        savedFacing[0] - pose.durableFacing[0],
+        savedFacing[1] - pose.durableFacing[1],
+      ) > FREE_MOVEMENT_POSE_EPSILON;
+    if (durableChangedOutsideChannel) {
+      syncFreePlayerPoseFromSave(currentSave, true);
+    }
+  }, [
+    freeThirdPersonMovement,
+    flushFreePlayerPose,
+    publishFreePlayerPose,
+    saveData?.current_map_id,
+    saveData?.player.cell?.[0],
+    saveData?.player.cell?.[1],
+    saveData?.player.facing?.[0],
+    saveData?.player.facing?.[1],
+    saveData?.player.fine_position?.[0],
+    saveData?.player.fine_position?.[1],
+    syncFreePlayerPoseFromSave,
+  ]);
 
   // Crawler-mode tick: A/D turns are free facing updates (identical to the
   // bump-turn the engine already allows), W/S/Q/E resolve one fine step
@@ -9131,6 +9653,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
 
   const commitHorrorAttack = useCallback(() => {
     if (!horrorRealtimeMode || inputBlockedRef.current) return;
+    flushFreePlayerPoseRef.current?.();
     const save = usePlayStore.getState().saveData;
     if (!save || save.playerStats.hp <= 0) return;
     if (presentStealthActionBlock("attack")) return;
@@ -9175,6 +9698,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
 
   const commitHorrorEvade = useCallback(() => {
     if (!horrorRealtimeMode || inputBlockedRef.current) return;
+    flushFreePlayerPoseRef.current?.();
     const store = usePlayStore.getState();
     const save = store.saveData;
     if (!save || save.playerStats.hp <= 0) return;
@@ -9506,7 +10030,13 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   );
 
   useEffect(() => {
-    if (!thirdPersonAuthored || !activeMap) return;
+    if (
+      !thirdPersonAuthored ||
+      !activeMap ||
+      (activeMap.entity_placements || []).length === 0
+    ) {
+      return;
+    }
     let lastTickAt = performance.now();
 
     const advanceContinuousEntities = () => {
@@ -11223,6 +11753,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
   };
 
   const handleAct = () => {
+    flushFreePlayerPoseRef.current?.();
+    // The flush above writes synchronously to Zustand. Shadow the render-time
+    // snapshot so pointer, keyboard, and touch interactions all resolve from
+    // the exact live pose the player was looking at when they acted.
+    const saveData = usePlayStore.getState().saveData;
     if (!activeMap || !saveData) return;
     if (saveData.playerStats.hp <= 0) return;
     if (getPendingLevelUps(saveData) > 0) return;
@@ -12179,18 +12714,22 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     activeMapDelta?.simulation_processes,
   ]);
   const containerRenderPlacements = useMemo(
-    () =>
-      (activeMap?.container_placements || []).map((c) => ({
+    () => {
+      if (!activeMap?.container_placements?.length) {
+        return EMPTY_OBJECT_RENDER_PLACEMENTS;
+      }
+      return activeMap.container_placements.map((c) => ({
         object_id: c.object_id,
         cell: c.cell,
         facing: c.facing,
-      })),
+      }));
+    },
     [activeMap?.container_placements],
   );
   const carriedObjectRenderPlacements = useMemo(() => {
-    if (!activeMap || !saveData) return [] as ObjectPlacementData[];
+    if (!activeMap || !saveData) return EMPTY_OBJECT_RENDER_PLACEMENTS;
     const carried = getPlayerCarriedObject(saveData, activeMap.id);
-    if (!carried) return [] as ObjectPlacementData[];
+    if (!carried) return EMPTY_OBJECT_RENDER_PLACEMENTS;
     const authored = (activeMap.custom_object_placements || []).find(
       (placement) => placementOriginKey(placement) === carried.key,
     );
@@ -12209,13 +12748,18 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       },
     ] satisfies ObjectPlacementData[];
   }, [
-    activeMap,
-    saveData?.map_deltas,
+    activeMap?.id,
+    activeMap?.custom_object_placements,
+    activeMapDelta?.carried_objects,
     saveData?.player.cell,
     saveData?.player.facing,
   ]);
   const extraRenderPlacements = useMemo(
-    () => [...containerRenderPlacements, ...carriedObjectRenderPlacements],
+    () => {
+      if (!containerRenderPlacements.length) return carriedObjectRenderPlacements;
+      if (!carriedObjectRenderPlacements.length) return containerRenderPlacements;
+      return [...containerRenderPlacements, ...carriedObjectRenderPlacements];
+    },
     [carriedObjectRenderPlacements, containerRenderPlacements],
   );
   const worldItemsRender = useMemo(() => {
@@ -12405,31 +12949,112 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     }
   }, [activeMap, gamePackage, viewerVisibilityInputKey]);
 
+  const discoveredUnionRef = useRef<{
+    mapId: string;
+    keys: Set<string>;
+    sorted: [number, number][];
+  }>({ mapId: "", keys: new Set(), sorted: [] });
   const viewerVisibilityPresentation = useMemo(
     (): ImmersiveViewerVisibilitySnapshot | null => {
       if (!viewerVisibilityBase || !activeMap || !saveData) {
         return viewerVisibilityBase;
       }
-      const discoveredByKey = new Map<string, [number, number]>(
-        viewerVisibilityBase.discovered.map((cell) => [
-          fineCoordKey(cell[0], cell[1]),
-          [cell[0], cell[1]],
-        ]),
-      );
-      activeExploredCells.forEach((key) => {
+      // Discovery only ever grows while a map is loaded, so this union is
+      // maintained incrementally. Rebuilding it from scratch meant a Map, an
+      // array spread and a full sort over every cell discovered so far -- and
+      // both inputs change on essentially every step, so it ran ~7 times a
+      // second and got more expensive the further the player explored.
+      //
+      // Measured on the bundled Level 0: 107 rebuilds and 2.4 million cell
+      // entries in 16 seconds of walking, which was the dominant source of the
+      // allocation churn behind the traversal stutter.
+      const union = discoveredUnionRef.current;
+      if (union.mapId !== activeMap.id) {
+        union.mapId = activeMap.id;
+        union.keys = new Set();
+        union.sorted = [];
+      }
+      const appended: [number, number][] = [];
+      for (const cell of viewerVisibilityBase.discovered) {
+        const key = fineCoordKey(cell[0], cell[1]);
+        if (union.keys.has(key)) continue;
+        union.keys.add(key);
+        appended.push([cell[0], cell[1]]);
+      }
+      for (const key of activeExploredCells) {
+        if (union.keys.has(key)) continue;
         const cell = parseFineCoordKey(key);
-        if (!Number.isFinite(cell[0]) || !Number.isFinite(cell[1])) return;
-        discoveredByKey.set(key, [cell[0], cell[1]]);
-      });
-      const sortCells = (left: [number, number], right: [number, number]) =>
-        left[0] - right[0] || left[1] - right[1];
+        if (!Number.isFinite(cell[0]) || !Number.isFinite(cell[1])) continue;
+        union.keys.add(key);
+        appended.push([cell[0], cell[1]]);
+      }
+      if (appended.length) {
+        // A new array on change so identity-keyed consumers still invalidate;
+        // the same array when nothing was discovered, so they can stand down.
+        union.sorted = [...union.sorted, ...appended].sort(
+          (left, right) => left[0] - right[0] || left[1] - right[1],
+        );
+      }
       return {
         ...viewerVisibilityBase,
-        discovered: [...discoveredByKey.values()].sort(sortCells),
+        discovered: union.sorted,
       };
     },
     [activeMap, activeExploredCells, viewerVisibilityBase],
   );
+
+  // Room observation pins are presentation-derived, but the resulting
+  // peripheral state is durable. Any re-pairing therefore happens only after
+  // every involved optional endpoint has left sight and the recent trail.
+  const backroomsObservationKeyRef = useRef("");
+  useEffect(() => {
+    const currentSave = usePlayStore.getState().saveData;
+    if (!currentSave || !activeMap || !viewerVisibilityPresentation) return;
+    const authoredMap = rawGamePackage.maps.find((map) =>
+      map.id === currentSave.current_map_id &&
+      map.generation?.generatorId === "backrooms");
+    if (!authoredMap) {
+      backroomsObservationKeyRef.current = "";
+      const exited = leaveBackroomsRuntimeLevel(currentSave);
+      if (exited !== currentSave) commitRuntimeSave(exited);
+      return;
+    }
+    const currentRoomId = backroomsRoomIdAtFineCell(
+      authoredMap,
+      currentSave.player.cell,
+    );
+    if (!currentRoomId) return;
+    const visibleRoomIds = [...new Set(
+      viewerVisibilityPresentation.currently_visible
+        .map(([x, z]) => getActiveCell(x, z)?.room_id)
+        .filter((roomId): roomId is string =>
+          Boolean(roomId) && !roomId!.startsWith("connection:")),
+    )].sort();
+    const observationKey = [
+      currentSave.package_version,
+      currentSave.current_map_id,
+      currentSave.world_state_layers?.expedition.id ||
+        currentSave.dialogue_memory?.current_expedition_id ||
+        "expedition",
+      currentRoomId,
+      visibleRoomIds.join(","),
+    ].join(":");
+    if (backroomsObservationKeyRef.current === observationKey) return;
+    backroomsObservationKeyRef.current = observationKey;
+    const advanced = advanceBackroomsRuntimeObservation(
+      currentSave,
+      authoredMap,
+      { currentRoomId, visibleRoomIds },
+    );
+    if (advanced.changed) commitRuntimeSave(advanced.save);
+  }, [
+    activeMap,
+    commitRuntimeSave,
+    getActiveCell,
+    rawGamePackage.maps,
+    saveData?.current_map_id,
+    viewerVisibilityPresentation,
+  ]);
 
   // Hearing/debug stimuli change during nearly every combat action, but they
   // do not change fog, light, memory structure, or actor visibility. Keep the
@@ -13686,6 +14311,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
       activeDialogueId ||
       activeContainerId,
   );
+  const thirdPersonShadowMapsEnabled = shouldEnableThirdPersonShadowMaps(
+    visualPreset,
+    activeMapCellCount,
+    bottomPanelOpen,
+  );
   // Conversation alone gets the short caption bar; the browsing panels do not.
   const dialogueOnlyPanel = Boolean(
     activeDialogueId && !activeShopId && !activeDocumentId && !activeContainerId,
@@ -13717,6 +14347,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
     authoredViewMode,
     cameraMode,
   );
+  const thirdPersonDirectionalStreaming =
+    shouldUseThirdPersonDirectionalStreaming(
+      thirdPersonActive,
+      Boolean(authoredArchitectureMap),
+    );
   firstPersonActiveRef.current = firstPersonActive;
   thirdPersonActiveRef.current = thirdPersonActive;
   const visualPlayerPos = logicalCellToWorld(
@@ -13875,9 +14510,9 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           frameloop="demand"
           shadows={
             thirdPersonActive
-              ? visualPreset === "performance" || bottomPanelOpen
-                ? false
-                : "basic"
+              ? thirdPersonShadowMapsEnabled
+                ? "basic"
+                : false
               : largePlayMap ||
                   bottomPanelOpen ||
                   (visualPreset !== "high" && visualPreset !== "ultra")
@@ -13920,8 +14555,18 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
               subjectWorldY={thirdPersonSubjectWorldY}
               blockers={thirdPersonCameraBlockers}
               profile={inCombat ? "combat" : "explore"}
+              livePoseRef={
+                freeThirdPersonMovement &&
+                thirdPersonCameraSubjectSnapshot.key === "player"
+                  ? thirdPersonLivePoseRef
+                  : undefined
+              }
               onVisualYawChange={handleThirdPersonVisualYaw}
-              onStreamDirectionChange={handleThirdPersonStreamDirection}
+              onStreamDirectionChange={
+                thirdPersonDirectionalStreaming
+                  ? handleThirdPersonStreamDirection
+                  : undefined
+              }
             />
           ) : firstPersonAuthored ? (
             <FirstPersonCameraRig
@@ -13945,13 +14590,21 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             attach="background"
             args={[
               thirdPersonActive
-                ? "#151925"
+                ? backroomsLevelZeroActive
+                  ? "#211a0d"
+                  : "#151925"
                 : firstPersonAuthored
                 ? FIRST_PERSON_ATMOSPHERE.background
                 : ISOMETRIC_ATMOSPHERE.background,
             ]}
           />
-          {!thirdPersonActive && (
+          {thirdPersonActive && backroomsLevelZeroActive ? (
+            // Textured architecture remains complete through the local chunk
+            // diamond. A restrained warm distance haze blends its far edge
+            // into the Level Zero background instead of exposing renderer
+            // space down exceptionally long generated sightlines.
+            <fog attach="fog" args={["#211a0d", 24, 38]} />
+          ) : !thirdPersonActive ? (
             <fog
               attach="fog"
               args={
@@ -13968,7 +14621,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                     ]
               }
             />
-          )}
+          ) : null}
           {firstPersonAuthored && (
             <PlayAtmosphereRig firstPerson={firstPersonActive} />
           )}
@@ -14022,12 +14675,19 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           />
           <GameRenderer3D
             map={activeMap}
+            authoredArchitectureMap={authoredArchitectureMap}
             gridSpace="fine"
             fineRatio={FINE_PER_MACRO}
             playerPos={renderedPlayerPos}
             playerFacing={renderedPlayerFacing}
             playerSeatedPose={playerSeatedPose}
             continuousPlayerMovement={freeThirdPersonMovement}
+            playerLivePoseRef={
+              freeThirdPersonMovement &&
+              thirdPersonCameraSubjectSnapshot.key === "player"
+                ? thirdPersonLivePoseRef
+                : undefined
+            }
             playerStealthActive={playerStealthActive}
             playerSpriteId={saveData.player?.sprite_id}
             worldItems={worldItemsRender}
@@ -14081,7 +14741,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
             renderRadius={playRenderRadius}
             architectureRadius={playArchitectureRadius}
             renderForward={
-              thirdPersonActive ? thirdPersonStreamDirection : undefined
+              thirdPersonActive
+                ? thirdPersonDirectionalStreaming
+                  ? thirdPersonStreamDirection
+                  : thirdPersonSubjectFacing
+                : undefined
             }
             detailForwardDistance={
               thirdPersonActive ? exteriorForwardDrawDistance : undefined
@@ -14111,17 +14775,14 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
               )
             }
             presentationShadowsEnabled={
-              thirdPersonActive &&
-              visualPreset !== "performance" &&
-              !bottomPanelOpen
+              thirdPersonActive && thirdPersonShadowMapsEnabled
             }
             initialExplored={rendererExploredCells}
             onExplore={queueExploredCells}
             viewPresentation={rendererViewPresentation}
             playerVisualYawRef={
               thirdPersonActive &&
-              thirdPersonCameraSubjectSnapshot.key === "player" &&
-              !freeThirdPersonMovement
+              thirdPersonCameraSubjectSnapshot.key === "player"
                 ? thirdPersonVisualYawRef
                 : undefined
             }
@@ -14129,6 +14790,7 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
           <ScreenFX
             inCombat={inCombat || horrorRealtimeUi.threatActive}
             mapId={activeMap.id}
+            largeScene={largePlayMap}
           />
         </Canvas>
 
@@ -15381,6 +16043,11 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
         }}
       />
 
+      <TransitionPresentationLayer
+        presentation={transitionPresentation}
+        onComplete={completeTransitionPresentation}
+      />
+
       {levelUpOpen && saveData.playerStats.hp > 0 && (
         <LevelUpOverlay
           level={playerLevel}
@@ -15495,6 +16162,49 @@ export function PlayEngine({ onGameEnd }: { onGameEnd?: () => void } = {}) {
                 >
                   Fog {fogOfWar ? "On" : "Off"}
                 </button>
+              </div>
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                <button
+                  onClick={() =>
+                    setTransitionReducedMotion(!transitionReducedMotion)
+                  }
+                  className={`h-9 border px-3 text-[9px] font-bold uppercase tracking-wider ${
+                    transitionReducedMotion
+                      ? "border-[#a39252]/60 bg-[#a39252]/15 text-[#ded5ae]"
+                      : "border-neutral-800 bg-black text-neutral-500"
+                  }`}
+                >
+                  Reduced motion {transitionReducedMotion ? "On" : "Off"}
+                </button>
+                <button
+                  onClick={() =>
+                    setTransitionPhotosensitivity(!transitionPhotosensitivity)
+                  }
+                  className={`h-9 border px-3 text-[9px] font-bold uppercase tracking-wider ${
+                    transitionPhotosensitivity
+                      ? "border-[#a39252]/60 bg-[#a39252]/15 text-[#ded5ae]"
+                      : "border-neutral-800 bg-black text-neutral-500"
+                  }`}
+                >
+                  Gentle flashes {transitionPhotosensitivity ? "On" : "Off"}
+                </button>
+                <label className="col-span-2 flex h-9 items-center gap-2 border border-neutral-800 bg-black px-3 text-[9px] font-bold uppercase tracking-wider text-neutral-500">
+                  Transition audio
+                  <select
+                    aria-label="Transition audio comfort"
+                    value={transitionAudioComfort}
+                    onChange={(event) =>
+                      setTransitionAudioComfort(
+                        event.target.value as typeof transitionAudioComfort,
+                      )
+                    }
+                    className="ml-auto bg-black text-neutral-200 outline-none"
+                  >
+                    <option value="full">Full</option>
+                    <option value="reduced">Reduced</option>
+                    <option value="muted">Muted</option>
+                  </select>
+                </label>
               </div>
             </div>
 

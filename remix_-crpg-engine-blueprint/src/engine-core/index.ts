@@ -72,6 +72,7 @@ export {
   getRuntimeMapGrid,
   isLargeAuthoredMap,
   materializeLargeMapWindow,
+  resolveNearestRuntimeWalkableFineCell,
 } from "./runtimeMapGrid";
 export type { RuntimeGridBounds, RuntimeMapGridStats } from "./runtimeMapGrid";
 export { EventBus } from "./events";
@@ -467,6 +468,7 @@ export {
   buildConditionContext,
   computeShopPrice,
   evaluateCondition,
+  findEligibleRegionTransitionTriggers,
   findEligibleSwitchChangeTriggers,
   findCutsceneLabelIndex,
   getAvailableShopStock,

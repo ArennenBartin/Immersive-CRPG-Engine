@@ -35,6 +35,20 @@ export const resolveDerivedCeilingOpeningCellKeys = (
   return result;
 };
 
+/**
+ * Stable semantic key for the derived ceiling topology. Render-only placement
+ * arrays can be recreated by movement/save updates even when no staircase has
+ * changed; keying chunk compilation by the actual opening cells prevents that
+ * unrelated churn from rebuilding the complete architecture world.
+ */
+export const resolveDerivedCeilingOpeningSignature = (
+  placements: readonly ObjectPlacementData[],
+  objectById: ReadonlyMap<string, ObjectData>,
+): string =>
+  [...resolveDerivedCeilingOpeningCellKeys(placements, objectById)]
+    .sort()
+    .join("|");
+
 export const resolveImmersiveWallHeight = (
   authoredHeight: number,
   wall: boolean,
@@ -221,4 +235,118 @@ export const isWithinDistantArchitectureBand = ({
       forwardLateralScale,
     })
   );
+};
+
+/**
+ * Selects the low-cost architectural shell independently of the detailed
+ * simulation window. Large maps only materialize nearby fine cells for play;
+ * sourcing this pass from that same window exposes a hard edge whenever the
+ * camera can see beyond it. Callers can instead provide the authored macro
+ * cells, which are already in renderer world units and are dramatically
+ * cheaper than expanding the entire map to fine simulation cells.
+ */
+export const selectDistantArchitectureCells = <
+  T extends { x: number; z: number; active?: boolean },
+>({
+  cells,
+  center,
+  detailRadius,
+  architectureRadius,
+  forward,
+  detailForwardBonus = 0,
+  architectureForwardBonus = 0,
+  forwardLateralScale,
+  detailedCellKeys,
+}: {
+  cells: readonly T[];
+  center: readonly [number, number];
+  detailRadius: number;
+  architectureRadius: number;
+  forward?: readonly [number, number] | null;
+  detailForwardBonus?: number;
+  architectureForwardBonus?: number;
+  forwardLateralScale?: number;
+  /**
+   * Coordinates that truly have detailed geometry. When supplied, authored
+   * architecture fills every missing coordinate inside the architecture
+   * window, including holes where a requested detail wedge extends beyond the
+   * currently materialized runtime sectors.
+   */
+  detailedCellKeys?: ReadonlySet<string>;
+}): T[] =>
+  cells.filter(
+    (cell) => {
+      if (cell.active === false) return false;
+      const insideArchitectureWindow = isWithinImmersiveDirectionalWindow({
+        cell: [cell.x, cell.z],
+        center,
+        forward,
+        radius: architectureRadius,
+        forwardBonus: architectureForwardBonus,
+        forwardLateralScale,
+      });
+      if (!insideArchitectureWindow) return false;
+      if (detailedCellKeys) {
+        return !detailedCellKeys.has(`${cell.x}:${cell.z}`);
+      }
+      return !isWithinImmersiveDirectionalWindow({
+        cell: [cell.x, cell.z],
+        center,
+        forward,
+        radius: detailRadius,
+        forwardBonus: detailForwardBonus,
+        forwardLateralScale,
+      });
+    },
+  );
+
+export type AuthoredArchitectureBoundaryFiller = {
+  /** Center of one absent macro cell adjoining authored topology. */
+  position: [number, number];
+  /** Base elevation inherited from the authored occupied cell. */
+  y: number;
+};
+
+/**
+ * Builds a one-cell render-only seal around authored topology islands. Generated maps
+ * intentionally omit every cell outside their playable floorplan; thin walls
+ * and oblique third-person sightlines can otherwise reveal that absence as a
+ * black volume. One solid visual cell behind each exposed macro edge closes it
+ * without creating simulation cells, collision, React nodes, or path blockers.
+ */
+export const buildAuthoredArchitectureBoundaryFillers = <
+  T extends { x: number; z: number; y?: number; active?: boolean },
+>(cells: readonly T[]): AuthoredArchitectureBoundaryFiller[] => {
+  const occupied = new Map<string, T>();
+  cells.forEach((cell) => {
+    if (cell.active === false) return;
+    const cellKey = `${cell.x}:${cell.z}`;
+    const previous = occupied.get(cellKey);
+    if (!previous || (cell.y ?? 0) < (previous.y ?? 0)) {
+      occupied.set(cellKey, cell);
+    }
+  });
+
+  const fillers = new Map<string, AuthoredArchitectureBoundaryFiller>();
+  occupied.forEach((cell) => {
+    (
+      [
+        [0, -1],
+        [1, 0],
+        [0, 1],
+        [-1, 0],
+      ] as const
+    ).forEach(([dx, dz]) => {
+      const x = cell.x + dx;
+      const z = cell.z + dz;
+      const fillerKey = `${x}:${z}`;
+      if (occupied.has(fillerKey)) return;
+      const existing = fillers.get(fillerKey);
+      const y = cell.y ?? 0;
+      if (!existing || y < existing.y) {
+        fillers.set(fillerKey, { position: [x, z], y });
+      }
+    });
+  });
+  return [...fillers.values()];
 };

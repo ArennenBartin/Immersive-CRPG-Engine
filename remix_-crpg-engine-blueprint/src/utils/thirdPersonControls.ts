@@ -193,6 +193,35 @@ export const resolveThirdPersonPlayerCameraOpacity = (
   );
 };
 
+export const THIRD_PERSON_PLAYER_OPACITY_SETTLE_EPSILON = 0.001;
+
+export type ThirdPersonPlayerMaterialFadeUpdate =
+  | "apply_fade"
+  | "restore_base"
+  | "skip";
+
+/**
+ * Keeps the normal chase-camera pose off Steve's material hot path.
+ *
+ * An active fade must continue visiting the model every frame so meshes that
+ * finish loading asynchronously inherit the current opacity. Once the damped
+ * opacity reaches its fully-visible target, previously faded materials are
+ * restored exactly once; an already-restored model can then be skipped.
+ */
+export const resolveThirdPersonPlayerMaterialFadeUpdate = (
+  targetOpacity: number,
+  nextOpacity: number,
+  materialsAtBase: boolean,
+): ThirdPersonPlayerMaterialFadeUpdate => {
+  const fullOpacitySettled =
+    Number.isFinite(targetOpacity) &&
+    targetOpacity >= 1 &&
+    Number.isFinite(nextOpacity) &&
+    nextOpacity >= 1 - THIRD_PERSON_PLAYER_OPACITY_SETTLE_EPSILON;
+  if (!fullOpacitySettled) return "apply_fade";
+  return materialsAtBase ? "skip" : "restore_base";
+};
+
 // Chase-camera collision follows visual structure, not pathfinding. A flat
 // non-walkable floor cell (pit, liquid, void, hazard) must not become an
 // invisible wall merely because actors cannot stand on it.

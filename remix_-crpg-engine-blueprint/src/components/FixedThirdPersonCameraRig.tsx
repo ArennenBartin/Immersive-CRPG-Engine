@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type MutableRefObject } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
 import {
@@ -67,6 +67,11 @@ const THIRD_PERSON_SHOULDER_PROBE_SCALES = [1, 0.66, 0.33] as const;
 const THIRD_PERSON_SHOULDER_MIN_CLEAR = 2.2;
 const THIRD_PERSON_SHOULDER_CLEAR_MARGIN = 0.05;
 const THIRD_PERSON_SHOULDER_SCALE_DAMPING = 5;
+// Streaming rebuckets rebuild a large render window. Twelve degrees keeps the
+// forward-biased field responsive while avoiding roughly sixty React/world
+// updates during an ordinary 180-degree turn.
+export const THIRD_PERSON_STREAM_DIRECTION_BUCKET_RADIANS =
+  THREE.MathUtils.degToRad(12);
 
 /**
  * A static structural blocker expressed as a world-space AABB. Omitted
@@ -97,6 +102,22 @@ export type ThirdPersonLookInputSnapshot = {
   ready: boolean;
   resetToken: number;
 };
+
+/**
+ * Render-only player pose written by the realtime movement controller.
+ *
+ * The durable save remains authoritative for gameplay. This channel lets the
+ * camera and player model follow the in-between pose without asking React (or
+ * the persisted Zustand tree) to rebuild on every browser animation frame.
+ */
+export type ThirdPersonLivePoseSnapshot = {
+  active: boolean;
+  worldPosition: readonly [number, number];
+  facing: readonly [number, number];
+  moving: boolean;
+};
+
+export type ThirdPersonLivePoseRef = MutableRefObject<ThirdPersonLivePoseSnapshot>;
 
 export const thirdPersonLookRef: ThirdPersonLookInputSnapshot = {
   yawOffset: 0,
@@ -157,8 +178,15 @@ export const requestThirdPersonLookReset = () => {
   thirdPersonLookRef.resetToken += 1;
 };
 
-type MutableVec3 = [number, number, number];
 type SweepNormal = readonly [number, number, number];
+
+const SWEEP_NORMAL_ZERO: SweepNormal = [0, 0, 0];
+const SWEEP_NORMAL_NEGATIVE_X: SweepNormal = [-1, 0, 0];
+const SWEEP_NORMAL_POSITIVE_X: SweepNormal = [1, 0, 0];
+const SWEEP_NORMAL_NEGATIVE_Y: SweepNormal = [0, -1, 0];
+const SWEEP_NORMAL_POSITIVE_Y: SweepNormal = [0, 1, 0];
+const SWEEP_NORMAL_NEGATIVE_Z: SweepNormal = [0, 0, -1];
+const SWEEP_NORMAL_POSITIVE_Z: SweepNormal = [0, 0, 1];
 
 export type ThirdPersonCameraSweepResult = Readonly<{
   safeEye: ThirdPersonCameraVec3;
@@ -172,29 +200,6 @@ type RawSweepHit = Readonly<{
   normal: SweepNormal;
 }>;
 
-const pointInsideExpandedBlocker = (
-  point: ThirdPersonCameraVec3,
-  blocker: ThirdPersonCameraBlocker,
-  padding: number,
-) => {
-  const minY =
-    blocker.minY === undefined
-      ? Number.NEGATIVE_INFINITY
-      : Math.min(blocker.minY, blocker.maxY ?? blocker.minY) - padding;
-  const maxY =
-    blocker.maxY === undefined
-      ? Number.POSITIVE_INFINITY
-      : Math.max(blocker.minY ?? blocker.maxY, blocker.maxY) + padding;
-  return (
-    point[0] >= Math.min(blocker.minX, blocker.maxX) - padding &&
-    point[0] <= Math.max(blocker.minX, blocker.maxX) + padding &&
-    point[1] >= minY &&
-    point[1] <= maxY &&
-    point[2] >= Math.min(blocker.minZ, blocker.maxZ) - padding &&
-    point[2] <= Math.max(blocker.minZ, blocker.maxZ) + padding
-  );
-};
-
 const nearestExitNormal = (
   point: ThirdPersonCameraVec3,
   blocker: ThirdPersonCameraBlocker,
@@ -204,24 +209,43 @@ const nearestExitNormal = (
   const maxX = Math.max(blocker.minX, blocker.maxX) + padding;
   const minZ = Math.min(blocker.minZ, blocker.maxZ) - padding;
   const maxZ = Math.max(blocker.minZ, blocker.maxZ) + padding;
-  const candidates: Array<readonly [number, SweepNormal]> = [
-    [Math.abs(point[0] - minX), [-1, 0, 0]],
-    [Math.abs(maxX - point[0]), [1, 0, 0]],
-    [Math.abs(point[2] - minZ), [0, 0, -1]],
-    [Math.abs(maxZ - point[2]), [0, 0, 1]],
-  ];
+  // Preserve the old stable candidate order without allocating and sorting a
+  // short-lived array for every blocker tested by every camera probe.
+  let nearestDistance = Math.abs(point[0] - minX);
+  let normal = SWEEP_NORMAL_NEGATIVE_X;
+  const positiveXDistance = Math.abs(maxX - point[0]);
+  if (positiveXDistance < nearestDistance) {
+    nearestDistance = positiveXDistance;
+    normal = SWEEP_NORMAL_POSITIVE_X;
+  }
+  const negativeZDistance = Math.abs(point[2] - minZ);
+  if (negativeZDistance < nearestDistance) {
+    nearestDistance = negativeZDistance;
+    normal = SWEEP_NORMAL_NEGATIVE_Z;
+  }
+  const positiveZDistance = Math.abs(maxZ - point[2]);
+  if (positiveZDistance < nearestDistance) {
+    nearestDistance = positiveZDistance;
+    normal = SWEEP_NORMAL_POSITIVE_Z;
+  }
   if (blocker.minY !== undefined) {
     const minY =
       Math.min(blocker.minY, blocker.maxY ?? blocker.minY) - padding;
-    candidates.push([Math.abs(point[1] - minY), [0, -1, 0]]);
+    const negativeYDistance = Math.abs(point[1] - minY);
+    if (negativeYDistance < nearestDistance) {
+      nearestDistance = negativeYDistance;
+      normal = SWEEP_NORMAL_NEGATIVE_Y;
+    }
   }
   if (blocker.maxY !== undefined) {
     const maxY =
       Math.max(blocker.minY ?? blocker.maxY, blocker.maxY) + padding;
-    candidates.push([Math.abs(maxY - point[1]), [0, 1, 0]]);
+    const positiveYDistance = Math.abs(maxY - point[1]);
+    if (positiveYDistance < nearestDistance) {
+      normal = SWEEP_NORMAL_POSITIVE_Y;
+    }
   }
-  candidates.sort((left, right) => left[0] - right[0]);
-  return candidates[0]?.[1] ?? [0, 0, 0];
+  return normal;
 };
 
 const sweepExpandedBlocker = (
@@ -230,60 +254,100 @@ const sweepExpandedBlocker = (
   blocker: ThirdPersonCameraBlocker,
   padding: number,
 ): RawSweepHit | null => {
-  const min: MutableVec3 = [
-    Math.min(blocker.minX, blocker.maxX) - padding,
+  const minX = Math.min(blocker.minX, blocker.maxX) - padding;
+  const maxX = Math.max(blocker.minX, blocker.maxX) + padding;
+  const minY =
     blocker.minY === undefined
       ? Number.NEGATIVE_INFINITY
-      : Math.min(blocker.minY, blocker.maxY ?? blocker.minY) - padding,
-    Math.min(blocker.minZ, blocker.maxZ) - padding,
-  ];
-  const max: MutableVec3 = [
-    Math.max(blocker.minX, blocker.maxX) + padding,
+      : Math.min(blocker.minY, blocker.maxY ?? blocker.minY) - padding;
+  const maxY =
     blocker.maxY === undefined
       ? Number.POSITIVE_INFINITY
-      : Math.max(blocker.minY ?? blocker.maxY, blocker.maxY) + padding,
-    Math.max(blocker.minZ, blocker.maxZ) + padding,
-  ];
-  const direction: MutableVec3 = [
-    end[0] - start[0],
-    end[1] - start[1],
-    end[2] - start[2],
-  ];
+      : Math.max(blocker.minY ?? blocker.maxY, blocker.maxY) + padding;
+  const minZ = Math.min(blocker.minZ, blocker.maxZ) - padding;
+  const maxZ = Math.max(blocker.minZ, blocker.maxZ) + padding;
+  const directionX = end[0] - start[0];
+  const directionY = end[1] - start[1];
+  const directionZ = end[2] - start[2];
 
-  if (pointInsideExpandedBlocker(start, blocker, padding)) {
+  if (
+    start[0] >= minX &&
+    start[0] <= maxX &&
+    start[1] >= minY &&
+    start[1] <= maxY &&
+    start[2] >= minZ &&
+    start[2] <= maxZ
+  ) {
     const normal = nearestExitNormal(start, blocker, padding);
     const outwardMotion =
-      direction[0] * normal[0] +
-      direction[1] * normal[1] +
-      direction[2] * normal[2];
+      directionX * normal[0] +
+      directionY * normal[1] +
+      directionZ * normal[2];
     if (outwardMotion > 0.000001) return null;
     return { fraction: 0, normal };
   }
 
   let enter = 0;
   let exit = 1;
-  let enterNormal: SweepNormal = [0, 0, 0];
-  for (let axis = 0; axis < 3; axis += 1) {
-    const origin = start[axis];
-    const delta = direction[axis];
-    if (Math.abs(delta) < 0.000001) {
-      if (origin < min[axis] || origin > max[axis]) return null;
-      continue;
-    }
-    let near = (min[axis] - origin) / delta;
-    let far = (max[axis] - origin) / delta;
-    let normal: MutableVec3 = [0, 0, 0];
-    normal[axis] = delta > 0 ? -1 : 1;
+  let enterNormal = SWEEP_NORMAL_ZERO;
+
+  if (Math.abs(directionX) < 0.000001) {
+    if (start[0] < minX || start[0] > maxX) return null;
+  } else {
+    let near = (minX - start[0]) / directionX;
+    let far = (maxX - start[0]) / directionX;
     if (near > far) {
       [near, far] = [far, near];
     }
     if (near > enter) {
       enter = near;
-      enterNormal = normal;
+      enterNormal =
+        directionX > 0
+          ? SWEEP_NORMAL_NEGATIVE_X
+          : SWEEP_NORMAL_POSITIVE_X;
     }
     exit = Math.min(exit, far);
     if (enter > exit) return null;
   }
+
+  if (Math.abs(directionY) < 0.000001) {
+    if (start[1] < minY || start[1] > maxY) return null;
+  } else {
+    let near = (minY - start[1]) / directionY;
+    let far = (maxY - start[1]) / directionY;
+    if (near > far) {
+      [near, far] = [far, near];
+    }
+    if (near > enter) {
+      enter = near;
+      enterNormal =
+        directionY > 0
+          ? SWEEP_NORMAL_NEGATIVE_Y
+          : SWEEP_NORMAL_POSITIVE_Y;
+    }
+    exit = Math.min(exit, far);
+    if (enter > exit) return null;
+  }
+
+  if (Math.abs(directionZ) < 0.000001) {
+    if (start[2] < minZ || start[2] > maxZ) return null;
+  } else {
+    let near = (minZ - start[2]) / directionZ;
+    let far = (maxZ - start[2]) / directionZ;
+    if (near > far) {
+      [near, far] = [far, near];
+    }
+    if (near > enter) {
+      enter = near;
+      enterNormal =
+        directionZ > 0
+          ? SWEEP_NORMAL_NEGATIVE_Z
+          : SWEEP_NORMAL_POSITIVE_Z;
+    }
+    exit = Math.min(exit, far);
+    if (enter > exit) return null;
+  }
+
   if (exit < 0 || enter > 1) return null;
   return {
     fraction: THREE.MathUtils.clamp(enter, 0, 1),
@@ -417,6 +481,7 @@ export function ThirdPersonCameraRig({
   subjectWorldY = 0,
   blockers = [],
   profile = "explore",
+  livePoseRef,
   onVisualYawChange,
   onStreamDirectionChange,
 }: {
@@ -425,6 +490,8 @@ export function ThirdPersonCameraRig({
   subjectWorldY?: number;
   blockers?: readonly ThirdPersonCameraBlocker[];
   profile?: ThirdPersonCameraProfileName;
+  /** Live render pose for continuous player locomotion. */
+  livePoseRef?: ThirdPersonLivePoseRef;
   /**
    * Publishes only the damped authoritative tether yaw. Presentation peeking
    * never rotates Steve or changes simulation facing.
@@ -462,12 +529,16 @@ export function ThirdPersonCameraRig({
       0.05,
       Number.isFinite(frameDelta) ? Math.max(0, frameDelta) : 0,
     );
+    const livePose = livePoseRef?.current;
+    const livePoseActive = Boolean(livePose?.active);
     const authoritativeSubject: ThirdPersonCameraVec3 = [
-      subjectPos[0],
+      livePoseActive ? livePose!.worldPosition[0] : subjectPos[0],
       subjectWorldY,
-      subjectPos[1],
+      livePoseActive ? livePose!.worldPosition[1] : subjectPos[1],
     ];
-    const authoritativeYaw = facingToThirdPersonYaw(subjectFacing);
+    const authoritativeYaw = facingToThirdPersonYaw(
+      livePoseActive ? livePose!.facing : subjectFacing,
+    );
     const previousSubject = lastAuthoritativeSubjectRef.current;
     const resetRequested =
       resetTokenRef.current !== thirdPersonLookRef.resetToken;
@@ -640,7 +711,7 @@ export function ThirdPersonCameraRig({
       if (
         !Number.isFinite(lastViewYaw) ||
         Math.abs(wrapThirdPersonCameraYaw(viewYaw - lastViewYaw)) >=
-          THREE.MathUtils.degToRad(3)
+          THIRD_PERSON_STREAM_DIRECTION_BUCKET_RADIANS
       ) {
         lastPublishedStreamYawRef.current = viewYaw;
         onStreamDirectionChange?.([

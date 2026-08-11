@@ -8,6 +8,7 @@ import {
   type ReferenceAuditSeverity,
 } from "../generation-facing/referenceAudit";
 import { validateHearingStealthAuthoring } from "../engine-core/hearingStealth";
+import { BACKROOMS_LEVEL0_VALIDATION_BUDGETS } from "../backroomsGen/bake";
 
 export type StudioDiagnosticSeverity = ValidationSeverity | ReferenceAuditSeverity;
 export type StudioDiagnosticSource = "package" | "map";
@@ -66,7 +67,12 @@ export const validateStudioProject = (gamePackage: GamePackage): StudioValidatio
   });
 
   gamePackage.maps.forEach((map, mapIndex) => {
-    const report = validateOrdinaryMap(map, { package: gamePackage });
+    const report = validateOrdinaryMap(map, {
+      package: gamePackage,
+      budgets: map.generation?.generatorId === "backrooms"
+        ? BACKROOMS_LEVEL0_VALIDATION_BUDGETS
+        : undefined,
+    });
     report.issues.forEach((issue) => {
       issues.push({
         severity: issue.severity,

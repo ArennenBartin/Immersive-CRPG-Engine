@@ -22,7 +22,7 @@ import { ShopEditor } from "./ShopEditor";
 import { SkillEditor } from "./SkillEditor";
 import { SimulationEditor } from "./SimulationEditor";
 import { Store } from "lucide-react";
-import { DungeonGeneratorPanel } from "./DungeonGeneratorPanel";
+import { GeneratorStudioPanel } from "./GeneratorStudioPanel";
 import {
   validateStudioProject,
   type StudioValidationReport,
@@ -84,7 +84,7 @@ export function AppShell() {
 
   const secondaryNavItems: { id: EditorMode; label: string; icon: React.ReactNode }[] = [
     { id: "game_editor", label: "Game", icon: <Settings2 className="w-5 h-5" /> },
-    { id: "dungeon_generator", label: "Dungeons", icon: <Layers3 className="w-5 h-5" /> },
+    { id: "dungeon_generator", label: "Generators", icon: <Layers3 className="w-5 h-5" /> },
     { id: "model_maker", label: "Models", icon: <Box className="w-5 h-5" /> },
     { id: "animation_maker", label: "Animations", icon: <Clapperboard className="w-5 h-5" /> },
     { id: "sprite_creator", label: "Sprites", icon: <ImageIcon className="w-5 h-5" /> },
@@ -228,7 +228,7 @@ export function AppShell() {
           {mode === "play" && <div className="flex-1 min-h-0"><PlayMode /></div>}
           {mode === "map_editor" && <MapEditor />}
           {mode === "game_editor" && <GameEditor />}
-          {mode === "dungeon_generator" && <DungeonGeneratorPanel />}
+          {mode === "dungeon_generator" && <GeneratorStudioPanel />}
           {mode === "model_maker" && <ModelMaker />}
           {mode === "animation_maker" && <AnimationMaker />}
           {mode === "sprite_creator" && <SpriteCreator />}

@@ -78,19 +78,134 @@ export const resolveActorSpriteBrightness = (illumination: number): number => {
 // A QA ceiling panel represents an institutional room fixture, not a small
 // prop bulb. Space them roughly one per 48 walkable cells and let neighboring
 // pools overlap so a populated room reads as lit instead of as isolated spots.
-export const PRESENTATION_ROOM_LIGHT_RADIUS = 9;
-export const PRESENTATION_ROOM_POINT_LIGHT_INTENSITY = 7.2;
+export const PRESENTATION_ROOM_LIGHT_RADIUS = 8.5;
+export const PRESENTATION_ROOM_POINT_LIGHT_INTENSITY = 12;
 // Level Zero fixtures should read as aged fluorescent tubes rather than
 // tungsten bulbs. This creamy yellow sits midway between the original amber
 // and a green-white tube, retaining warmth without reading as orange.
 export const PRESENTATION_ROOM_FLUORESCENT_COLOR = "#f2eeb5";
-export const PRESENTATION_ROOM_LIGHT_FILL_RADIUS = 6.25;
-export const PRESENTATION_ROOM_LIGHT_FILL_STRENGTH = 0.56;
+export const PRESENTATION_ROOM_LIGHT_FILL_RADIUS = 5.5;
+export const PRESENTATION_ROOM_LIGHT_FILL_STRENGTH = 0.9;
 export const PRESENTATION_ROOM_LIGHT_FORWARD_DISTANCE = 36;
-// Mechanical ambience remains authored at 0.05. Play uses this restrained
-// presentation-only floor so the surfaces between fluorescent pools retain
-// texture instead of crushing to pure black.
-export const BACKROOMS_LEVEL_ZERO_PLAY_AMBIENT_LIGHT = 0.09;
+// Play uses a presentation-only floor strong enough for wallpaper and wall
+// depth to remain readable between fluorescent pools. Mechanical perception
+// continues to use the authored map value rather than this render constant.
+export const BACKROOMS_LEVEL_ZERO_PLAY_AMBIENT_LIGHT = 0.2;
+
+export const BACKROOMS_LEVEL_ZERO_DETAIL_SURFACE_EMISSION = {
+  floor: {
+    emissive: "#4a3516",
+    emissiveIntensity: 0.13,
+  },
+  ceiling: {
+    emissive: "#565124",
+    emissiveIntensity: 0.07,
+  },
+} as const;
+
+export const BACKROOMS_LEVEL_ZERO_DETAIL_WALL_EMISSION = {
+  wallpaper: {
+    emissive: "#6b5928",
+    // The persistent textured architecture no longer needs to masquerade as
+    // a bright safety proxy. Keep a restrained floor for unlit corners while
+    // leaving enough contrast for the wallpaper image and real fixtures.
+    emissiveIntensity: 0.36,
+  },
+  trim: {
+    emissive: "#3d2f16",
+    emissiveIntensity: 0.22,
+  },
+} as const;
+
+export const BACKROOMS_LEVEL_ZERO_DISTANT_ARCHITECTURE_COLORS = {
+  floor: "#49331d",
+  wall: "#6b5928",
+  ceiling: "#4a4526",
+} as const;
+
+export type DistantArchitectureSurface =
+  keyof typeof BACKROOMS_LEVEL_ZERO_DISTANT_ARCHITECTURE_COLORS;
+
+export type DistantArchitectureMaterialPolicy = {
+  color: string;
+  vertexColors: boolean;
+  toneMapped: boolean;
+};
+
+/**
+ * Level Zero's distant shell deliberately uses one stable warm color per
+ * surface kind. Avoiding a changing instance-color buffer prevents newly
+ * selected far instances from presenting their zero-initialized color as a
+ * pitch-black wall, and is cheaper than uploading per-instance colors while
+ * the third-person camera turns.
+ */
+export const resolveDistantArchitectureMaterialPolicy = (
+  surface: DistantArchitectureSurface,
+  backroomsLevelZero: boolean,
+): DistantArchitectureMaterialPolicy =>
+  backroomsLevelZero
+    ? {
+        color: BACKROOMS_LEVEL_ZERO_DISTANT_ARCHITECTURE_COLORS[surface],
+        vertexColors: false,
+        toneMapped: false,
+      }
+    : {
+        color: "#ffffff",
+        vertexColors: true,
+        toneMapped: true,
+      };
+
+export type BackroomsLevelZeroDetailSurface =
+  keyof typeof BACKROOMS_LEVEL_ZERO_DETAIL_SURFACE_EMISSION;
+
+/**
+ * Preserve deliberate authored glow while giving Level Zero's detailed
+ * carpet and ceiling a dim, warm readability floor. This is material-only:
+ * it does not add renderer lights, meshes, or draw calls.
+ */
+export const resolveBackroomsLevelZeroDetailSurfaceEmission = (
+  surface: BackroomsLevelZeroDetailSurface,
+  authoredEmissive: string,
+  authoredEmissiveIntensity: number,
+): { emissive: string; emissiveIntensity: number } => {
+  const minimum = BACKROOMS_LEVEL_ZERO_DETAIL_SURFACE_EMISSION[surface];
+  const authoredIntensity = Number.isFinite(authoredEmissiveIntensity)
+    ? Math.max(0, authoredEmissiveIntensity)
+    : 0;
+  if (authoredIntensity >= minimum.emissiveIntensity) {
+    return {
+      emissive: authoredEmissive,
+      emissiveIntensity: authoredIntensity,
+    };
+  }
+  return minimum;
+};
+
+export type BackroomsLevelZeroDetailWallSurface =
+  keyof typeof BACKROOMS_LEVEL_ZERO_DETAIL_WALL_EMISSION;
+
+/**
+ * Keeps detailed Level Zero wallpaper and trim above the black-output floor
+ * reached by standard materials whose normals face away from every nearby
+ * fixture. It changes only an existing material and preserves stronger
+ * authored emission.
+ */
+export const resolveBackroomsLevelZeroDetailWallEmission = (
+  surface: BackroomsLevelZeroDetailWallSurface,
+  authoredEmissive: string,
+  authoredEmissiveIntensity: number,
+): { emissive: string; emissiveIntensity: number } => {
+  const minimum = BACKROOMS_LEVEL_ZERO_DETAIL_WALL_EMISSION[surface];
+  const authoredIntensity = Number.isFinite(authoredEmissiveIntensity)
+    ? Math.max(0, authoredEmissiveIntensity)
+    : 0;
+  return authoredIntensity >= minimum.emissiveIntensity
+    ? {
+        emissive: authoredEmissive,
+        emissiveIntensity: authoredIntensity,
+      }
+    : minimum;
+};
 
 export interface ExteriorEnvironmentLightLevels {
   hemisphere: number;

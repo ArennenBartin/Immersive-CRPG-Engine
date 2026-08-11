@@ -32,6 +32,7 @@ import { Billboard } from "@react-three/drei";
 import * as THREE from "three";
 import { useEngineStore } from "../store/engineStore";
 import { useFrame, useThree } from "@react-three/fiber";
+import type { ThirdPersonLivePoseRef } from "./FixedThirdPersonCameraRig";
 import {
   AssetModelRenderer,
   createRuntimeMeshGeometryGroups,
@@ -63,13 +64,15 @@ import {
   getMacroPlacementFootprint,
 } from "../utils/objectFootprint";
 import {
+  buildPersistentAuthoredTerrainCellsFor3D,
   fineCellsCoveredByWorldMacroCell,
   logicalCellToWorld,
   logicalCellToMacro,
   logicalCellWorldSize,
+  logicalPlanOffsetToWorld,
   renderedCellWorldSize,
   renderedTerrainPlaneY,
-  dedupeFineTerrainCellsFor3D,
+  resolveRendererTerrainCells,
   worldPointToLogicalCell,
   worldPointToWorldMacroCell,
   type RendererGridSpace,
@@ -83,8 +86,12 @@ import {
 import {
   BACKROOMS_LEVEL_ZERO_FLOOR_OBJECT_ID,
   BACKROOMS_LEVEL_ZERO_LIGHT_OBJECT_ID,
+  BACKROOMS_LEVEL_ZERO_THIN_WALL_FACE_BITS,
+  BACKROOMS_LEVEL_ZERO_THIN_WALL_THICKNESS,
   BACKROOMS_LEVEL_ZERO_TEXTURES,
-  BACKROOMS_LEVEL_ZERO_WALL_OBJECT_ID,
+  isBackroomsLevelZeroWallObjectId,
+  readBackroomsLevelZeroPartitionWall,
+  readBackroomsLevelZeroThinWallFaceMask,
 } from "../schema/presets";
 import {
   buildAuthoritativeFogPresentationPlan,
@@ -108,6 +115,10 @@ import {
   selectLocalPresentationRoomLights,
   resolvePlayerCarriedLightWorldPosition,
   resolvePresentationRoomLightContribution,
+  BACKROOMS_LEVEL_ZERO_DETAIL_SURFACE_EMISSION,
+  resolveDistantArchitectureMaterialPolicy,
+  resolveBackroomsLevelZeroDetailWallEmission,
+  resolveBackroomsLevelZeroDetailSurfaceEmission,
   hasAuthoritativePresentLight,
   MEMORY_FOG_COLOR,
   resolveMemoryFogColor,
@@ -127,18 +138,28 @@ import {
   IMMERSIVE_DETAIL_FORWARD_BONUS,
   IMMERSIVE_EXTERIOR_FORWARD_LATERAL_SCALE,
   IMMERSIVE_WALL_HEIGHT_SCALE,
+  buildAuthoredArchitectureBoundaryFillers,
   isWithinImmersiveDirectionalWindow,
-  isWithinDistantArchitectureBand,
   isImmersiveCeilingView,
-  resolveDerivedCeilingOpeningCellKeys,
+  resolveDerivedCeilingOpeningSignature,
   resolveImmersiveDirectionalWindowOuterRadius,
   resolveImmersiveWallHeight,
   resolveRuntimeObjectPlacementYOffset,
+  selectDistantArchitectureCells,
 } from "../utils/immersiveArchitecture";
 import {
   resolveThirdPersonCameraBodyDistance,
+  resolveThirdPersonPlayerMaterialFadeUpdate,
   resolveThirdPersonPlayerCameraOpacity,
 } from "../utils/thirdPersonControls";
+import { decomposeBackroomsLevelZeroThinWallObjectId } from "../utils/backroomsThinWallRendering";
+import {
+  BACKROOMS_RENDER_CHUNK_SIZE,
+  backroomsRenderChunkCoordinate,
+  buildBackroomsRenderChunks,
+  selectActiveBackroomsRenderChunks,
+  type BackroomsRenderChunk,
+} from "../utils/backroomsRenderChunks";
 
 type DecodedGifAtlas = {
   sourceWidth: number;
@@ -606,12 +627,25 @@ interface ReferenceGameRendererProps {
   glide?: boolean;
   focusOverride?: [number, number] | null;
   map: MapData;
+  /**
+   * Complete macro-authored topology. Other immersive maps use it for their
+   * distant shell; Level Zero also derives its persistent textured world from
+   * this stable source.
+   */
+  authoredArchitectureCells?: CellData[];
+  /**
+   * Complete textured architecture built from authored macro cells. Unlike
+   * the simulation window, this source never follows the player or camera, so
+   * Level Zero cannot fall through to a flat proxy world during traversal.
+   */
+  persistentArchitectureCells?: CellData[];
   playerPos?: [number, number];
   playerFacing?: [number, number];
   playerSeatedPose?: PlayerSeatedPose | null;
   playerStealthActive?: boolean;
   playerVisualYaw?: number;
   playerVisualYawRef?: React.MutableRefObject<number>;
+  playerLivePoseRef?: ThirdPersonLivePoseRef;
   /** Continuous locomotion already supplies a smooth world-space pose each frame. */
   continuousPlayerMovement?: boolean;
   playerSpriteId?: string;
@@ -741,6 +775,8 @@ export interface PlayerSeatedPose {
 
 export interface GameRenderer3DProps {
   map: MapData;
+  /** Complete macro-authored topology for persistent immersive architecture. */
+  authoredArchitectureMap?: MapData;
   gridSpace?: RendererGridSpace;
   fineRatio?: number;
   playerPos?: [number, number];
@@ -749,6 +785,7 @@ export interface GameRenderer3DProps {
   playerStealthActive?: boolean;
   playerVisualYaw?: number;
   playerVisualYawRef?: React.MutableRefObject<number>;
+  playerLivePoseRef?: ThirdPersonLivePoseRef;
   /** Bypass the legacy tile-arrival glide for freely moving players. */
   continuousPlayerMovement?: boolean;
   playerSpriteId?: string;
@@ -968,6 +1005,7 @@ function SmoothPositionGroup({
   position,
   snapDistance = TILE_SLIDE_SNAP_DISTANCE,
   continuousMovement = false,
+  livePoseRef,
   onPositionUpdate,
   onMovingChange,
   children,
@@ -975,6 +1013,7 @@ function SmoothPositionGroup({
   position: [number, number, number];
   snapDistance?: number;
   continuousMovement?: boolean;
+  livePoseRef?: ThirdPersonLivePoseRef;
   onPositionUpdate?: (position: THREE.Vector3) => void;
   onMovingChange?: (moving: boolean) => void;
   children: React.ReactNode;
@@ -1005,10 +1044,11 @@ function SmoothPositionGroup({
   };
 
   useLayoutEffect(() => {
+    const livePose = livePoseRef?.current;
     const nextTarget = nextTargetRef.current.set(
-      position[0],
+      livePose?.active ? livePose.worldPosition[0] : position[0],
       position[1],
-      position[2],
+      livePose?.active ? livePose.worldPosition[1] : position[2],
     );
     if (!groupRef.current) return;
 
@@ -1050,12 +1090,37 @@ function SmoothPositionGroup({
 
     targetRef.current.copy(nextTarget);
     reportMoving(true);
-  }, [position[0], position[1], position[2], snapDistance, continuousMovement]);
+  }, [
+    position[0],
+    position[1],
+    position[2],
+    snapDistance,
+    continuousMovement,
+    livePoseRef,
+  ]);
 
   useFrame((_, frameDelta) => {
     if (!groupRef.current) return;
 
     if (continuousMovement) {
+      const livePose = livePoseRef?.current;
+      if (livePose?.active) {
+        const nextTarget = nextTargetRef.current.set(
+          livePose.worldPosition[0],
+          position[1],
+          livePose.worldPosition[1],
+        );
+        const moved =
+          currentRef.current.distanceToSquared(nextTarget) >=
+          TILE_SLIDE_EPSILON;
+        currentRef.current.copy(nextTarget);
+        targetRef.current.copy(nextTarget);
+        groupRef.current.position.copy(nextTarget);
+        hasPositionRef.current = true;
+        reportMoving(livePose.moving && moved);
+        onPositionUpdateRef.current?.(currentRef.current);
+        return;
+      }
       if (
         movingRef.current &&
         performance.now() - lastContinuousMoveAtRef.current > 90
@@ -3246,14 +3311,14 @@ const isFastTileObject = (object: ObjectData | null | undefined) =>
 const vectorToRotationY = (x: number, z: number) => Math.atan2(x, z);
 
 const buildWallRotationByCell = (
-  map: MapData,
+  cells: CellData[],
   objectById: Map<string, ObjectData>,
 ) => {
   const wallCells = new Map<string, CellData>();
   const rotations = new Map<string, number>();
   const visited = new Set<string>();
 
-  map.cells.forEach((cell) => {
+  cells.forEach((cell) => {
     const object = cell.object_id ? objectById.get(cell.object_id) : null;
     if (isWallObject(object)) {
       wallCells.set(getCellCoordKey(cell.x, cell.z), cell);
@@ -3336,8 +3401,9 @@ const BACKROOMS_CEILING_MATERIAL: RuntimeMaterialProps = {
   color: "#b1aa70",
   roughness: 0.98,
   metalness: 0,
-  emissive: "#565124",
-  emissiveIntensity: 0.012,
+  emissive: BACKROOMS_LEVEL_ZERO_DETAIL_SURFACE_EMISSION.ceiling.emissive,
+  emissiveIntensity:
+    BACKROOMS_LEVEL_ZERO_DETAIL_SURFACE_EMISSION.ceiling.emissiveIntensity,
   opacity: 1,
   transparent: false,
   textureKind: "none",
@@ -3351,6 +3417,32 @@ const resolveRuntimeObjectMaterial = (
   materialRef?: string,
 ) => {
   const material = resolveObjectMaterial(object, materialRef);
+  if (
+    isBackroomsLevelZeroWallObjectId(object.id) ||
+    (object.tags.includes("backrooms") &&
+      object.tags.includes("wallpaper"))
+  ) {
+    // Retained/generated packages can carry older part material references,
+    // so recognize the wall object itself instead of requiring today's exact
+    // three material ids. Every part of these objects is wallpaper or trim.
+    const trim =
+      materialRef?.includes("trim") ||
+      material.name.toLowerCase().includes("trim");
+    const wallEmission = resolveBackroomsLevelZeroDetailWallEmission(
+      trim ? "trim" : "wallpaper",
+      material.emissive,
+      material.emissiveIntensity,
+    );
+    return {
+      ...material,
+      // A warm material-space floor keeps exposed thin-wall edges readable
+      // between fixtures. It adds no lights or draws; low-emissive standard
+      // material previously turned real wall faces into void-black rectangles
+      // whenever their normal faced away from the nearest lamp.
+      emissive: wallEmission.emissive,
+      emissiveIntensity: wallEmission.emissiveIntensity,
+    };
+  }
   if (object.id !== BACKROOMS_LEVEL_ZERO_LIGHT_OBJECT_ID) return material;
 
   // Existing authored runs deliberately retain their object library instead of
@@ -3383,7 +3475,7 @@ const resolveRuntimeObjectMaterial = (
       ...material,
       color: "#f7f4ca",
       emissive: "#ece395",
-      emissiveIntensity: Math.max(0.4, material.emissiveIntensity),
+      emissiveIntensity: Math.max(0.68, material.emissiveIntensity),
     };
   }
   if (materialRef === "mat_backrooms_level_zero_fluorescent_tube") {
@@ -3391,7 +3483,7 @@ const resolveRuntimeObjectMaterial = (
       ...material,
       color: "#faffe2",
       emissive: "#f2f0b9",
-      emissiveIntensity: Math.max(0.95, material.emissiveIntensity),
+      emissiveIntensity: Math.max(1.35, material.emissiveIntensity),
     };
   }
   return material;
@@ -3403,14 +3495,25 @@ const getCellMaterialProps = (
 ): RuntimeMaterialProps => {
   if (object) {
     const material = resolveObjectMaterial(object);
+    const detailSurfaceEmission =
+      object.id === BACKROOMS_LEVEL_ZERO_FLOOR_OBJECT_ID
+        ? resolveBackroomsLevelZeroDetailSurfaceEmission(
+            "floor",
+            material.emissive,
+            material.emissiveIntensity,
+          )
+        : material;
     return {
       id: material.id,
       name: material.name,
       color: material.color,
       roughness: material.roughness,
       metalness: material.metalness,
-      emissive: material.emissive,
-      emissiveIntensity: material.emissiveIntensity,
+      // The detailed carpet otherwise becomes the only zero-emissive surface
+      // at the authored/distant LOD seam and grades to pure black between
+      // fluorescent pools. This keeps the existing instanced draw intact.
+      emissive: detailSurfaceEmission.emissive,
+      emissiveIntensity: detailSurfaceEmission.emissiveIntensity,
       opacity: material.opacity,
       transparent: material.transparent,
       textureKind: material.textureKind,
@@ -3978,6 +4081,11 @@ type RuntimeObjectInstance = {
   rotationY: number;
   scaleY?: number;
   scaleXZ?: number;
+  // Per-placement anomaly transform. When present it fully describes the
+  // instance's rotation and scale, so a recursive chain of one cached object
+  // still renders as a single instanced draw call.
+  rotation?: [number, number, number];
+  scale?: [number, number, number];
 };
 
 type RuntimeInstanceGroup = {
@@ -4214,6 +4322,26 @@ function CellVisualLayers({
         }
 
         if (isStructure && !fastTile && object) {
+          const thinWallFaceObjectIds =
+            decomposeBackroomsLevelZeroThinWallObjectId(object.id);
+          if (thinWallFaceObjectIds) {
+            const thinWallFaceObjects = thinWallFaceObjectIds.map((objectId) =>
+              objectById.get(objectId),
+            );
+            // Retained maps can carry an older, partial object library. Only
+            // take the consolidated path when every one-face definition is
+            // available; otherwise preserve the composite renderer exactly.
+            if (thinWallFaceObjects.every(Boolean)) {
+              thinWallFaceObjects.forEach((thinWallFaceObject) => {
+                renderedStructuralModelCells.push({
+                  cell,
+                  object: thinWallFaceObject!,
+                  rotationY,
+                });
+              });
+              return;
+            }
+          }
           renderedStructuralModelCells.push({ cell, object, rotationY });
           return;
         }
@@ -4414,7 +4542,7 @@ function ImmersiveCeilingLayer({
       cells.some(
         (cell) =>
           cell.object_id === BACKROOMS_LEVEL_ZERO_FLOOR_OBJECT_ID ||
-          cell.object_id === BACKROOMS_LEVEL_ZERO_WALL_OBJECT_ID,
+          isBackroomsLevelZeroWallObjectId(cell.object_id),
       ),
     [cells],
   );
@@ -4429,7 +4557,7 @@ function ImmersiveCeilingLayer({
               cell.active !== false &&
               (cell.walkable === true ||
                 (usesBackroomsLevelZeroTheme &&
-                  cell.object_id === BACKROOMS_LEVEL_ZERO_WALL_OBJECT_ID)) &&
+                  isBackroomsLevelZeroWallObjectId(cell.object_id))) &&
               !isOverheadCell(cell) &&
               !excludedCellKeys?.has(getCellCoordKey(cell.x, cell.z)),
           )
@@ -4514,6 +4642,438 @@ function ImmersiveCeilingLayer({
   );
 }
 
+type CompiledBackroomsChunkMaterial = {
+  key: string;
+  material: RuntimeMaterialProps;
+  geometry: THREE.BufferGeometry;
+  castShadow: boolean;
+  side: THREE.Side;
+  triangles: number;
+};
+
+type CompiledBackroomsRenderChunk = Pick<
+  BackroomsRenderChunk,
+  "id" | "chunkX" | "chunkZ"
+> & {
+  cells: number;
+  materials: CompiledBackroomsChunkMaterial[];
+  triangles: number;
+};
+
+type BackroomsChunkGeometryAccumulator = {
+  material: RuntimeMaterialProps;
+  positions: number[];
+  normals: number[];
+  uvs: number[];
+  indices: number[];
+  castShadow: boolean;
+  side: THREE.Side;
+};
+
+const backroomsChunkMaterialKey = (
+  material: RuntimeMaterialProps,
+  surface: string,
+) => [
+  surface,
+  material.id,
+  material.color,
+  material.emissive,
+  material.emissiveIntensity,
+  material.textureImageUrl || material.textureKind,
+].join("|");
+
+const appendTransformedGeometry = (
+  target: BackroomsChunkGeometryAccumulator,
+  source: THREE.BufferGeometry,
+  matrix: THREE.Matrix4,
+) => {
+  const position = source.getAttribute("position");
+  const normal = source.getAttribute("normal");
+  const uv = source.getAttribute("uv");
+  if (!position) return;
+  const point = new THREE.Vector3();
+  const direction = new THREE.Vector3();
+  const normalMatrix = new THREE.Matrix3().getNormalMatrix(matrix);
+  const sourceIndices = source.index?.array;
+  const baseVertex = target.positions.length / 3;
+
+  // Preserve each template's index buffer instead of expanding every triangle
+  // into three standalone vertices. All Level Zero chunk material groups stay
+  // safely below Uint16 limits; Three selects Uint32 automatically if a later
+  // authored kit grows past that boundary.
+  for (let sourceIndex = 0; sourceIndex < position.count; sourceIndex += 1) {
+    point.fromBufferAttribute(position as THREE.BufferAttribute, sourceIndex);
+    point.applyMatrix4(matrix);
+    target.positions.push(point.x, point.y, point.z);
+    if (normal) {
+      direction.fromBufferAttribute(normal as THREE.BufferAttribute, sourceIndex);
+      direction.applyMatrix3(normalMatrix).normalize();
+      target.normals.push(direction.x, direction.y, direction.z);
+    } else {
+      target.normals.push(0, 1, 0);
+    }
+    if (uv) {
+      target.uvs.push(uv.getX(sourceIndex), uv.getY(sourceIndex));
+    } else {
+      target.uvs.push(0, 0);
+    }
+  }
+  if (sourceIndices) {
+    for (let index = 0; index < sourceIndices.length; index += 1) {
+      target.indices.push(baseVertex + Number(sourceIndices[index]));
+    }
+  } else {
+    for (let index = 0; index < position.count; index += 1) {
+      target.indices.push(baseVertex + index);
+    }
+  }
+};
+
+const compilePersistentBackroomsChunks = ({
+  cells,
+  objectById,
+  wallRotationByCell,
+  includeCeiling,
+  excludedCeilingCellKeys,
+}: {
+  cells: CellData[];
+  objectById: Map<string, ObjectData>;
+  wallRotationByCell: Map<string, number>;
+  includeCeiling: boolean;
+  excludedCeilingCellKeys?: ReadonlySet<string>;
+}): CompiledBackroomsRenderChunk[] => {
+  const floorTemplate = new THREE.PlaneGeometry(1, 1);
+  const ceilingTemplate = new THREE.PlaneGeometry(1, 1);
+  const partGeometryBySignature = new Map<string, THREE.BufferGeometry>();
+  const materialForFloor = getCellMaterialProps(
+    objectById.get(BACKROOMS_LEVEL_ZERO_FLOOR_OBJECT_ID),
+    true,
+  );
+
+  const geometryForPart = (part: ObjectPart) => {
+    const key = JSON.stringify([
+      part.shape,
+      part.size,
+      part.segments || 0,
+    ]);
+    const cached = partGeometryBySignature.get(key);
+    if (cached) return cached;
+    const geometry = createRuntimePartGeometry(part);
+    partGeometryBySignature.set(key, geometry);
+    return geometry;
+  };
+
+  const compiled = buildBackroomsRenderChunks(cells).map((chunk) => {
+    const byMaterial = new Map<string, BackroomsChunkGeometryAccumulator>();
+    const accumulator = (
+      material: RuntimeMaterialProps,
+      surface: string,
+      castShadow: boolean,
+      side: THREE.Side,
+    ) => {
+      const key = backroomsChunkMaterialKey(material, surface);
+      const existing = byMaterial.get(key);
+      if (existing) return existing;
+      const next: BackroomsChunkGeometryAccumulator = {
+        material,
+        positions: [],
+        normals: [],
+        uvs: [],
+        indices: [],
+        castShadow,
+        side,
+      };
+      byMaterial.set(key, next);
+      return next;
+    };
+
+    for (const cell of chunk.cells) {
+      if (cell.active === false || isOverheadCell(cell)) continue;
+      const object = cell.object_id ? objectById.get(cell.object_id) : undefined;
+      const cellSize = renderedCellWorldSize(cell);
+      const y = cell.y || 0;
+      const structure = shouldRenderCellAsStructure(cell, object);
+
+      if (!structure) {
+        const floorMaterial = object
+          ? getCellMaterialProps(object, cell.walkable)
+          : materialForFloor;
+        const floorMatrix = new THREE.Matrix4().compose(
+          new THREE.Vector3(cell.x, renderedTerrainPlaneY(cell), cell.z),
+          new THREE.Quaternion().setFromEuler(
+            new THREE.Euler(-Math.PI / 2, 0, 0),
+          ),
+          new THREE.Vector3(cellSize, cellSize, 1),
+        );
+        appendTransformedGeometry(
+          // The floor plane is authored facing up; chase cameras never need
+          // to rasterize its underside. Keeping it single-sided avoids a
+          // second fragment pass across the largest surfaces in every room.
+          accumulator(floorMaterial, "floor", false, THREE.FrontSide),
+          floorTemplate,
+          floorMatrix,
+        );
+      } else if (object?.parts?.length) {
+        const cellMatrix = new THREE.Matrix4().compose(
+          new THREE.Vector3(cell.x, y, cell.z),
+          new THREE.Quaternion().setFromEuler(
+            new THREE.Euler(
+              0,
+              wallRotationByCell.get(getCellCoordKey(cell.x, cell.z)) || 0,
+              0,
+            ),
+          ),
+          new THREE.Vector3(
+            cellSize,
+            isWallStructureCell(cell, object)
+              ? IMMERSIVE_WALL_HEIGHT_SCALE
+              : 1,
+            cellSize,
+          ),
+        );
+        for (const part of object.parts) {
+          const material = resolveRuntimeObjectMaterial(object, part.material);
+          const localMatrix = new THREE.Matrix4().compose(
+            new THREE.Vector3(
+              Number(part.position[0] || 0),
+              Number(part.position[1] || 0),
+              Number(part.position[2] || 0),
+            ),
+            new THREE.Quaternion().setFromEuler(
+              new THREE.Euler(
+                Number(part.rotation[0] || 0),
+                Number(part.rotation[1] || 0),
+                Number(part.rotation[2] || 0),
+              ),
+            ),
+            new THREE.Vector3(1, 1, 1),
+          );
+          appendTransformedGeometry(
+            // Level Zero wall parts are closed box geometry. Their own inner
+            // faces remain visible from either adjoining room, while drawing
+            // every triangle's back face only adds overdraw.
+            accumulator(material, "wall", true, THREE.FrontSide),
+            geometryForPart(part),
+            cellMatrix.clone().multiply(localMatrix),
+          );
+        }
+      }
+
+      if (
+        includeCeiling &&
+        (cell.walkable || isBackroomsLevelZeroWallObjectId(cell.object_id)) &&
+        !excludedCeilingCellKeys?.has(getCellCoordKey(cell.x, cell.z))
+      ) {
+        const ceilingMatrix = new THREE.Matrix4().compose(
+          new THREE.Vector3(cell.x, y + IMMERSIVE_CEILING_HEIGHT, cell.z),
+          new THREE.Quaternion().setFromEuler(
+            new THREE.Euler(Math.PI / 2, 0, 0),
+          ),
+          new THREE.Vector3(cellSize * 1.01, cellSize * 1.01, 1),
+        );
+        appendTransformedGeometry(
+          accumulator(
+            BACKROOMS_CEILING_MATERIAL,
+            "ceiling",
+            false,
+            THREE.FrontSide,
+          ),
+          ceilingTemplate,
+          ceilingMatrix,
+        );
+      }
+    }
+
+    const materials = [...byMaterial.entries()].map(([key, source]) => {
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute(
+        "position",
+        new THREE.Float32BufferAttribute(source.positions, 3),
+      );
+      geometry.setAttribute(
+        "normal",
+        new THREE.Float32BufferAttribute(source.normals, 3),
+      );
+      geometry.setAttribute(
+        "uv",
+        new THREE.Float32BufferAttribute(source.uvs, 2),
+      );
+      geometry.setIndex(source.indices);
+      geometry.computeBoundingBox();
+      geometry.computeBoundingSphere();
+      return {
+        key,
+        material: source.material,
+        geometry,
+        castShadow: source.castShadow,
+        side: source.side,
+        triangles: source.indices.length / 3,
+      };
+    });
+    return {
+      id: chunk.id,
+      chunkX: chunk.chunkX,
+      chunkZ: chunk.chunkZ,
+      cells: chunk.cells.length,
+      materials,
+      triangles: materials.reduce(
+        (total, material) => total + material.triangles,
+        0,
+      ),
+    };
+  });
+
+  floorTemplate.dispose();
+  ceilingTemplate.dispose();
+  partGeometryBySignature.forEach((geometry) => geometry.dispose());
+  return compiled;
+};
+
+function CompiledBackroomsChunkMaterialMesh({
+  group,
+  material,
+}: {
+  group: CompiledBackroomsChunkMaterial;
+  material: THREE.MeshStandardMaterial;
+}) {
+  return (
+    <mesh
+      geometry={group.geometry}
+      raycast={() => null}
+      frustumCulled
+      castShadow={false}
+      receiveShadow
+      dispose={null}
+    >
+      <primitive object={material} attach="material" dispose={null} />
+    </mesh>
+  );
+}
+
+const createCompiledBackroomsChunkMaterial = (
+  group: CompiledBackroomsChunkMaterial,
+) => {
+  const texture = getObjectMaterialTexture(group.material);
+  const normalMap = getObjectMaterialNormalMap(group.material);
+  const roughnessMap = getObjectMaterialRoughnessMap(group.material);
+  const normalScale = getObjectMaterialNormalScale(group.material);
+  return new THREE.MeshStandardMaterial({
+    map: texture || null,
+    normalMap: normalMap || null,
+    normalScale: new THREE.Vector2(normalScale, normalScale),
+    roughnessMap: roughnessMap || null,
+    color: group.material.color,
+    roughness: group.material.roughness,
+    metalness: group.material.metalness,
+    emissive: group.material.emissive,
+    emissiveIntensity: group.material.emissiveIntensity,
+    opacity: group.material.opacity,
+    transparent: group.material.transparent,
+    depthWrite: !group.material.transparent,
+    side: group.side,
+    fog: true,
+  });
+};
+
+/**
+ * Level Zero's complete authored shell is compiled once into spatial,
+ * texture-preserving buffers. Only the 13 chunks surrounding Steve mount;
+ * camera yaw and fine movement keep the same geometry identities, while a
+ * chunk crossing swaps only the diamond's outer edge.
+ */
+const PersistentBackroomsArchitectureLayer = memo(
+  function PersistentBackroomsArchitectureLayer({
+    cells,
+    objectById,
+    wallRotationByCell,
+    includeCeiling,
+    excludedCeilingSignature,
+    centerChunk,
+  }: {
+    cells: CellData[];
+    objectById: Map<string, ObjectData>;
+    wallRotationByCell: Map<string, number>;
+    includeCeiling: boolean;
+    excludedCeilingSignature?: string;
+    centerChunk: readonly [number, number];
+  }) {
+    const excludedCeilingCellKeys = useMemo(
+      () =>
+        excludedCeilingSignature
+          ? new Set(excludedCeilingSignature.split("|"))
+          : undefined,
+      [excludedCeilingSignature],
+    );
+    const compiledChunks = useMemo(
+      () => compilePersistentBackroomsChunks({
+        cells,
+        objectById,
+        wallRotationByCell,
+        includeCeiling,
+        excludedCeilingCellKeys,
+      }),
+      [
+        cells,
+        objectById,
+        wallRotationByCell,
+        includeCeiling,
+        excludedCeilingSignature,
+      ],
+    );
+    useEffect(
+      () => () => {
+        compiledChunks.forEach((chunk) =>
+          chunk.materials.forEach((group) => group.geometry.dispose()),
+        );
+      },
+      [compiledChunks],
+    );
+    const sharedMaterials = useMemo(() => {
+      const materials = new Map<string, THREE.MeshStandardMaterial>();
+      compiledChunks.forEach((chunk) =>
+        chunk.materials.forEach((group) => {
+          if (!materials.has(group.key)) {
+            materials.set(group.key, createCompiledBackroomsChunkMaterial(group));
+          }
+        }),
+      );
+      return materials;
+    }, [compiledChunks]);
+    useEffect(
+      () => () => {
+        sharedMaterials.forEach((material) => material.dispose());
+      },
+      [sharedMaterials],
+    );
+    const activeChunks = useMemo(() => {
+      const plans = compiledChunks.map((chunk) => ({
+        ...chunk,
+        cells: [] as CellData[],
+      }));
+      const activeIds = new Set(
+        selectActiveBackroomsRenderChunks(plans, centerChunk).map(
+          (chunk) => chunk.id,
+        ),
+      );
+      return compiledChunks.filter((chunk) => activeIds.has(chunk.id));
+    }, [compiledChunks, centerChunk[0], centerChunk[1]]);
+
+    return (
+      <>
+        {activeChunks.flatMap((chunk) =>
+          chunk.materials.map((group) => (
+            <CompiledBackroomsChunkMaterialMesh
+              key={`${chunk.id}:${group.key}`}
+              group={group}
+              material={sharedMaterials.get(group.key)!}
+            />
+          )),
+        )}
+      </>
+    );
+  },
+);
+
 type DistantArchitectureInstance = {
   position: [number, number, number];
   rotation: [number, number, number];
@@ -4524,11 +5084,17 @@ type DistantArchitectureInstance = {
 function DistantArchitectureMesh({
   kind,
   instances,
+  backroomsTheme = false,
 }: {
   kind: "floor" | "wall" | "ceiling";
   instances: DistantArchitectureInstance[];
+  backroomsTheme?: boolean;
 }) {
   const meshRef = useRef<THREE.InstancedMesh>(null);
+  const materialPolicy = resolveDistantArchitectureMaterialPolicy(
+    kind,
+    backroomsTheme,
+  );
 
   useLayoutEffect(() => {
     if (!meshRef.current) return;
@@ -4539,15 +5105,17 @@ function DistantArchitectureMesh({
       dummy.scale.fromArray(instance.scale);
       dummy.updateMatrix();
       meshRef.current!.setMatrixAt(index, dummy.matrix);
-      meshRef.current!.setColorAt(index, instance.color);
+      if (materialPolicy.vertexColors) {
+        meshRef.current!.setColorAt(index, instance.color);
+      }
     });
     meshRef.current.count = instances.length;
     meshRef.current.instanceMatrix.needsUpdate = true;
-    if (meshRef.current.instanceColor) {
+    if (materialPolicy.vertexColors && meshRef.current.instanceColor) {
       meshRef.current.instanceColor.needsUpdate = true;
     }
     meshRef.current.computeBoundingSphere();
-  }, [instances]);
+  }, [instances, materialPolicy.vertexColors]);
 
   if (instances.length === 0) return null;
 
@@ -4565,12 +5133,13 @@ function DistantArchitectureMesh({
         <planeGeometry args={[1.01, 1.01]} />
       )}
       <meshBasicMaterial
-        vertexColors
+        vertexColors={materialPolicy.vertexColors}
+        color={materialPolicy.color}
         side={kind === "floor" ? THREE.FrontSide : THREE.DoubleSide}
         depthTest
         depthWrite
         fog={false}
-        toneMapped
+        toneMapped={materialPolicy.toneMapped}
       />
     </instancedMesh>
   );
@@ -4584,12 +5153,14 @@ function DistantArchitectureMesh({
 function DistantArchitectureLayer({
   cells,
   objectById,
+  backroomsTheme = false,
   presentationLightCells = [],
   includeCeilings = true,
   excludedCeilingCellKeys,
 }: {
   cells: CellData[];
   objectById: Map<string, ObjectData>;
+  backroomsTheme?: boolean;
   presentationLightCells?: readonly (readonly [number, number])[];
   includeCeilings?: boolean;
   excludedCeilingCellKeys?: ReadonlySet<string>;
@@ -4599,7 +5170,10 @@ function DistantArchitectureLayer({
     const walls: DistantArchitectureInstance[] = [];
     const ceilings: DistantArchitectureInstance[] = [];
     const neutral = new THREE.Color("#202838");
-    const ceilingColor = new THREE.Color("#181c27");
+    const ceilingColor = new THREE.Color(
+      backroomsTheme ? "#34301b" : "#181c27",
+    );
+    const backroomsWallFloor = new THREE.Color("#6b5928");
 
     cells.forEach((cell) => {
       if (cell.active === false || isOverheadCell(cell)) return;
@@ -4616,8 +5190,23 @@ function DistantArchitectureLayer({
         .multiplyScalar(0.34 + fixtureLight * 0.42)
         .lerp(neutral, 0.18 - fixtureLight * 0.08)
         .lerp(new THREE.Color("#b6a968"), fixtureLight * 0.12);
+      if (backroomsTheme) {
+        // Floors at a grazing camera angle occupy the same horizon band as
+        // walls. Give every Level Zero far proxy—not only structures—the same
+        // warm safety floor so a stale/default dark material cannot re-open a
+        // black rectangle when the directional LOD selection turns.
+        baseColor.lerp(backroomsWallFloor, 0.72);
+      }
 
       if (shouldRenderCellAsStructure(cell, object)) {
+        // Far proxies deliberately ignore authored texture/material detail.
+        // Give every Level Zero structural proxy a warm minimum as well: a
+        // retained or incomplete object definition can otherwise resolve to a
+        // near-black base and read as a rectangular hole at the LOD boundary.
+        // This remains vertex color in the existing single instanced wall draw.
+        const structureColor = backroomsTheme
+          ? baseColor.clone().lerp(backroomsWallFloor, 0.35)
+          : baseColor;
         const authoredHeight = Math.max(0, object?.bounds?.[1] || 0);
         const fallbackHeight = isWallStructureCell(cell, object)
           ? resolveImmersiveWallHeight(authoredHeight || 1.9, true)
@@ -4627,11 +5216,80 @@ function DistantArchitectureLayer({
           getRenderedCellHeight(cell, object),
           fallbackHeight,
         );
+        const thinWallFaceMask = readBackroomsLevelZeroThinWallFaceMask(
+          cell.object_id,
+        );
+        if (thinWallFaceMask !== undefined) {
+          const thickness =
+            BACKROOMS_LEVEL_ZERO_THIN_WALL_THICKNESS * cellSize;
+          const offset =
+            (0.5 - BACKROOMS_LEVEL_ZERO_THIN_WALL_THICKNESS / 2) *
+            cellSize;
+          const length = 1.04 * cellSize;
+          const addThinWallFace = (
+            dx: number,
+            dz: number,
+            horizontal: boolean,
+          ) =>
+            walls.push({
+              position: [
+                cell.x + dx * offset,
+                (cell.y || 0) + height / 2,
+                cell.z + dz * offset,
+              ],
+              rotation: [0, 0, 0],
+              scale: horizontal
+                ? [length, height, thickness]
+                : [thickness, height, length],
+              color: structureColor,
+            });
+
+          if (
+            thinWallFaceMask &
+            BACKROOMS_LEVEL_ZERO_THIN_WALL_FACE_BITS.north
+          ) {
+            addThinWallFace(0, -1, true);
+          }
+          if (
+            thinWallFaceMask & BACKROOMS_LEVEL_ZERO_THIN_WALL_FACE_BITS.east
+          ) {
+            addThinWallFace(1, 0, false);
+          }
+          if (
+            thinWallFaceMask &
+            BACKROOMS_LEVEL_ZERO_THIN_WALL_FACE_BITS.south
+          ) {
+            addThinWallFace(0, 1, true);
+          }
+          if (
+            thinWallFaceMask & BACKROOMS_LEVEL_ZERO_THIN_WALL_FACE_BITS.west
+          ) {
+            addThinWallFace(-1, 0, false);
+          }
+          return;
+        }
+        const partitionWall = readBackroomsLevelZeroPartitionWall(
+          cell.object_id,
+        );
+        if (partitionWall) {
+          const length = 1.04 * cellSize;
+          const thickness = partitionWall.thickness * 3 * cellSize;
+          walls.push({
+            position: [cell.x, (cell.y || 0) + height / 2, cell.z],
+            rotation: [0, 0, 0],
+            scale:
+              partitionWall.orientation === "horizontal"
+                ? [length, height, thickness]
+                : [thickness, height, length],
+            color: structureColor,
+          });
+          return;
+        }
         walls.push({
           position: [cell.x, (cell.y || 0) + height / 2, cell.z],
           rotation: [0, 0, 0],
           scale: [cellSize, height, cellSize],
-          color: baseColor,
+          color: structureColor,
         });
         return;
       }
@@ -4665,6 +5323,7 @@ function DistantArchitectureLayer({
     return { floors, walls, ceilings };
   }, [
     cells,
+    backroomsTheme,
     excludedCeilingCellKeys,
     includeCeilings,
     objectById,
@@ -4673,9 +5332,21 @@ function DistantArchitectureLayer({
 
   return (
     <>
-      <DistantArchitectureMesh kind="floor" instances={instances.floors} />
-      <DistantArchitectureMesh kind="wall" instances={instances.walls} />
-      <DistantArchitectureMesh kind="ceiling" instances={instances.ceilings} />
+      <DistantArchitectureMesh
+        kind="floor"
+        instances={instances.floors}
+        backroomsTheme={backroomsTheme}
+      />
+      <DistantArchitectureMesh
+        kind="wall"
+        instances={instances.walls}
+        backroomsTheme={backroomsTheme}
+      />
+      <DistantArchitectureMesh
+        kind="ceiling"
+        instances={instances.ceilings}
+        backroomsTheme={backroomsTheme}
+      />
     </>
   );
 }
@@ -4688,12 +5359,58 @@ function BackroomsVoidShield({
   center,
   radius,
   includeCeiling = true,
+  backroomsTheme = false,
 }: {
   center: [number, number];
   radius: number;
   includeCeiling?: boolean;
+  backroomsTheme?: boolean;
 }) {
+  const backdropRef = useRef<THREE.Mesh>(null);
   const height = IMMERSIVE_CEILING_HEIGHT + 0.08;
+  // The shield is a last-resort horizon behind real architecture. A warm,
+  // very dark Level Zero palette reads as receding carpet/wallpaper instead
+  // of the renderer's black clear color, while remaining cheap unlit geometry.
+  const floorColor = backroomsTheme ? "#241810" : "#202634";
+  const ceilingColor = backroomsTheme ? "#302b17" : "#12151d";
+  const wallColor = backroomsTheme ? "#392e16" : "#171c28";
+
+  // Level Zero's chase camera can orbit beyond the streamed/authored center.
+  // Follow the actual camera with one enclosing basic-material sphere so an
+  // exposed sector edge is always warm wallpaper-toned, independent of yaw.
+  // This only changes one mesh transform; it does not rebuild instance data or
+  // create simulation/collision cells. Replacing the old floor/ceiling/wall
+  // trio also drops the fallback horizon from three draws to one.
+  useFrame(({ camera }) => {
+    if (!backroomsTheme || !backdropRef.current) return;
+    if (backdropRef.current.position.distanceToSquared(camera.position) < 0.000001) {
+      return;
+    }
+    backdropRef.current.position.copy(camera.position);
+  });
+
+  if (backroomsTheme) {
+    return (
+      <mesh
+        ref={backdropRef}
+        position={[center[0], IMMERSIVE_CEILING_HEIGHT / 2, center[1]]}
+        renderOrder={-100}
+        raycast={() => null}
+        frustumCulled={false}
+      >
+        <sphereGeometry args={[radius + 6, 32, 16]} />
+        <meshBasicMaterial
+          color={wallColor}
+          side={THREE.BackSide}
+          depthTest
+          depthWrite
+          fog={false}
+          toneMapped={false}
+        />
+      </mesh>
+    );
+  }
+
   return (
     <group position={[center[0], 0, center[1]]} renderOrder={-12}>
       <mesh
@@ -4703,7 +5420,7 @@ function BackroomsVoidShield({
       >
         <circleGeometry args={[radius, 64]} />
         <meshBasicMaterial
-          color="#202634"
+          color={floorColor}
           side={THREE.FrontSide}
           depthTest
           depthWrite
@@ -4719,7 +5436,7 @@ function BackroomsVoidShield({
         >
           <circleGeometry args={[radius, 64]} />
           <meshBasicMaterial
-            color="#12151d"
+            color={ceilingColor}
             side={THREE.FrontSide}
             depthTest
             depthWrite
@@ -4731,7 +5448,7 @@ function BackroomsVoidShield({
       <mesh position={[0, height / 2 - 0.025, 0]} raycast={() => null}>
         <cylinderGeometry args={[radius, radius, height, 64, 1, true]} />
         <meshBasicMaterial
-          color="#171c28"
+          color={wallColor}
           side={THREE.BackSide}
           depthTest
           depthWrite
@@ -4740,6 +5457,67 @@ function BackroomsVoidShield({
         />
       </mesh>
     </group>
+  );
+}
+
+// Generated Level Zero maps author only playable topology. Put one cheap
+// instanced visual block in each unique absent cell adjoining the floorplan so
+// oblique third-person views read its outside as distant wallpaper mass, not
+// black renderer space. These are presentation-only: no collision, raycasts,
+// authored cells, or simulation state are created.
+function BackroomsBoundaryFillLayer({
+  cells,
+}: {
+  cells: CellData[];
+}) {
+  const meshRef = useRef<THREE.InstancedMesh>(null);
+  // Keep the complete, small perimeter buffer stable across camera yaw. The
+  // current preview has 1,281 fillers (15,372 basic triangles) in one draw;
+  // rebuilding a directional subset while rotating both exposed side voids
+  // and caused needless instance-buffer uploads.
+  const fillers = useMemo(
+    () => buildAuthoredArchitectureBoundaryFillers(cells),
+    [cells],
+  );
+
+  useLayoutEffect(() => {
+    if (!meshRef.current) return;
+    const dummy = new THREE.Object3D();
+    fillers.forEach((filler, index) => {
+      dummy.position.set(
+        filler.position[0],
+        filler.y + IMMERSIVE_CEILING_HEIGHT / 2,
+        filler.position[1],
+      );
+      dummy.rotation.set(0, 0, 0);
+      dummy.scale.set(1.02, IMMERSIVE_CEILING_HEIGHT + 0.04, 1.02);
+      dummy.updateMatrix();
+      meshRef.current!.setMatrixAt(index, dummy.matrix);
+    });
+    meshRef.current.count = fillers.length;
+    meshRef.current.instanceMatrix.needsUpdate = true;
+    meshRef.current.computeBoundingSphere();
+  }, [fillers]);
+
+  if (fillers.length === 0) return null;
+  return (
+    <instancedMesh
+      ref={meshRef}
+      args={[undefined as any, undefined as any, fillers.length]}
+      raycast={() => null}
+      frustumCulled
+      renderOrder={-7}
+    >
+      <boxGeometry args={[1, 1, 1]} />
+      <meshBasicMaterial
+        color="#5d4b21"
+        side={THREE.FrontSide}
+        depthTest
+        depthWrite
+        fog={false}
+        toneMapped={false}
+      />
+    </instancedMesh>
   );
 }
 
@@ -4975,12 +5753,28 @@ function InstancedRuntimeGeometryGroup({
         instance.position[1],
         instance.position[2],
       );
-      dummy.rotation.set(0, instance.rotationY, 0);
-      dummy.scale.set(
-        instance.scaleXZ ?? 1,
-        instance.scaleY ?? 1,
-        instance.scaleXZ ?? 1,
-      );
+      if (instance.rotation) {
+        dummy.rotation.set(
+          instance.rotation[0],
+          instance.rotation[1],
+          instance.rotation[2],
+        );
+      } else {
+        dummy.rotation.set(0, instance.rotationY, 0);
+      }
+      if (instance.scale) {
+        dummy.scale.set(
+          instance.scale[0],
+          instance.scale[1],
+          instance.scale[2],
+        );
+      } else {
+        dummy.scale.set(
+          instance.scaleXZ ?? 1,
+          instance.scaleY ?? 1,
+          instance.scaleXZ ?? 1,
+        );
+      }
       dummy.updateMatrix();
       dummy.matrix.multiply(localMatrix);
       meshRef.current!.setMatrixAt(index, dummy.matrix);
@@ -5140,7 +5934,18 @@ function getPlacementRenderInfo(
   const openRotation = isDoorPlacementOpen(mapDelta, placement)
     ? Math.PI / 2
     : 0;
-  const minY = objectExtents.minY;
+  // Anomaly transforms. Absent on every ordinary placement, in which case the
+  // maths below collapses to exactly what it computed before they existed.
+  const scale = placement.scale;
+  const scaleX = scale?.[0] ?? 1;
+  const scaleY = scale?.[1] ?? 1;
+  const scaleZ = scale?.[2] ?? 1;
+  const rotationOffset = placement.rotation_offset;
+  const planOffset = placement.plan_offset;
+  // Grounding uses the SCALED lowest point. Scaling about the placement
+  // origin moves the object's floor with it, so a half-size desk would sink
+  // and a double-size one would hover if we grounded on the authored bounds.
+  const minY = objectExtents.minY * scaleY;
   // Ordinary props are grounded by their lowest authored point. Ceiling
   // fixtures deliberately author their parts at ceiling height, so preserve
   // that vertical coordinate instead of normalizing the housing to the floor.
@@ -5156,13 +5961,22 @@ function getPlacementRenderInfo(
     key: `cobj_${placement.object_id}_${index}`,
     object,
     placement,
-    position: [placement.cell[0], yOffset, placement.cell[1]] as [
-      number,
-      number,
-      number,
-    ],
+    position: [
+      placement.cell[0] + (planOffset?.[0] ?? 0),
+      yOffset,
+      placement.cell[1] + (planOffset?.[1] ?? 0),
+    ] as [number, number, number],
     rotationY: rotY + openRotation,
-    maxY: objectExtents.maxY,
+    // Full euler for renderers that support it. Yaw keeps carrying `facing`
+    // plus the door-open swing; pitch and roll come only from the offset.
+    rotation: [
+      rotationOffset?.[0] ?? 0,
+      rotY + openRotation + (rotationOffset?.[1] ?? 0),
+      rotationOffset?.[2] ?? 0,
+    ] as [number, number, number],
+    scale: [scaleX, scaleY, scaleZ] as [number, number, number],
+    hasTransform: Boolean(scale || rotationOffset || planOffset),
+    maxY: objectExtents.maxY * scaleY,
   };
 }
 
@@ -5184,7 +5998,11 @@ type PlacementLight = PlacementLightConfig & {
   castsShadow: boolean;
 };
 
-const MAX_PLACEMENT_LIGHTS = 28;
+// Simultaneous placement lights. Ceiling fixtures now throw a narrow cone, so
+// a fixture more than a room away contributes almost nothing to what the
+// camera sees while still costing a full light in the shader. Trimming the
+// budget buys back most of the frame-time the denser ceiling grid costs.
+const MAX_PLACEMENT_LIGHTS = 18;
 const MAX_SHADOW_CASTING_PLACEMENT_LIGHTS = 1;
 let lightPoolTextureCache: THREE.CanvasTexture | null = null;
 let ceilingLightHaloTextureCache: THREE.CanvasTexture | null = null;
@@ -5636,8 +6454,14 @@ function PresentationRoomSpotLight({ light }: { light: PlacementLight }) {
         intensity={light.intensity}
         distance={light.distance * 1.2}
         decay={light.decay}
-        angle={1.48}
-        penumbra={0.48}
+        // A narrow cone is what makes a ceiling fixture read as a POOL. At the
+        // old ~85 degrees the throw was nearly hemispherical, so neighbouring
+        // fixtures overlapped into one even wash and the floor between them was
+        // never darker than the floor beneath them. Roughly 54 degrees from a
+        // 2.7m ceiling lands a pool a few cells across, leaving real gaps
+        // between fixtures for the ambient floor to show through.
+        angle={0.95}
+        penumbra={0.55}
         castShadow={light.castsShadow}
         shadow-bias={-0.0002}
         shadow-normalBias={0.08}
@@ -5782,6 +6606,9 @@ function CustomObjectPlacementLayer({
         key: info.key,
         position: info.position,
         rotationY: info.rotationY,
+        ...(info.hasTransform
+          ? { rotation: info.rotation, scale: info.scale }
+          : {}),
       });
     });
 
@@ -5898,7 +6725,8 @@ function CustomObjectPlacementLayer({
         <group
           key={info.key}
           position={info.position}
-          rotation={[0, info.rotationY, 0]}
+          rotation={info.rotation}
+          scale={info.scale}
         >
           <ObjectRuntimeModelRenderer
             object={info.object}
@@ -6053,6 +6881,7 @@ function ThirdPersonNearCameraPlayerGroup({
   const groupRef = useRef<THREE.Group>(null);
   const viewPresentation = useContext(ViewPresentationContext);
   const opacityRef = useRef(1);
+  const materialsAtBaseRef = useRef(true);
 
   const restoreMaterials = useCallback(() => {
     groupRef.current?.traverse((child) => {
@@ -6093,13 +6922,31 @@ function ThirdPersonNearCameraPlayerGroup({
             ),
           )
         : 1;
-    opacityRef.current = THREE.MathUtils.damp(
+    const nextOpacity = THREE.MathUtils.damp(
       opacityRef.current,
       targetOpacity,
       PLAYER_NEAR_CAMERA_FADE_DAMPING,
       Math.min(delta, 0.1),
     );
-    const opacity = opacityRef.current;
+    const materialUpdate = resolveThirdPersonPlayerMaterialFadeUpdate(
+      targetOpacity,
+      nextOpacity,
+      materialsAtBaseRef.current,
+    );
+    if (materialUpdate === "skip") {
+      opacityRef.current = 1;
+      return;
+    }
+    if (materialUpdate === "restore_base") {
+      opacityRef.current = 1;
+      restoreMaterials();
+      materialsAtBaseRef.current = true;
+      return;
+    }
+
+    opacityRef.current = nextOpacity;
+    materialsAtBaseRef.current = false;
+    const opacity = nextOpacity;
 
     groupRef.current.traverse((child) => {
       const mesh = child as THREE.Mesh;
@@ -6143,12 +6990,15 @@ function ThirdPersonNearCameraPlayerGroup({
 
 const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
   map,
+  authoredArchitectureCells,
+  persistentArchitectureCells,
   playerPos,
   playerFacing = [0, -1],
   playerSeatedPose = null,
   playerStealthActive = false,
   playerVisualYaw,
   playerVisualYawRef,
+  playerLivePoseRef,
   continuousPlayerMovement = false,
   playerSpriteId,
   worldItems,
@@ -6321,13 +7171,21 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
     return dx * dx + dz * dz <= radius * radius;
   };
 
+  const persistentArchitectureLayerEnabled = Boolean(
+    persistentArchitectureCells?.length &&
+      isImmersiveCeilingView(viewPresentation),
+  );
   const renderCells = useMemo(
     () =>
-      map.cells.filter(
-        (cell) => !chunkedRenderCenter || isInRenderWindow(cell.x, cell.z, 2),
-      ),
+      persistentArchitectureLayerEnabled
+        ? []
+        : map.cells.filter(
+            (cell) =>
+              !chunkedRenderCenter || isInRenderWindow(cell.x, cell.z, 2),
+          ),
     [
       map.cells,
+      persistentArchitectureLayerEnabled,
       chunkedRenderCenter?.[0],
       chunkedRenderCenter?.[1],
       renderRadius,
@@ -6337,6 +7195,15 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
       detailForwardDistance,
       directionalForwardLateralScale,
     ],
+  );
+  const detailedArchitectureCellKeys = useMemo(
+    () =>
+      new Set(
+        renderCells
+          .filter((cell) => cell.active !== false)
+          .map((cell) => getCellCoordKey(cell.x, cell.z)),
+      ),
+    [renderCells],
   );
   const immersiveArchitectureEnabled = isImmersiveCeilingView(viewPresentation);
   const architectureCenter = useMemo<[number, number]>(
@@ -6359,32 +7226,54 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
     renderRadius + 4,
     architectureRadius,
   );
+  const architectureSourceCells = authoredArchitectureCells ?? map.cells;
+  const backroomsArchitectureTheme = useMemo(
+    () =>
+      architectureSourceCells.some(
+        (cell) => cell.object_id === BACKROOMS_LEVEL_ZERO_FLOOR_OBJECT_ID,
+      ),
+    [architectureSourceCells],
+  );
+  const persistentBackroomsArchitectureCells =
+    persistentArchitectureLayerEnabled &&
+    backroomsArchitectureTheme &&
+    persistentArchitectureCells?.length
+      ? persistentArchitectureCells
+      : null;
+  const persistentBackroomsCenterChunk = useMemo(
+    () => backroomsRenderChunkCoordinate(architectureCenter),
+    [
+      Math.floor(architectureCenter[0] / BACKROOMS_RENDER_CHUNK_SIZE),
+      Math.floor(architectureCenter[1] / BACKROOMS_RENDER_CHUNK_SIZE),
+    ],
+  );
   const distantArchitectureCells = useMemo(() => {
-    if (!immersiveArchitectureEnabled) return [];
+    if (
+      !immersiveArchitectureEnabled ||
+      persistentBackroomsArchitectureCells
+    ) {
+      return [];
+    }
     const detailRadius = renderRadius + 2;
-    return map.cells.filter((cell) => {
-      return (
-        cell.active !== false &&
-        isWithinDistantArchitectureBand({
-          cell: [cell.x, cell.z],
-          center: architectureCenter,
-          detailRadius,
-          architectureRadius: resolvedArchitectureRadius,
-          forward:
-            viewPresentation === "third_person" ? renderForward : undefined,
-          detailForwardBonus:
-            viewPresentation === "third_person" ? detailForwardDistance : 0,
-          architectureForwardBonus:
-            viewPresentation === "third_person"
-              ? architectureForwardDistance
-              : 0,
-          forwardLateralScale: directionalForwardLateralScale,
-        })
-      );
+    return selectDistantArchitectureCells({
+      cells: architectureSourceCells,
+      center: architectureCenter,
+      detailRadius,
+      architectureRadius: resolvedArchitectureRadius,
+      forward:
+        viewPresentation === "third_person" ? renderForward : undefined,
+      detailForwardBonus:
+        viewPresentation === "third_person" ? detailForwardDistance : 0,
+      architectureForwardBonus:
+        viewPresentation === "third_person"
+          ? architectureForwardDistance
+          : 0,
+      forwardLateralScale: directionalForwardLateralScale,
+      detailedCellKeys: detailedArchitectureCellKeys,
     });
   }, [
     immersiveArchitectureEnabled,
-    map.cells,
+    architectureSourceCells,
     architectureCenter[0],
     architectureCenter[1],
     renderRadius,
@@ -6395,6 +7284,8 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
     detailForwardDistance,
     architectureForwardDistance,
     directionalForwardLateralScale,
+    detailedArchitectureCellKeys,
+    persistentBackroomsArchitectureCells,
   ]);
 
   const objectById = useMemo(
@@ -6408,9 +7299,11 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
     [gamePackage.object_library],
   );
 
+  const terrainVisualCells =
+    persistentBackroomsArchitectureCells ?? renderCells;
   const wallRotationByCell = useMemo(
-    () => buildWallRotationByCell(map, objectById),
-    [map, objectById],
+    () => buildWallRotationByCell(terrainVisualCells, objectById),
+    [terrainVisualCells, objectById],
   );
 
   const highestCellByCoord = useMemo(() => {
@@ -6456,13 +7349,19 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
         : map.custom_object_placements || [],
     [map.custom_object_placements, extraPlacements],
   );
+  // The complete chunk world must only rebuild when its actual ceiling holes
+  // change. Movement recreates render-placement arrays (even when empty), but
+  // unrelated props do not alter this stable semantic signature.
+  const derivedCeilingOpeningSignature =
+    resolveDerivedCeilingOpeningSignature(allRenderPlacements, objectById);
   const derivedCeilingOpeningCellKeys = useMemo(
     () =>
-      resolveDerivedCeilingOpeningCellKeys(
-        allRenderPlacements,
-        objectById,
+      new Set(
+        derivedCeilingOpeningSignature
+          ? derivedCeilingOpeningSignature.split("|")
+          : [],
       ),
-    [allRenderPlacements, objectById],
+    [derivedCeilingOpeningSignature],
   );
   const objectPlacementRenderInfoById = useMemo(() => {
     const lookup = new Map<
@@ -6507,9 +7406,20 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
       ),
     [allRenderPlacements, objectById],
   );
+  // This set depends on the camera forward vector, so it is recomputed on every
+  // frame of a turn -- but the ANSWER almost never changes while turning inside
+  // one room. Returning a fresh array each time still invalidated the placement
+  // grouping downstream, which re-derived every placement transform and
+  // re-uploaded the instance buffers purely because the camera rotated.
+  //
+  // Measured: turning allocated ~7MB/s while walking into a wall allocated
+  // nothing, and that churn is what drove the heap into the range where major
+  // collections became the visible stutter. Keep the previous array whenever the
+  // contents match so the identity-keyed memos below can stand down.
+  const previousRenderPlacementsRef = useRef<ObjectPlacementData[]>([]);
   const renderPlacements = useMemo(
-    () =>
-      allRenderPlacements.filter((placement) => {
+    () => {
+      const next = allRenderPlacements.filter((placement) => {
         if (
           chunkedRenderCenter &&
           !isInRenderWindow(placement.cell[0], placement.cell[1], 4)
@@ -6521,7 +7431,17 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
         return getMacroPlacementFootprint(placement, object).some(
           (cell) => getCellFogState(cell) === "visible",
         );
-      }),
+      });
+      const previous = previousRenderPlacementsRef.current;
+      if (
+        previous.length === next.length &&
+        previous.every((placement, index) => placement === next[index])
+      ) {
+        return previous;
+      }
+      previousRenderPlacementsRef.current = next;
+      return next;
+    },
     [
       allRenderPlacements,
       objectById,
@@ -6756,12 +7676,15 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
     <WorldItemFloatProvider>
       <group onPointerOut={onPointerOut}>
         <AnimatedSpriteTextureDriver />
-        {/* Exterior artwork wraps the horizon; indoor maps retain dusk fallback. */}
-        <SkyDome
-          textureUrl={
-            exteriorEnvironment ? EXTERIOR_COSMIC_SKY_TEXTURE_URL : undefined
-          }
-        />
+        {/* Level Zero uses the cheaper theme-aware void shield instead of an
+            unseen sky shader. Preserve the established dome for other maps. */}
+        {(exteriorEnvironment || !backroomsArchitectureTheme) && (
+          <SkyDome
+            textureUrl={
+              exteriorEnvironment ? EXTERIOR_COSMIC_SKY_TEXTURE_URL : undefined
+            }
+          />
+        )}
         {/* Invisible interaction plane for editor and targeting */}
         {(editLayerY !== undefined || onCellClick || onCellHover) && (
           <mesh
@@ -6797,11 +7720,13 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
           </mesh>
         )}
 
-        {immersiveArchitectureEnabled && (
+        {immersiveArchitectureEnabled &&
+          !persistentBackroomsArchitectureCells && (
           <>
             {!exteriorEnvironment && (
               <BackroomsVoidShield
                 center={architectureCenter}
+                backroomsTheme={backroomsArchitectureTheme}
                 includeCeiling={
                   derivedCeilingSurfaces &&
                   derivedCeilingOpeningCellKeys.size === 0
@@ -6816,9 +7741,15 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
                 }
               />
             )}
+            {backroomsArchitectureTheme && (
+              <BackroomsBoundaryFillLayer
+                cells={architectureSourceCells}
+              />
+            )}
             <DistantArchitectureLayer
               cells={distantArchitectureCells}
               objectById={objectById}
+              backroomsTheme={backroomsArchitectureTheme}
               presentationLightCells={presentationArchitectureLightCells}
               includeCeilings={derivedCeilingSurfaces}
               excludedCeilingCellKeys={derivedCeilingOpeningCellKeys}
@@ -6826,20 +7757,37 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
           </>
         )}
 
-        {/* Render Cells */}
-        <CellVisualLayers
-          cells={renderCells}
-          objectById={objectById}
-          wallRotationByCell={wallRotationByCell}
-          playerPos={playerPos}
-          getCellFogState={getCellFogState}
-          getStructureIllumination={getStructureIllumination}
-        />
-        <ImmersiveCeilingLayer
-          cells={renderCells}
-          enabled={derivedCeilingSurfaces}
-          excludedCellKeys={derivedCeilingOpeningCellKeys}
-        />
+        {/* Static terrain is decoupled from the streamed simulation window. */}
+        {persistentBackroomsArchitectureCells ? (
+          <PersistentBackroomsArchitectureLayer
+            cells={persistentBackroomsArchitectureCells}
+            objectById={objectById}
+            wallRotationByCell={wallRotationByCell}
+            includeCeiling={derivedCeilingSurfaces}
+            centerChunk={persistentBackroomsCenterChunk}
+            excludedCeilingSignature={
+              derivedCeilingOpeningSignature
+                ? derivedCeilingOpeningSignature
+                : undefined
+            }
+          />
+        ) : (
+          <>
+            <CellVisualLayers
+              cells={renderCells}
+              objectById={objectById}
+              wallRotationByCell={wallRotationByCell}
+              playerPos={playerPos}
+              getCellFogState={getCellFogState}
+              getStructureIllumination={getStructureIllumination}
+            />
+            <ImmersiveCeilingLayer
+              cells={renderCells}
+              enabled={derivedCeilingSurfaces}
+              excludedCellKeys={derivedCeilingOpeningCellKeys}
+            />
+          </>
+        )}
         {(showGrid ?? editLayerY !== undefined) && (
           <CellGridLines cells={renderCells} material={materials.gridLine} />
         )}
@@ -7062,6 +8010,7 @@ const ReferenceGameRenderer = memo(function ReferenceGameRenderer({
               <SmoothPositionGroup
                 position={[playerPos[0], pY, playerPos[1]]}
                 continuousMovement={continuousPlayerMovement}
+                livePoseRef={playerLivePoseRef}
                 onPositionUpdate={(position) => {
                   playerStateRef.px = position.x;
                   playerStateRef.py = position.y;
@@ -7276,6 +8225,15 @@ const convertPlacementToWorld = (
 ): ObjectPlacementData => ({
   ...placement,
   cell: logicalCellToWorld(placement.cell, gridSpace, fineRatio),
+  ...(placement.plan_offset
+    ? {
+        plan_offset: logicalPlanOffsetToWorld(
+          placement.plan_offset,
+          gridSpace,
+          fineRatio,
+        ),
+      }
+    : {}),
 });
 
 const convertRuntimeMapToWorld = (
@@ -7283,10 +8241,15 @@ const convertRuntimeMapToWorld = (
   mapDelta: MapDelta | undefined,
   gridSpace: RendererGridSpace,
   fineRatio: number,
+  terrainCellsOverride?: CellData[],
 ): { map: MapData; mapDelta: MapDelta | undefined } => {
   if (gridSpace === "macro") return { map, mapDelta };
 
-  const cells = dedupeFineTerrainCellsFor3D(map.cells, fineRatio);
+  const cells = resolveRendererTerrainCells(
+    map.cells,
+    terrainCellsOverride,
+    fineRatio,
+  );
   const convertCell = (cell: readonly unknown[]) =>
     logicalCellToWorld(cell, gridSpace, fineRatio);
   const authoredPlacements = map.custom_object_placements || [];
@@ -7576,6 +8539,7 @@ const AuthoritativeLightLayer = memo(function AuthoritativeLightLayer({
 
 export const GameRenderer3D = memo(function GameRenderer3D({
   map,
+  authoredArchitectureMap,
   gridSpace = "macro",
   fineRatio = 3,
   playerPos,
@@ -7584,6 +8548,7 @@ export const GameRenderer3D = memo(function GameRenderer3D({
   playerStealthActive = false,
   playerVisualYaw,
   playerVisualYawRef,
+  playerLivePoseRef,
   continuousPlayerMovement = false,
   playerSpriteId,
   worldItems,
@@ -7795,10 +8760,40 @@ export const GameRenderer3D = memo(function GameRenderer3D({
     fogResolution,
     authoritativeVisibility,
   ]);
+  // Authored map cells are macro coordinates, which already equal renderer
+  // world units. Keep them unexpanded: the far field can cover the complete
+  // topology without retaining the full fine simulation map.
+  const visualAuthoredArchitectureCells = useMemo(
+    () => authoredArchitectureMap?.cells,
+    [authoredArchitectureMap?.cells],
+  );
+  const visualPersistentArchitectureCells = useMemo(
+    () =>
+      authoredArchitectureMap
+        ? buildPersistentAuthoredTerrainCellsFor3D(authoredArchitectureMap)
+        : undefined,
+    [authoredArchitectureMap],
+  );
+  const persistentTerrainOverride =
+    isImmersiveCeilingView(resolvedViewPresentation)
+      ? visualPersistentArchitectureCells
+      : undefined;
   const visualWorld = useMemo(
     () =>
-      convertRuntimeMapToWorld(map, visualPlacementDelta, gridSpace, fineRatio),
-    [map, visualPlacementDelta, gridSpace, fineRatio],
+      convertRuntimeMapToWorld(
+        map,
+        visualPlacementDelta,
+        gridSpace,
+        fineRatio,
+        persistentTerrainOverride,
+      ),
+    [
+      map,
+      visualPlacementDelta,
+      gridSpace,
+      fineRatio,
+      persistentTerrainOverride,
+    ],
   );
   const presentationRoomLightCells = useMemo<
     readonly [number, number][]
@@ -7970,6 +8965,16 @@ export const GameRenderer3D = memo(function GameRenderer3D({
     AuthoritativeFogPresentationCell[] | null
   >(() => {
     if (!authoritativeFogSets) return null;
+    // Third-person exploration deliberately presents physical architecture
+    // without a fog mask. Building a macro fog plan in that mode still walked
+    // every fine cell in a streamed window (31k+ on the current Level 0) even
+    // though neither the terrain renderer nor overlays consumed the result.
+    if (
+      !visibilityPresentationPolicy.fogMaskEnabled &&
+      !visibilityPresentationPolicy.gatePhysicalContent
+    ) {
+      return null;
+    }
     return buildAuthoritativeFogPresentationPlan({
       cells: map.cells,
       gridSpace,
@@ -7985,6 +8990,7 @@ export const GameRenderer3D = memo(function GameRenderer3D({
     gridSpace,
     fineRatio,
     visibilityPresentationPolicy.fogMaskEnabled,
+    visibilityPresentationPolicy.gatePhysicalContent,
   ]);
   const getVisualCellFogState = useMemo(() => {
     if (!visibilityPresentationPolicy.gatePhysicalContent) {
@@ -8208,12 +9214,15 @@ export const GameRenderer3D = memo(function GameRenderer3D({
       <group>
         <ReferenceGameRenderer
           map={visualWorld.map}
+          authoredArchitectureCells={visualAuthoredArchitectureCells}
+          persistentArchitectureCells={visualPersistentArchitectureCells}
           playerPos={transformPoint(playerPos)}
           playerFacing={playerFacing}
           playerSeatedPose={playerSeatedPose}
           playerStealthActive={playerStealthActive}
           playerVisualYaw={playerVisualYaw}
           playerVisualYawRef={playerVisualYawRef}
+          playerLivePoseRef={playerLivePoseRef}
           continuousPlayerMovement={continuousPlayerMovement}
           playerSpriteId={playerSpriteId}
           worldItems={visualWorldItems}

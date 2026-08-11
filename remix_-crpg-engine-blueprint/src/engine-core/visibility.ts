@@ -642,7 +642,23 @@ const structuralVisionBlock = (cell: SimulationCellState | undefined) =>
     cell?.occupants.some((occupant) => occupant.blocks_los),
   );
 
-const prepareVisionMap = (
+// The vision map is a pure function of the simulation's cell array and the
+// grid ratio, and it covers the whole map even when a caller only needs the
+// handful of cells around one viewer. On a large generated level that is a
+// six-figure Map rebuilt on every visibility query, which dominated the cost
+// of simply standing still.
+//
+// Keyed on the cells array rather than the snapshot: the snapshot is cloned
+// whenever its tick advances, but the cells array survives that clone, and it
+// is replaced whenever the structure actually changes (authored smoke, for
+// example, maps it into a new array). So identity here means "the same
+// structural world", which is exactly the cache's validity condition.
+const preparedVisionCache = new WeakMap<
+  object,
+  { ratio: number; vision: PreparedVisionMap }
+>();
+
+const buildVisionMap = (
   simulation: SimulationMapSnapshot,
   ratio: number,
 ): PreparedVisionMap => {
@@ -676,6 +692,175 @@ const prepareVisionMap = (
       ];
     }),
   );
+};
+
+const prepareVisionMap = (
+  simulation: SimulationMapSnapshot,
+  ratio: number,
+): PreparedVisionMap => {
+  const cached = preparedVisionCache.get(simulation.cells);
+  if (cached && cached.ratio === ratio) return cached.vision;
+  const vision = buildVisionMap(simulation, ratio);
+  preparedVisionCache.set(simulation.cells, { ratio, vision });
+  return vision;
+};
+
+// ── Bounded structural simulation for the viewer path ──────────────────────
+//
+// A streamed level hands the runtime a window far larger than one viewer can
+// see: the window is sized for rendering far-field architecture, while the
+// viewer resolves roughly an eight-macro-cell radius. Building the structural
+// simulation over the whole window meant every sector crossing rebuilt tens of
+// thousands of cells to answer a question about a few hundred, and that rebuild
+// landed on the frame the player crossed — the stutter.
+//
+// So the viewer path gets its own bounded view of the map. Two properties make
+// this safe rather than merely cheaper:
+//
+//   * Out-of-bounds is FAIL-CLOSED. A cell missing from the vision map reads as
+//     inactive, and `analyzeLightLine` treats that as fully blocking. Trimming
+//     cells can therefore never leak light or sight through geometry that was
+//     dropped; the failure direction is a light going dark, never a wall going
+//     transparent.
+//   * The radius is derived, not guessed. Illumination only considers a source
+//     within its own radius, and only for cells inside the viewer's range, so
+//     every path that can affect a visible cell is shorter than
+//     `viewerRange + maxSourceRadius`. Bounding at that distance keeps every
+//     relevant path fully modelled.
+//
+// Rebuilding this slice is the single most expensive thing the viewer path
+// does, so the slice is deliberately STICKY: it carries slack well beyond what
+// the viewer needs right now, and is reused until the viewer approaches the
+// edge of what it actually covers.
+//
+// Stickiness is the whole point, and it is easy to lose. An earlier version
+// quantized the slice to a 12-cell grid, which looked like caching but rebuilt
+// roughly once per second of walking - measured at 17 rebuilds, 84,806 cell
+// objects and +240MB of heap in 16 seconds. Peak CPU per rebuild had dropped,
+// but that allocation churn drove the heap past half a gigabyte and the
+// resulting major collections were themselves the stutter. Slack, not
+// quantization, is what makes this cheap.
+//
+// The cache is also deliberately NOT keyed on the runtime package. Streaming
+// rebuilds that package object on every sector crossing, so keying on it would
+// discard the slice for a reason unrelated to whether the slice is still
+// valid. It is keyed by map and validated geometrically instead.
+const VISIBILITY_SLICE_SLACK_FINE = 96;
+const VISIBILITY_SLICE_CACHE_LIMIT = 4;
+
+interface VisibilitySlice {
+  center: [number, number];
+  /** Distance from `center` the slice actually contains. */
+  keep: number;
+  /** Reach the slice satisfies; a larger demand forces a rebuild. */
+  radius: number;
+  gamePackage: GamePackage;
+  sourceLibrary: GamePackage["object_library"];
+}
+
+const visibilitySliceByMapId = new Map<string, VisibilitySlice>();
+
+const boundedVisibilityPackage = (
+  gamePackage: GamePackage,
+  mapId: string,
+  viewerCell: readonly [number, number],
+  radius: number,
+): GamePackage => {
+  const map = gamePackage.maps.find((candidate) => candidate.id === mapId);
+  if (!map) return gamePackage;
+
+  const existing = visibilitySliceByMapId.get(mapId);
+  if (
+    existing &&
+    existing.radius >= radius &&
+    existing.sourceLibrary === gamePackage.object_library &&
+    // Cover, not identity. A streamed window swaps its cells array on every
+    // crossing while the cell objects inside stay shared, so an identity check
+    // here would thrash for no reason.
+    Math.abs(viewerCell[0] - existing.center[0]) <= existing.keep - radius &&
+    Math.abs(viewerCell[1] - existing.center[1]) <= existing.keep - radius
+  ) {
+    return existing.gamePackage;
+  }
+
+  // Re-centre on the viewer with slack in every direction, so ordinary
+  // traversal covers a long distance before the next rebuild is needed.
+  const keep = radius + VISIBILITY_SLICE_SLACK_FINE;
+  const centerX = viewerCell[0];
+  const centerZ = viewerCell[1];
+  const cells = map.cells.filter(
+    (cell) =>
+      Math.abs(cell.x - centerX) <= keep && Math.abs(cell.z - centerZ) <= keep,
+  );
+  // Nothing was trimmed, so a bounded view would only add an object identity
+  // for the caches downstream to miss on. Use the package as it stands.
+  if (cells.length === map.cells.length) {
+    visibilitySliceByMapId.delete(mapId);
+    return gamePackage;
+  }
+
+  const boundedMap = { ...map, cells };
+  const boundedPackage: GamePackage = {
+    ...gamePackage,
+    maps: gamePackage.maps.map((candidate) =>
+      candidate.id === mapId ? boundedMap : candidate,
+    ),
+  };
+  visibilitySliceByMapId.set(mapId, {
+    center: [centerX, centerZ],
+    keep,
+    radius,
+    gamePackage: boundedPackage,
+    sourceLibrary: gamePackage.object_library,
+  });
+  // Retired slices pin their cells against collection, so keep very few.
+  while (visibilitySliceByMapId.size > VISIBILITY_SLICE_CACHE_LIMIT) {
+    const oldest = visibilitySliceByMapId.keys().next().value as string | undefined;
+    if (!oldest || oldest === mapId) break;
+    visibilitySliceByMapId.delete(oldest);
+  }
+  return boundedPackage;
+};
+
+type SimulationCell = SimulationMapSnapshot["cells"][number];
+
+// Coordinate index over the simulation's cells, cached on the same identity as
+// the vision map. Range-bounded callers scan a small square around a viewer;
+// without an index each of those scans is a full pass over every cell in the
+// level to find the few hundred nearby ones.
+const cellIndexCache = new WeakMap<object, Map<string, SimulationCell>>();
+
+const simulationCellsByCoord = (
+  simulation: SimulationMapSnapshot,
+): Map<string, SimulationCell> => {
+  const cached = cellIndexCache.get(simulation.cells);
+  if (cached) return cached;
+  const index = new Map<string, SimulationCell>();
+  for (const cell of simulation.cells) index.set(coordKey(cell.cell), cell);
+  cellIndexCache.set(simulation.cells, index);
+  return index;
+};
+
+/**
+ * Active cells within `radius` of `center`, found by walking the bounding
+ * square and indexing in, rather than by testing every cell in the level.
+ */
+const activeCellsWithinRadius = (
+  simulation: SimulationMapSnapshot,
+  center: readonly [number, number],
+  radius: number,
+): SimulationCell[] => {
+  const index = simulationCellsByCoord(simulation);
+  const span = Math.max(0, Math.ceil(radius));
+  const found: SimulationCell[] = [];
+  for (let dz = -span; dz <= span; dz += 1) {
+    for (let dx = -span; dx <= span; dx += 1) {
+      if (Math.hypot(dx, dz) > radius) continue;
+      const cell = index.get(coordKey([center[0] + dx, center[1] + dz]));
+      if (cell?.active) found.push(cell);
+    }
+  }
+  return found;
 };
 
 const AUTHORED_SMOKE_TERMS = /smoke|fog|mist|miasma|obscur/;
@@ -910,15 +1095,17 @@ const illuminationFromSimulation = (
     string,
     ImmersiveIlluminationContribution[]
   >();
-  // Viewer visibility is range-bounded. Allow that caller to solve and
-  // serialize only cells the viewer can possibly perceive while leaving the
-  // full-map illumination/perception contracts unchanged for simulation and
-  // AI callers.
-  const activeCells = simulation.cells.filter(
-    (cell) =>
-      cell.active &&
-      (!includedCellKeys || includedCellKeys.has(coordKey(cell.cell))),
-  );
+  // Viewer visibility is range-bounded. Such a caller already knows exactly
+  // which cells it wants, so index straight to them; filtering the whole level
+  // to rediscover a few hundred keys is the same answer at a far worse cost.
+  // Unbounded callers — simulation and AI — keep the full pass, leaving the
+  // full-map illumination/perception contracts unchanged.
+  const cellIndex = simulationCellsByCoord(simulation);
+  const activeCells = includedCellKeys
+    ? [...includedCellKeys]
+        .map((key) => cellIndex.get(key))
+        .filter((cell): cell is SimulationCell => Boolean(cell?.active))
+    : simulation.cells.filter((cell) => cell.active);
   const activeBounds = activeCells.reduce(
     (bounds, cell) => ({
       minX: Math.min(bounds.minX, cell.cell[0]),
@@ -1213,29 +1400,42 @@ export const createImmersiveViewerVisibilityFromV1 = (
   mapId = save.current_map_id || gamePackage.metadata.start_map_id,
   options: ImmersiveViewerVisibilityOptions = {},
 ): ImmersiveViewerVisibilitySnapshot => {
-  const simulation = createVisibilitySimulation(gamePackage, save, mapId);
+  // Sources are resolved from the FULL package: a lamp outside the bound can
+  // still light a cell inside it, so the set must be complete before the bound
+  // is derived from it.
   const sources = resolveImmersiveLightSources(gamePackage, save, mapId);
-  const visionByKey = prepareVisionMap(simulation, spatialRatio(gamePackage));
-  const lineCache = new Map<string, LightLineAnalysis>();
   const viewerCell = asCell(options.viewer_cell || save.player.cell);
   const maxRange = Math.max(
     0,
     Number(options.max_range ?? DEFAULT_VISUAL_RANGE_MACRO * spatialRatio(gamePackage)),
   );
+  // Every light path that can reach a visible cell starts within one source
+  // radius of it, so this reach is the furthest structure the viewer's answer
+  // can depend on.
+  const maxSourceRadius = sources.reduce(
+    (widest, source) => Math.max(widest, Math.max(0, Number(source.radius) || 0)),
+    0,
+  );
+  const boundedPackage = boundedVisibilityPackage(
+    gamePackage,
+    mapId,
+    [viewerCell[0], viewerCell[1]],
+    maxRange + maxSourceRadius,
+  );
+  const simulation = createVisibilitySimulation(boundedPackage, save, mapId);
+  const visionByKey = prepareVisionMap(simulation, spatialRatio(boundedPackage));
+  const lineCache = new Map<string, LightLineAnalysis>();
   const minimumLight = clamp01(Number(options.minimum_light ?? DEFAULT_MINIMUM_LIGHT));
-  const visibilityCandidateCells = simulation.cells.filter((cell) => {
-    if (!cell.active) return false;
-    const candidate = cell.cell;
-    return Math.hypot(
-      candidate[0] - viewerCell[0],
-      candidate[1] - viewerCell[1],
-    ) <= maxRange;
-  });
+  const visibilityCandidateCells = activeCellsWithinRadius(
+    simulation,
+    [viewerCell[0], viewerCell[1]],
+    maxRange,
+  );
   const visibilityCandidateKeys = new Set(
     visibilityCandidateCells.map((cell) => coordKey(cell.cell)),
   );
   const illumination = illuminationFromSimulation(
-    gamePackage,
+    boundedPackage,
     save,
     mapId,
     simulation,

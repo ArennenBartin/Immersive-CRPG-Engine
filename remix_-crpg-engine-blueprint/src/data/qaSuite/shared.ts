@@ -20,6 +20,7 @@ import {
 
 export type MapData = GamePackage["maps"][number];
 export type EntityData = GamePackage["entities"][number];
+export type ObjectData = GamePackage["object_library"][number];
 export type DialogueData = GamePackage["dialogue"][number];
 export type DialogueKeywordData = GamePackage["keywords"][number];
 export type DialogueDynamicTopicData = GamePackage["dynamic_topics"][number];
@@ -559,6 +560,8 @@ export const mergeSprites = (base: GamePackage["sprite_library"]) =>
 export interface QaWing {
   maps: MapData[];
   entities?: EntityData[];
+  /** Object definitions a wing's placements reference but the base library lacks. */
+  objects?: ObjectData[];
   keywords?: DialogueKeywordData[];
   dynamicTopics?: DialogueDynamicTopicData[];
   dialogue?: DialogueData[];
@@ -579,6 +582,7 @@ export interface QaWing {
 export const mergeWings = (wings: QaWing[]): Required<QaWing> => ({
   maps: wings.flatMap((wing) => wing.maps).map(withQaRoomCeilingArchitecture),
   entities: wings.flatMap((wing) => wing.entities || []),
+  objects: wings.flatMap((wing) => wing.objects || []),
   keywords: wings.flatMap((wing) => wing.keywords || []),
   dynamicTopics: wings.flatMap((wing) => wing.dynamicTopics || []),
   dialogue: wings.flatMap((wing) => wing.dialogue || []),

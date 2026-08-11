@@ -18,6 +18,7 @@ import {
   ContainerPlacementData,
   EntityPlacementData,
   MapExitData,
+  ObjectPlacementData,
   TriggerData,
   WorldItemPlacementData,
   WorldRegionData,
@@ -57,6 +58,7 @@ import {
 } from "../utils/mapAuthoring";
 import { basicTheme } from "../utils/basicTheme";
 import { validateOrdinaryMap } from "../engine-core/mapReadinessValidator";
+import { BACKROOMS_LEVEL0_VALIDATION_BUDGETS } from "../backroomsGen/bake";
 import { expandMapToFine } from "../engine-core/fineWorld";
 import { normalizeJamMapElevations } from "../utils/legacyJamCompatibility";
 import { dedupeFineTerrainCellsFor3D } from "../utils/renderSpace";
@@ -69,6 +71,7 @@ import {
 } from "../generation-facing/deterministicIds";
 
 type InspectorSelection =
+  | { kind: "object"; index: number }
   | { kind: "entity"; index: number }
   | { kind: "trigger"; index: number }
   | { kind: "exit"; index: number }
@@ -234,7 +237,12 @@ export function MapEditor() {
   // Lint problems for the active map — only computed when the overlay is on.
   const lintProblems = React.useMemo<MapProblem[]>(() => {
     if (!lintEnabled || !activeMap) return [];
-    return validateOrdinaryMap(activeMap, { package: gamePackage }).issues.map((issue) => ({
+    return validateOrdinaryMap(activeMap, {
+      package: gamePackage,
+      budgets: activeMap.generation?.generatorId === "backrooms"
+        ? BACKROOMS_LEVEL0_VALIDATION_BUDGETS
+        : undefined,
+    }).issues.map((issue) => ({
       severity: issue.severity === "warning" ? "warn" : issue.severity,
       kind: issue.code,
       cell: issue.cells?.[0],
@@ -292,6 +300,31 @@ export function MapEditor() {
   const selectedPlacementFocus = React.useMemo(() => {
     if (!activeMap || !selection) return null;
 
+    if (selection.kind === "object") {
+      const objectPlacement = activeMap.custom_object_placements[selection.index];
+      if (!objectPlacement) return null;
+      const authoredX = Number(objectPlacement.cell[0] || 0);
+      const authoredZ = Number(objectPlacement.cell[1] || 0);
+      const floorY = Number(
+        activeGroundCellByCoord.get(`${authoredX}:${authoredZ}`)?.y || 0,
+      );
+      const object = gamePackage.object_library.find(
+        (candidate) => candidate.id === objectPlacement.object_id,
+      );
+      const scaledHeight =
+        Number(object?.bounds?.[1] || 0.9) *
+        Number(objectPlacement.scale?.[1] || 1);
+
+      return {
+        x: authoredX + Number(objectPlacement.plan_offset?.[0] || 0),
+        z: authoredZ + Number(objectPlacement.plan_offset?.[1] || 0),
+        y:
+          floorY +
+          Number(objectPlacement.height_offset || 0) +
+          Math.max(0.35, scaledHeight * 0.5),
+      };
+    }
+
     if (selection.kind === "entity") {
       const entityPlacement = activeMap.entity_placements[selection.index];
       return entityPlacement
@@ -328,7 +361,7 @@ export function MapEditor() {
       z: authoredZ,
       y: floorY + 0.45,
     };
-  }, [activeGroundCellByCoord, activeMap, selection]);
+  }, [activeGroundCellByCoord, activeMap, gamePackage.object_library, selection]);
 
   useEffect(() => {
     if (!activeMap) return;
@@ -1923,17 +1956,19 @@ function MapPlacementInspector({
     setSelection({ kind: "generation_socket", index: generation_sockets.length - 1 });
   };
 
-  const selectedData = selection ? ((map as any)[selection.kind === "entity"
-    ? "entity_placements"
-    : selection.kind === "trigger"
-      ? "triggers"
-      : selection.kind === "exit"
-        ? "exits"
-        : selection.kind === "item"
-          ? "item_placements"
-          : selection.kind === "container"
-            ? "container_placements"
-            : "generation_sockets"] || [])[selection.index] : null;
+  const selectedData = selection ? ((map as any)[selection.kind === "object"
+    ? "custom_object_placements"
+    : selection.kind === "entity"
+      ? "entity_placements"
+      : selection.kind === "trigger"
+        ? "triggers"
+        : selection.kind === "exit"
+          ? "exits"
+          : selection.kind === "item"
+            ? "item_placements"
+            : selection.kind === "container"
+              ? "container_placements"
+              : "generation_sockets"] || [])[selection.index] : null;
 
   return (
     <>
@@ -1979,6 +2014,20 @@ function MapPlacementInspector({
       </div>
 
       <div className="p-3 space-y-4">
+        <InspectorList
+          title="Custom Objects"
+          count={map.custom_object_placements?.length || 0}
+          selected={selection}
+          kind="object"
+          getLabel={(index) => {
+            const placement = map.custom_object_placements[index];
+            const object = gamePackage.object_library.find(
+              (candidate: any) => candidate.id === placement.object_id,
+            );
+            return `${object?.display_name || placement.object_id} @ ${placement.cell.join(",")}`;
+          }}
+          setSelection={setSelection}
+        />
         <InspectorList
           title="Entities"
           count={map.entity_placements?.length || 0}
@@ -2052,6 +2101,13 @@ function MapPlacementInspector({
             <p className="rounded border border-dashed border-neutral-800 p-3 text-xs text-neutral-500">
               Select a placement above or add a new one.
             </p>
+          ) : selection.kind === "object" ? (
+            <ObjectPlacementEditor
+              gamePackage={gamePackage}
+              placement={selectedData as ObjectPlacementData}
+              onChange={(next) => replaceInArray("custom_object_placements", selection.index, next)}
+              onDelete={() => removeFromArray("custom_object_placements", selection.index)}
+            />
           ) : selection.kind === "entity" ? (
             <EntityPlacementEditor
               map={map}
@@ -2212,6 +2268,150 @@ const asCell = (cell: unknown, fallback: [number, number] = [0, 0]): [number, nu
     Number(value[1] ?? fallback[1]),
   ];
 };
+
+function ObjectPlacementEditor({
+  gamePackage,
+  placement,
+  onChange,
+  onDelete,
+}: {
+  gamePackage: any;
+  placement: ObjectPlacementData;
+  onChange: (placement: ObjectPlacementData) => void;
+  onDelete: () => void;
+}) {
+  const scale = placement.scale ?? [1, 1, 1];
+  const rotationOffset = placement.rotation_offset ?? [0, 0, 0];
+  const planOffset = placement.plan_offset ?? [0, 0];
+
+  const updateScale = (axis: 0 | 1 | 2, value: number) => {
+    const next: [number, number, number] = [
+      Number(scale[0] ?? 1),
+      Number(scale[1] ?? 1),
+      Number(scale[2] ?? 1),
+    ];
+    next[axis] = Math.max(0.01, value);
+    onChange({ ...placement, scale: next });
+  };
+
+  const updateRotationOffset = (axis: 0 | 1 | 2, value: number) => {
+    const next: [number, number, number] = [
+      Number(rotationOffset[0] ?? 0),
+      Number(rotationOffset[1] ?? 0),
+      Number(rotationOffset[2] ?? 0),
+    ];
+    next[axis] = value;
+    onChange({ ...placement, rotation_offset: next });
+  };
+
+  const updatePlanOffset = (axis: 0 | 1, value: number) => {
+    const next: [number, number] = [
+      Number(planOffset[0] ?? 0),
+      Number(planOffset[1] ?? 0),
+    ];
+    next[axis] = value;
+    onChange({ ...placement, plan_offset: next });
+  };
+
+  return (
+    <div className="space-y-3">
+      <InspectorHeader title="Custom Object" onDelete={onDelete} />
+      <InspectorText
+        label="ID"
+        value={placement.id || ""}
+        onChange={(id) => onChange({ ...placement, id: id.trim() || undefined })}
+      />
+      <InspectorSelect
+        label="Object"
+        value={placement.object_id}
+        onChange={(object_id) => onChange({ ...placement, object_id })}
+      >
+        {gamePackage.object_library.map((object: any) => (
+          <option key={object.id} value={object.id}>
+            {object.display_name || object.id}
+          </option>
+        ))}
+      </InspectorSelect>
+      <CellInputs
+        cell={asCell(placement.cell)}
+        onChange={(cell) => onChange({ ...placement, cell })}
+      />
+      <FacingInputs
+        facing={asCell(placement.facing, [0, 1])}
+        onChange={(facing) => onChange({ ...placement, facing })}
+      />
+
+      <div className="space-y-2 border-t border-neutral-800 pt-3">
+        <OptionalInspectorHeader
+          title="Scale"
+          active={placement.scale !== undefined}
+          onReset={() => onChange({ ...placement, scale: undefined })}
+        />
+        <div className="grid grid-cols-3 gap-2">
+          <InspectorNumber label="X" value={scale[0]} min={0.01} step={0.05} onChange={(value) => updateScale(0, value)} />
+          <InspectorNumber label="Y" value={scale[1]} min={0.01} step={0.05} onChange={(value) => updateScale(1, value)} />
+          <InspectorNumber label="Z" value={scale[2]} min={0.01} step={0.05} onChange={(value) => updateScale(2, value)} />
+        </div>
+      </div>
+
+      <div className="space-y-2 border-t border-neutral-800 pt-3">
+        <OptionalInspectorHeader
+          title="Rotation offset (radians)"
+          active={placement.rotation_offset !== undefined}
+          onReset={() => onChange({ ...placement, rotation_offset: undefined })}
+        />
+        <div className="grid grid-cols-3 gap-2">
+          <InspectorNumber label="Pitch X" value={rotationOffset[0]} step={0.05} onChange={(value) => updateRotationOffset(0, value)} />
+          <InspectorNumber label="Yaw Y" value={rotationOffset[1]} step={0.05} onChange={(value) => updateRotationOffset(1, value)} />
+          <InspectorNumber label="Roll Z" value={rotationOffset[2]} step={0.05} onChange={(value) => updateRotationOffset(2, value)} />
+        </div>
+      </div>
+
+      <div className="space-y-2 border-t border-neutral-800 pt-3">
+        <OptionalInspectorHeader
+          title="Plan offset"
+          active={placement.plan_offset !== undefined}
+          onReset={() => onChange({ ...placement, plan_offset: undefined })}
+        />
+        <div className="grid grid-cols-2 gap-2">
+          <InspectorNumber label="X" value={planOffset[0]} step={0.05} onChange={(value) => updatePlanOffset(0, value)} />
+          <InspectorNumber label="Z" value={planOffset[1]} step={0.05} onChange={(value) => updatePlanOffset(1, value)} />
+        </div>
+      </div>
+
+      <div className="space-y-2 border-t border-neutral-800 pt-3">
+        <OptionalInspectorHeader
+          title="Height offset"
+          active={placement.height_offset !== undefined}
+          onReset={() => onChange({ ...placement, height_offset: undefined })}
+        />
+        <InspectorNumber
+          label="Y"
+          value={placement.height_offset ?? 0}
+          step={0.05}
+          onChange={(height_offset) => onChange({ ...placement, height_offset })}
+        />
+      </div>
+
+      <InspectorSelect
+        label="Collision"
+        value={placement.collision_mode ?? "inherit"}
+        onChange={(collision_mode) =>
+          onChange({
+            ...placement,
+            collision_mode: collision_mode as ObjectPlacementData["collision_mode"],
+          })
+        }
+      >
+        <option value="inherit">Use object collision</option>
+        <option value="none">No collision</option>
+      </InspectorSelect>
+      <p className="text-[10px] leading-relaxed text-neutral-600">
+        Anomaly transforms are visual. Collision still follows the object footprint unless disabled here.
+      </p>
+    </div>
+  );
+}
 
 function EntityPlacementEditor({
   map,
@@ -2682,6 +2882,33 @@ function InspectorHeader({ title, onDelete }: { title: string; onDelete: () => v
       <button onClick={onDelete} className="rounded p-1 text-rose-400 hover:bg-rose-500/10">
         <Trash2 className="w-4 h-4" />
       </button>
+    </div>
+  );
+}
+
+function OptionalInspectorHeader({
+  title,
+  active,
+  onReset,
+}: {
+  title: string;
+  active: boolean;
+  onReset: () => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <h5 className="text-[11px] font-semibold uppercase tracking-wide text-neutral-500">
+        {title}
+      </h5>
+      {active && (
+        <button
+          type="button"
+          onClick={onReset}
+          className="text-[10px] text-neutral-500 transition-colors hover:text-neutral-200"
+        >
+          Reset
+        </button>
+      )}
     </div>
   );
 }

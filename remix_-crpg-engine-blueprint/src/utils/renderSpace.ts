@@ -1,10 +1,11 @@
 import {
   FINE_HALF_EXTENT,
   FINE_PER_MACRO,
+  fineOfMacro,
   macroOfFine,
   type GridCoord,
 } from "../engine-core/gridCoordinates";
-import type { CellData } from "../schema/game";
+import type { CellData, MapData } from "../schema/game";
 
 export type RendererGridSpace = "macro" | "fine";
 
@@ -32,6 +33,22 @@ export const logicalCellToWorld = (
   logicalCoordToWorld(Number(cell[0] || 0), gridSpace, fineRatio),
   logicalCoordToWorld(Number(cell[1] || 0), gridSpace, fineRatio),
 ];
+
+// Position coordinates include the fine-grid center bias; displacement
+// vectors do not. Authored plan offsets are expanded into fine units with the
+// map, then divided back to rendered macro units here. Without this bridge a
+// 0.4-cell cabinet embed becomes a 1.2-world-unit shove at ratio 3.
+export const logicalPlanOffsetToWorld = (
+  offset: readonly unknown[],
+  gridSpace: RendererGridSpace,
+  fineRatio = FINE_PER_MACRO,
+): [number, number] => {
+  const divisor = gridSpace === "fine" ? fineRatio : 1;
+  return [
+    Number(offset[0] || 0) / divisor,
+    Number(offset[1] || 0) / divisor,
+  ];
+};
 
 export const worldPointToLogicalCell = (
   x: number,
@@ -76,6 +93,8 @@ export const logicalCellWorldSize = (
 
 type RenderSizedCell = CellData & { __render_cell_size?: number };
 
+type FineCellOverride = NonNullable<MapData["fine_cell_overrides"]>[number];
+
 // Most runtime terrain is collapsed back to one full-size macro mesh. A macro
 // block containing explicit fine-cell geometry keeps its individual cells and
 // carries this private render-only footprint instead.
@@ -87,6 +106,79 @@ export const renderedCellWorldSize = (cell: CellData): number =>
 // camera can see the clear color through the tiny step between them.
 export const renderedTerrainPlaneY = (cell: CellData): number =>
   Number(cell.y || 0) + 0.001;
+
+/**
+ * Build the renderer's persistent cell source directly from authored macro
+ * data. Ordinary tiles remain one stable macro-sized cell; only a macro tile
+ * named by `fine_cell_overrides` becomes its exact fine-grid footprint.
+ *
+ * This is deliberately independent from the runtime simulation window. It
+ * gives streamed maps a complete, low-cardinality architectural source while
+ * retaining authored micro-partitions at their real one-third-cell position.
+ * Override records are applied in authored order, matching fine-world runtime
+ * semantics when more than one record targets the same fine cell.
+ */
+export const buildPersistentAuthoredTerrainCellsFor3D = (
+  map: Pick<MapData, "cells" | "fine_cell_overrides">,
+): CellData[] => {
+  const overridesByMacro = new Map<string, FineCellOverride[]>();
+  for (const override of map.fine_cell_overrides || []) {
+    const macroKey = `${override.macro_cell[0]}:${override.macro_cell[1]}`;
+    const entries = overridesByMacro.get(macroKey) || [];
+    entries.push(override);
+    overridesByMacro.set(macroKey, entries);
+  }
+
+  if (overridesByMacro.size === 0) {
+    return map.cells;
+  }
+
+  const renderSize = 1 / FINE_PER_MACRO;
+  const rendered: CellData[] = [];
+  for (const source of map.cells) {
+    const overrides = overridesByMacro.get(`${source.x}:${source.z}`);
+    if (!overrides) {
+      rendered.push(source);
+      continue;
+    }
+
+    const origin = fineOfMacro([source.x, source.z]);
+    for (let dx = 0; dx < FINE_PER_MACRO; dx += 1) {
+      for (let dz = 0; dz < FINE_PER_MACRO; dz += 1) {
+        const fineX = origin[0] + dx;
+        const fineZ = origin[1] + dz;
+        const effective = overrides.reduce<CellData>((cell, override) => {
+          if (
+            override.fine_offset[0] !== dx ||
+            override.fine_offset[1] !== dz
+          ) {
+            return cell;
+          }
+          return {
+            ...cell,
+            ...override.overrides,
+            // Coordinates remain controlled by the macro/fine bridge even if
+            // an unchecked legacy payload contains unexpected fields.
+            x: fineX,
+            z: fineZ,
+          };
+        }, { ...source, x: fineX, z: fineZ });
+        const world = logicalCellToWorld(
+          [fineX, fineZ],
+          "fine",
+          FINE_PER_MACRO,
+        );
+        rendered.push({
+          ...effective,
+          x: world[0],
+          z: world[1],
+          __render_cell_size: renderSize,
+        } as RenderSizedCell);
+      }
+    }
+  }
+  return rendered;
+};
 
 export const logicalCellToMacro = (
   cell: readonly unknown[],
@@ -189,3 +281,15 @@ export const dedupeFineTerrainCellsFor3D = (
   }
   return rendered;
 };
+
+/**
+ * Persistent textured architecture already owns Level Zero's complete terrain
+ * presentation. Reuse that stable array instead of regrouping a 10k-32k-cell
+ * simulation window back into renderer cells at every sector crossing.
+ */
+export const resolveRendererTerrainCells = (
+  fineCells: CellData[],
+  persistentCells: CellData[] | undefined,
+  fineRatio = FINE_PER_MACRO,
+): CellData[] =>
+  persistentCells ?? dedupeFineTerrainCellsFor3D(fineCells, fineRatio);

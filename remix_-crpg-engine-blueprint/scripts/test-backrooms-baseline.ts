@@ -220,21 +220,20 @@ assert.equal(
 );
 assert.equal(FINE_PER_MACRO, 3, "the runtime fine grid is 3x3 per macro cell");
 
-// Scale is NOT a placement field. It lives on the shared object definition
-// (`ObjectAssetSchema.scale`), so every copy of an object renders at the same
-// size. A recursive chain that shrinks each copy cannot be expressed by
-// placements alone today — it needs either one object definition per step or a
-// new optional per-placement scale field. Phase 2 has to resolve this.
+// Phase 2 added optional per-placement anomaly transforms while retaining the
+// shared object definition. The original baseline now guards the additive,
+// round-trippable contract instead of the superseded limitation.
 const scaleAttempt = ObjectPlacementSchema.parse({
   object_id: "qa_desk",
   cell: [3, 3],
   facing: [0, 1],
   scale: [0.84, 0.84, 0.84],
+  rotation_offset: [0.1, 0.2, 0.3],
+  plan_offset: [0.4, -0.25],
 });
-assert.ok(
-  !("scale" in scaleAttempt),
-  "per-placement `scale` is not part of the placement contract and is stripped",
-);
+assert.deepEqual(scaleAttempt.scale, [0.84, 0.84, 0.84]);
+assert.deepEqual(scaleAttempt.rotation_offset, [0.1, 0.2, 0.3]);
+assert.deepEqual(scaleAttempt.plan_offset, [0.4, -0.25]);
 
 // ── 4. Collision contract for clipped decor ────────────────────────────────
 

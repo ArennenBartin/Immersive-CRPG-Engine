@@ -24,6 +24,15 @@ import {
   DungeonRoomTemplateSchema,
   DungeonThemeProfileSchema,
 } from "../dungeonGen/schema";
+import {
+  BackroomsAnomalyProfileSchema,
+  BackroomsEventProfileSchema,
+  BackroomsLevelProfileSchema,
+  BackroomsMotifSchema,
+  BackroomsRecipeSchema,
+  BackroomsTransitionRuleSchema,
+  TransitionPresentationProfileSchema,
+} from "../backroomsGen/schema";
 
 export const GameMetadataSchema = z.object({
   title: z.string(),
@@ -548,6 +557,40 @@ export const ObjectPlacementSchema = z.object({
   stack_index: z.number().int().nonnegative().optional(),
   stack_root_key: z.string().min(1).optional(),
   collision_mode: z.enum(["inherit", "none"]).optional(),
+  // ── Per-placement anomaly transforms ──────────────────────────────────
+  // These let many placements share one object definition while rendering at
+  // different sizes, angles, and sub-cell positions: a chain of desks that
+  // shrinks with distance, a cabinet embedded partway into a wall, a chair
+  // sunk into the carpet. All three are optional, so authored maps, existing
+  // packages, and old saves round-trip completely unchanged.
+  //
+  // None of them affect collision or navigation. Collision stays driven by
+  // the object's authored macro footprint, which is what keeps a decorative
+  // object buried in geometry from becoming an invisible wall.
+  //
+  // Per-axis multiplier applied about the placement origin. Grounding is
+  // recomputed from the scaled bounds, so a scaled prop still rests on the
+  // floor instead of floating or sinking.
+  scale: z
+    .tuple([
+      z.number().finite().positive(),
+      z.number().finite().positive(),
+      z.number().finite().positive(),
+    ])
+    .optional(),
+  // Euler radians added on top of the yaw implied by `facing`. Yaw alone is
+  // already expressible through `facing`; this exists for pitch and roll, so
+  // decor can lean, tilt, or sit crooked in a wall.
+  rotation_offset: z
+    .tuple([z.number().finite(), z.number().finite(), z.number().finite()])
+    .optional(),
+  // Continuous horizontal offset in world units, the horizontal counterpart
+  // to `height_offset`. `fine_offset` moves a placement in whole runtime fine
+  // cells; this moves it by any fraction, which is what an exact penetration
+  // depth into a wall requires.
+  plan_offset: z
+    .tuple([z.number().finite(), z.number().finite()])
+    .optional(),
   dialogue_id: z.string().optional(),
   blueprint_id: z.string().optional(),
   // Lock/key authoring is optional for legacy placements. Runtime consumers
@@ -1170,7 +1213,17 @@ export const CutsceneSchema = z.object({
 export const TriggerSchema = z.object({
   id: z.string(),
   cell: z.tuple([z.number(), z.number()]).optional(),
-  type: z.enum(["step", "interact", "on_load", "switch_change"]),
+  type: z.enum([
+    "step",
+    "interact",
+    "on_load",
+    "switch_change",
+    "region_enter",
+    "region_exit",
+  ]),
+  // Required for region_enter/region_exit. Kept optional for the four legacy
+  // trigger modes so old authored content remains byte-compatible.
+  region_id: z.string().min(1).optional(),
   // Legacy switch-only conditions (still honored, ANDed with `condition`).
   conditions: z
     .array(
@@ -1184,6 +1237,17 @@ export const TriggerSchema = z.object({
   condition: ConditionSchema.optional(),
   cutscene_id: z.string(),
   once: z.boolean().default(false),
+}).superRefine((trigger, context) => {
+  if (
+    (trigger.type === "region_enter" || trigger.type === "region_exit") &&
+    !trigger.region_id
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["region_id"],
+      message: `${trigger.type} requires region_id`,
+    });
+  }
 });
 
 // Walking onto an exit cell moves the player to another map. This is the
@@ -1202,8 +1266,20 @@ export const MapExitSchema = z.object({
   transition_id: z.string().min(1).optional(),
   paired_exit_id: z.string().min(1).optional(),
   transition_kind: z
-    .enum(["stairs", "ladder", "lift", "shaft", "portal"])
+    .enum([
+      "stairs",
+      "ladder",
+      "lift",
+      "shaft",
+      "threshold",
+      "door",
+      "noclip",
+      "fall",
+      "portal",
+      "scripted",
+    ])
     .optional(),
+  presentation_profile_id: z.string().min(1).optional(),
 });
 
 // Provenance attached to an otherwise ordinary map. The runtime deliberately
@@ -1226,6 +1302,7 @@ export const MapGenerationMetadataSchema = z.object({
   floorIndex: z.number().int().nonnegative().optional(),
   floorCount: z.number().int().min(1).max(3).optional(),
   attemptIndex: z.number().int().nonnegative().optional(),
+  levelProfileId: z.string().min(1).optional(),
 });
 
 // Author-facing opportunities emitted by a deterministic dungeon bake. These
@@ -1270,6 +1347,10 @@ export const MapDataSchema = z.object({
   // Optional render-only fill for dark PBR interiors. Simulation, stealth,
   // perception, and AI continue to use ambient_light.
   presentation_ambient_light: z.number().finite().min(0).max(1).optional(),
+  // Generic map-level presentation identity. The renderer does not infer a
+  // Backrooms level from this string; authored systems may resolve it through
+  // package presentation profiles without altering physical map data.
+  presentation_profile_id: z.string().min(1).optional(),
   combat_mode: HorrorCombatModeSchema.optional(),
   // Entering a location may teach stable vocabulary without exposing any
   // dialogue text or coupling map discovery to a particular NPC.
@@ -1980,6 +2061,19 @@ export const GamePackageSchema = z.object({
   dungeon_narrative_profiles: z
     .array(DungeonNarrativeProfileSchema)
     .default([]),
+  backrooms_recipes: z.array(BackroomsRecipeSchema).default([]),
+  backrooms_level_profiles: z.array(BackroomsLevelProfileSchema).default([]),
+  backrooms_transition_rules: z
+    .array(BackroomsTransitionRuleSchema)
+    .default([]),
+  transition_presentation_profiles: z
+    .array(TransitionPresentationProfileSchema)
+    .default([]),
+  backrooms_motifs: z.array(BackroomsMotifSchema).default([]),
+  backrooms_event_profiles: z.array(BackroomsEventProfileSchema).default([]),
+  backrooms_anomaly_profiles: z
+    .array(BackroomsAnomalyProfileSchema)
+    .default([]),
   validators: z.record(z.string(), z.any()).default({}),
 });
 
@@ -2119,6 +2213,9 @@ export type SkillData = z.infer<typeof SkillSchema>;
 export type DocumentData = z.infer<typeof DocumentSchema>;
 
 export type TriggerData = z.infer<typeof TriggerSchema>;
+export type TransitionPresentationProfileData = z.infer<
+  typeof TransitionPresentationProfileSchema
+>;
 export type EventActionData = z.infer<typeof EventActionSchema>;
 export type CutsceneData = z.infer<typeof CutsceneSchema>;
 export type ShopData = z.infer<typeof ShopSchema>;
@@ -3025,6 +3122,13 @@ const createBaseGamePackage = (): GamePackage => ({
   dungeon_hazard_profiles: [],
   dungeon_reward_profiles: [],
   dungeon_narrative_profiles: [],
+  backrooms_recipes: [],
+  backrooms_level_profiles: [],
+  backrooms_transition_rules: [],
+  transition_presentation_profiles: [],
+  backrooms_motifs: [],
+  backrooms_event_profiles: [],
+  backrooms_anomaly_profiles: [],
   factions: [
     {
       id: "f_guild",

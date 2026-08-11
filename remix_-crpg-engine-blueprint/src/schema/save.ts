@@ -623,6 +623,41 @@ export interface GlassCampaignState {
   fuel_events: Record<string, GlassFuelEventRecord>;
 }
 
+/**
+ * Persistent memory for generated Backrooms levels.
+ *
+ * Geometry remains immutable MapData. Optional/deceptive threshold endpoints
+ * can instead change their logical destination while they are outside the
+ * player's observation pins, which makes recurrence unreliable without ever
+ * moving a visible wall. All fields are optional at the PlaySave boundary so
+ * pre-Phase-9 saves remain valid.
+ */
+export interface BackroomsRuntimeMotifRecord {
+  seenCount: number;
+  mutationStage: number;
+  lastRoomId?: string;
+}
+
+export interface BackroomsRuntimeState {
+  schemaVersion: 1;
+  worldSeed: string;
+  levelVisits: Record<string, number>;
+  portalTargets: Record<string, string>;
+  motifs: Record<string, BackroomsRuntimeMotifRecord>;
+  firedEventIds: string[];
+  currentLevelId?: string;
+  currentRoomByLevel: Record<string, string>;
+  roomEntryCounts: Record<string, number>;
+  recentRoomIds: Record<string, string[]>;
+  recentPortalEndpointIds: Record<string, string[]>;
+  portalTraversalLatch?: {
+    mapId: string;
+    endpointId: string;
+  };
+  shiftSequence: Record<string, number>;
+  observedShiftViolationCount: number;
+}
+
 // Canonical Phases 6–8 build on, but do not replace, the Phase 4–5 lifecycle
 // archive. This campaign-owned projection stores physical ghosts, recoverable
 // death bundles, artifact locations, and the Glass value/burden ledger.
@@ -716,6 +751,9 @@ export interface PlaySave {
   world_state_layers?: WorldStateLayerMetadata;
   intercessor_campaign?: IntercessorCampaignState;
   fracture_crawl_campaign?: FractureCrawlCampaignState;
+  // Phase 9 persistent recurrence/peripheral-shift state. Generated levels
+  // initialize this lazily; ordinary maps and legacy saves may omit it.
+  backrooms_runtime?: BackroomsRuntimeState;
   // Save-backed fog of war: per-map set of explored cell keys ("x:z") the
   // player has ever seen. Persisting these makes fog survive reloads. Absent
   // for saves/content that never enabled fog.

@@ -132,6 +132,30 @@ const readStoredPreset = (): VisualScalePreset => {
 };
 
 const FOG_STORAGE_KEY = "crpg-fog-of-war";
+const REDUCED_MOTION_STORAGE_KEY = "crpg-transition-reduced-motion";
+const PHOTOSENSITIVITY_STORAGE_KEY = "crpg-transition-photosensitivity";
+const AUDIO_COMFORT_STORAGE_KEY = "crpg-transition-audio-comfort";
+
+export type TransitionAudioComfort = "full" | "reduced" | "muted";
+
+const readStoredBoolean = (key: string): boolean => {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem(key) === "1";
+  } catch {
+    return false;
+  }
+};
+
+const readStoredAudioComfort = (): TransitionAudioComfort => {
+  if (typeof window === "undefined") return "full";
+  try {
+    const value = window.localStorage.getItem(AUDIO_COMFORT_STORAGE_KEY);
+    return value === "reduced" || value === "muted" ? value : "full";
+  } catch {
+    return "full";
+  }
+};
 
 const readStoredFog = (): boolean => {
   if (typeof window === "undefined") return false;
@@ -148,6 +172,12 @@ interface VisualSettingsState {
   // Tactical fog of war in Play Mode (unseen cells hidden, explored cells dim).
   fogOfWar: boolean;
   setFogOfWar: (enabled: boolean) => void;
+  transitionReducedMotion: boolean;
+  setTransitionReducedMotion: (enabled: boolean) => void;
+  transitionPhotosensitivity: boolean;
+  setTransitionPhotosensitivity: (enabled: boolean) => void;
+  transitionAudioComfort: TransitionAudioComfort;
+  setTransitionAudioComfort: (mode: TransitionAudioComfort) => void;
 }
 
 export const useVisualSettingsStore = create<VisualSettingsState>()((set) => ({
@@ -172,5 +202,46 @@ export const useVisualSettingsStore = create<VisualSettingsState>()((set) => ({
       }
     }
     set({ fogOfWar: enabled });
+  },
+  transitionReducedMotion: readStoredBoolean(REDUCED_MOTION_STORAGE_KEY),
+  setTransitionReducedMotion: (enabled) => {
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem(
+          REDUCED_MOTION_STORAGE_KEY,
+          enabled ? "1" : "0",
+        );
+      } catch {
+        // A blocked storage write should not prevent the live comfort mode.
+      }
+    }
+    set({ transitionReducedMotion: enabled });
+  },
+  transitionPhotosensitivity: readStoredBoolean(
+    PHOTOSENSITIVITY_STORAGE_KEY,
+  ),
+  setTransitionPhotosensitivity: (enabled) => {
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem(
+          PHOTOSENSITIVITY_STORAGE_KEY,
+          enabled ? "1" : "0",
+        );
+      } catch {
+        // ignore storage failures
+      }
+    }
+    set({ transitionPhotosensitivity: enabled });
+  },
+  transitionAudioComfort: readStoredAudioComfort(),
+  setTransitionAudioComfort: (mode) => {
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem(AUDIO_COMFORT_STORAGE_KEY, mode);
+      } catch {
+        // ignore storage failures
+      }
+    }
+    set({ transitionAudioComfort: mode });
   },
 }));

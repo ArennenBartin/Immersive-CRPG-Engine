@@ -5472,21 +5472,46 @@ export const createImmersiveSpatialInventorySnapshotFromSave = (
   };
 };
 
+// World-state gates are evaluated on every accepted exploration step. Large
+// streamed maps contain tens of thousands of fine cells, so repeatedly using
+// `Array.find` here turned a single move into one or two full-window scans.
+// Runtime windows are immutable for their lifetime; index only the authored
+// region-bearing cells once per map identity and keep ordinary regionless maps
+// on the constant-time `map` fallback.
+const worldStateRegionByCellCache = new WeakMap<
+  MapData,
+  ReadonlyMap<string, string>
+>();
+
+const worldStateRegionByCell = (map: MapData): ReadonlyMap<string, string> => {
+  const cached = worldStateRegionByCellCache.get(map);
+  if (cached) return cached;
+
+  const indexed = new Map<string, string>();
+  map.cells.forEach((cell) => {
+    const regionId = cell.region_id || cell.room_id;
+    if (!regionId) return;
+    indexed.set(`${cell.x}:${cell.z}`, regionId);
+  });
+  worldStateRegionByCellCache.set(map, indexed);
+  return indexed;
+};
+
 const currentWorldStateRegion = (
   gamePackage: GamePackage,
   mapId: string,
   cell: [number, number],
 ): string => {
   const map = getImmersiveMap(gamePackage, mapId);
-  const mapCell = map?.cells.find((candidate) => candidate.x === cell[0] && candidate.z === cell[1]);
-  return mapCell?.region_id || mapCell?.room_id || "map";
+  if (!map) return "map";
+  return worldStateRegionByCell(map).get(`${cell[0]}:${cell[1]}`) || "map";
 };
 
 const worldStateRegionDefinition = (
   gamePackage: GamePackage,
   mapId: string,
   regionId: string,
-) => getImmersiveMap(gamePackage, mapId)?.regions.find((region) => region.id === regionId);
+) => getImmersiveMap(gamePackage, mapId)?.regions?.find((region) => region.id === regionId);
 
 const passiveCheckFromRegion = (
   check: NonNullable<ReturnType<typeof worldStateRegionDefinition>>["passive_checks"][number],

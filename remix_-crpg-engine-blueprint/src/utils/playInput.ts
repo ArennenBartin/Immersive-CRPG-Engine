@@ -80,8 +80,24 @@ const SMALL_MAP_FRAME_INTERVAL_MS: Record<PlayVisualScalePreset, number> = {
 const LARGE_MAP_FRAME_INTERVAL_MS: Record<PlayVisualScalePreset, number> = {
   performance: 1000 / 30,
   balanced: 1000 / 30,
-  high: 1000 / 30,
+  high: 1000 / 45,
   ultra: 1000 / 45,
+};
+
+// A persistent chunk renderer keeps large authored topology out of React's
+// movement path and submits only the nearby spatial diamond. Those scenes no
+// longer need the conservative cadence that protects legacy large maps from
+// rebuilding broad cell windows. Performance remains an explicit 30 Hz
+// choice; the presentation-oriented presets can use smooth chase-camera
+// cadence and let the adaptive DPR probe manage actual GPU pressure.
+const CHUNKED_LARGE_MAP_FRAME_INTERVAL_MS: Record<
+  PlayVisualScalePreset,
+  number
+> = {
+  performance: 1000 / 30,
+  balanced: 1000 / 45,
+  high: 1000 / 60,
+  ultra: 1000 / 60,
 };
 
 const LARGE_MAP_DPR_CAP: Record<PlayVisualScalePreset, number> = {
@@ -93,9 +109,9 @@ const LARGE_MAP_DPR_CAP: Record<PlayVisualScalePreset, number> = {
 
 const LARGE_MAP_POINT_LIGHT_CAP: Record<PlayVisualScalePreset, number> = {
   performance: 2,
-  balanced: 4,
-  high: 5,
-  ultra: 6,
+  balanced: 3,
+  high: 3,
+  ultra: 4,
 };
 
 export const isLargePlayMap = (mapCellCount: number): boolean =>
@@ -133,9 +149,12 @@ export const resolvePlayArchitectureRadiusMacro = (
 export const resolvePlayFrameIntervalMs = (
   preset: PlayVisualScalePreset,
   mapCellCount: number,
+  persistentChunkArchitecture = false,
 ): number =>
   (isLargePlayMap(mapCellCount)
-    ? LARGE_MAP_FRAME_INTERVAL_MS
+    ? persistentChunkArchitecture
+      ? CHUNKED_LARGE_MAP_FRAME_INTERVAL_MS
+      : LARGE_MAP_FRAME_INTERVAL_MS
     : SMALL_MAP_FRAME_INTERVAL_MS)[preset];
 
 export const resolvePlayDprCap = (
@@ -160,6 +179,28 @@ export const resolvePlayPointLightBudget = (
         : requestedBudget,
     ),
   );
+
+// Third-person presentation lights are the only play lights that normally
+// allocate live shadow maps. Dense scenes trade those maps for a stable frame
+// cadence; authored lighting and all non-shadow illumination remain intact.
+export const shouldEnableThirdPersonShadowMaps = (
+  preset: PlayVisualScalePreset,
+  mapCellCount: number,
+  bottomPanelOpen: boolean,
+): boolean =>
+  !bottomPanelOpen &&
+  preset !== "performance" &&
+  !isLargePlayMap(mapCellCount);
+
+// The composer adds multiple full-screen framebuffer passes. Large scenes
+// reserve that GPU cost for Ultra; compact High scenes retain the established
+// post-processing stack, while Performance and Balanced stay composer-free.
+export const shouldEnablePlayScreenFx = (
+  preset: PlayVisualScalePreset,
+  largeScene: boolean,
+): boolean =>
+  (preset === "high" || preset === "ultra") &&
+  (!largeScene || preset === "ultra");
 
 // Resolve keyboard and virtual-joystick aliases through one path. Keys already
 // consumed by a quick chord stay inert until their matching release so a
@@ -221,6 +262,15 @@ export const shouldPreserveHeldInputOnCombatStart = ({
 export const shouldDriveDemandFrames = ({
   pageVisible,
 }: DemandFrameContext): boolean => pageVisible;
+
+// Persistent authored chunks are actor-centered and invariant under camera
+// yaw. Publishing a 12-degree direction bucket for them only rerenders the
+// complete Play tree and re-filters the streamed simulation cells without
+// changing any architecture that can be seen.
+export const shouldUseThirdPersonDirectionalStreaming = (
+  thirdPersonActive: boolean,
+  persistentChunkArchitecture: boolean,
+): boolean => thirdPersonActive && !persistentChunkArchitecture;
 
 // Grid movement accepts eight directions. Scale the repeat period by the
 // resolved vector length so a diagonal hold covers world distance at the same

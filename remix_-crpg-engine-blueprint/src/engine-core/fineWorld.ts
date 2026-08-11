@@ -130,6 +130,19 @@ const expandMapEager = (map: MapData): MapData => ({
   custom_object_placements: (map.custom_object_placements || []).map((placement) => ({
     ...placement,
     cell: mustFinePlacementCenter(placement.cell, placement.fine_offset),
+    // `plan_offset` is authored in macro cells so "40% of a cell" means the
+    // same thing in the editor and at runtime. Expansion changes what one
+    // world unit measures, so the offset has to scale with it. `height_offset`
+    // is deliberately left alone: vertical distance is unaffected by the
+    // horizontal fine ratio.
+    ...(placement.plan_offset
+      ? {
+          plan_offset: [
+            scaleMacroDistanceToFine(placement.plan_offset[0]),
+            scaleMacroDistanceToFine(placement.plan_offset[1]),
+          ] as [number, number],
+        }
+      : {}),
   })),
   entity_placements: (map.entity_placements || []).map((placement) => ({
     ...placement,

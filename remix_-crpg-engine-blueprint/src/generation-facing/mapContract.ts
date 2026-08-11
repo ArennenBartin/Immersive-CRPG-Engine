@@ -46,6 +46,7 @@ export interface MapBuildInput {
   name: string;
   bounds: MapBounds;
   cells: CellData[];
+  fineCellOverrides?: MapData["fine_cell_overrides"];
   spawns: MapData["spawns"];
   placements?: MapBuildPlacements;
   exits?: IdentifiedMapExit[];
@@ -104,6 +105,27 @@ const canonicalizeMap = (map: MapData): MapData => ({
       coordinateCompare([left.y, left.z, left.x], [right.y, right.z, right.x]) ||
       stableValueCompare(left, right),
   ),
+  ...(map.fine_cell_overrides
+    ? {
+        fine_cell_overrides: [...map.fine_cell_overrides].sort(
+          (left, right) =>
+            coordinateCompare(
+              [
+                left.macro_cell[1],
+                left.macro_cell[0],
+                left.fine_offset[1],
+                left.fine_offset[0],
+              ],
+              [
+                right.macro_cell[1],
+                right.macro_cell[0],
+                right.fine_offset[1],
+                right.fine_offset[0],
+              ],
+            ) || stableValueCompare(left, right),
+        ),
+      }
+    : {}),
   spawns: [...map.spawns].sort(idCompare),
   props: [...map.props].sort(stableValueCompare),
   generation_sockets: map.generation_sockets
@@ -200,6 +222,9 @@ export const buildMap = (input: MapBuildInput): MapData => {
     height: input.bounds.height,
     spawns: input.spawns,
     cells: input.cells,
+    ...(input.fineCellOverrides
+      ? { fine_cell_overrides: input.fineCellOverrides }
+      : {}),
     props: input.props ?? [],
     generation_sockets: input.generationSockets,
     custom_object_placements: input.placements?.objects ?? [],

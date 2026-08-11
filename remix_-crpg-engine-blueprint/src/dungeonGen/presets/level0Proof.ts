@@ -31,6 +31,10 @@ import type { GamePackage } from "../../schema/game";
 import {
   BACKROOMS_LEVEL_ZERO_FLOOR_OBJECT_ID,
   BACKROOMS_LEVEL_ZERO_LIGHT_OBJECT_ID,
+  BACKROOMS_LEVEL_ZERO_DAMASK_PARTITION_WALL_OBJECT_IDS,
+  BACKROOMS_LEVEL_ZERO_DAMASK_THIN_WALL_OBJECT_IDS,
+  BACKROOMS_LEVEL_ZERO_PARTITION_WALL_OBJECT_IDS,
+  BACKROOMS_LEVEL_ZERO_THIN_WALL_OBJECT_IDS,
   BACKROOMS_LEVEL_ZERO_WALL_OBJECT_ID,
   objectLibraryPresets,
 } from "../../schema/presets";
@@ -383,8 +387,8 @@ export const LEVEL0_PROOF_THEME: DungeonThemeProfileDef =
     // everywhere, forever. A dark generated map with yellow wallpaper reads as
     // an ordinary horror dungeon, which is the exact failure this proof exists
     // to avoid, so the theme raises ambient well above the ruin default.
-    ambientLight: 0.62,
-    presentationAmbientLight: 0.72,
+    ambientLight: 0.68,
+    presentationAmbientLight: 0.82,
     keyItemPool: [],
     rewardItemPool: [],
     chemistryMaterialIds: [],
@@ -495,6 +499,10 @@ export const createLevel0ProofGeneratorContent = (
     BACKROOMS_LEVEL_ZERO_FLOOR_OBJECT_ID,
     BACKROOMS_LEVEL_ZERO_WALL_OBJECT_ID,
     BACKROOMS_LEVEL_ZERO_LIGHT_OBJECT_ID,
+    ...BACKROOMS_LEVEL_ZERO_THIN_WALL_OBJECT_IDS,
+    ...BACKROOMS_LEVEL_ZERO_DAMASK_THIN_WALL_OBJECT_IDS,
+    ...BACKROOMS_LEVEL_ZERO_PARTITION_WALL_OBJECT_IDS,
+    ...BACKROOMS_LEVEL_ZERO_DAMASK_PARTITION_WALL_OBJECT_IDS,
   ]);
   return {
     items: [],

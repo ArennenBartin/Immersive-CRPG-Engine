@@ -207,6 +207,9 @@ const cloneSaveV1 = (save: PlaySave): PlaySave => ({
   fracture_crawl_campaign: save.fracture_crawl_campaign
     ? structuredClone(save.fracture_crawl_campaign)
     : undefined,
+  backrooms_runtime: save.backrooms_runtime
+    ? structuredClone(save.backrooms_runtime)
+    : undefined,
   explored_cells: save.explored_cells ? structuredClone(save.explored_cells) : undefined,
   bark_cooldowns: save.bark_cooldowns ? { ...save.bark_cooldowns } : undefined,
   game_end: save.game_end ? { ...save.game_end } : undefined,

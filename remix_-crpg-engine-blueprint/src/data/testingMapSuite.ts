@@ -34,6 +34,19 @@ import {
 import { hubWing } from "./qaSuite/hub";
 import { backroomsWing } from "./qaSuite/backroomsWing";
 import {
+  GENERATED_BACKROOMS_PHASE6_PREVIEW_MAP_ID,
+  GENERATED_BACKROOMS_PHASE6_PREVIEW_RECIPE,
+  generatedBackroomsPhase6Wing,
+} from "./qaSuite/generatedBackroomsPhase6Wing";
+import {
+  LEVEL0_CMT_BACKROOMS_LEVEL_PROFILE,
+  LEVEL0_CMT_PHASE6_AMBIENCE,
+  LEVEL0_CMT_PHASE6_AUDIO,
+  LEVEL0_CMT_PHASE6_EVENT_PROFILE,
+  LEVEL0_CMT_PHASE6_MOTIF,
+  LEVEL0_CMT_PHASE8_ANOMALY_PROFILE,
+} from "../backroomsGen/presets/level0Cmt";
+import {
   LONELY_STREET_MAP_ID,
   LONELY_STREET_OBJECT_IDS,
   LONELY_STREET_SPAWN_ID,
@@ -59,11 +72,12 @@ export const TEST_SUITE_PLAYER_SPRITE_ID = peopleHorrorSpriteId(1, 1);
 // Bump on any suite-content change: persisted packages refresh their qa_*
 // content when this differs (engineStore hydration), and stale play saves
 // rebuild against the new version.
-export const TEST_SUITE_VERSION = "3.10.0";
+export const TEST_SUITE_VERSION = "3.14.0";
 
 const wings = mergeWings([
   hubWing,
   backroomsWing,
+  generatedBackroomsPhase6Wing,
   lonelyStreetWing,
   chemistryWing,
   storyWing,
@@ -121,6 +135,30 @@ export const withTestingMapSuite = (
     },
     settings: {
       ...pkg.settings,
+      music_tracks: {
+        ...((pkg.settings?.music_tracks ?? {}) as Record<string, string>),
+        [LEVEL0_CMT_PHASE6_AUDIO.humMusicId]:
+          LEVEL0_CMT_PHASE6_AUDIO.humUrl,
+      },
+      sound_effects: {
+        ...((pkg.settings?.sound_effects ?? {}) as Record<string, string>),
+        [LEVEL0_CMT_PHASE6_AUDIO.electricalPopId]:
+          LEVEL0_CMT_PHASE6_AUDIO.electricalPopUrl,
+        [LEVEL0_CMT_PHASE6_AUDIO.distantImpactId]:
+          LEVEL0_CMT_PHASE6_AUDIO.distantImpactUrl,
+      },
+      map_music: {
+        ...((pkg.settings?.map_music ?? {}) as Record<string, string>),
+        [GENERATED_BACKROOMS_PHASE6_PREVIEW_MAP_ID]:
+          LEVEL0_CMT_PHASE6_AUDIO.humMusicId,
+      },
+      backrooms_ambience_profiles: {
+        ...((pkg.settings?.backrooms_ambience_profiles ?? {}) as Record<
+          string,
+          unknown
+        >),
+        [LEVEL0_CMT_PHASE6_AMBIENCE.id]: LEVEL0_CMT_PHASE6_AMBIENCE,
+      },
       player_sprite_id: TEST_SUITE_PLAYER_SPRITE_ID,
       initial_known_skills: [
         ...new Set([
@@ -172,7 +210,12 @@ export const withTestingMapSuite = (
     // The bundled game is the QA suite itself. Do not retain legacy worlds,
     // generated regions, or author-added maps when installing the suite.
     maps: [...wings.maps],
-    object_library: mergeById(pkg.object_library, qaArchitectureObjects),
+    object_library: mergeById(pkg.object_library, [
+      ...qaArchitectureObjects,
+      // Objects a wing brings with it, for placements the shared preset
+      // library has no definition for.
+      ...wings.objects,
+    ]),
     entities: mergedEntities,
     keywords: mergeById(pkg.keywords, wings.keywords),
     dynamic_topics: mergeById(pkg.dynamic_topics, wings.dynamicTopics),
@@ -193,6 +236,21 @@ export const withTestingMapSuite = (
       wings.endings,
     ) as GamePackage["endings"],
     barks: mergeById(pkg.barks || [], wings.barks),
+    backrooms_recipes: mergeById(pkg.backrooms_recipes, [
+      GENERATED_BACKROOMS_PHASE6_PREVIEW_RECIPE,
+    ]),
+    backrooms_level_profiles: mergeById(pkg.backrooms_level_profiles, [
+      LEVEL0_CMT_BACKROOMS_LEVEL_PROFILE,
+    ]),
+    backrooms_motifs: mergeById(pkg.backrooms_motifs, [
+      LEVEL0_CMT_PHASE6_MOTIF,
+    ]),
+    backrooms_event_profiles: mergeById(pkg.backrooms_event_profiles, [
+      LEVEL0_CMT_PHASE6_EVENT_PROFILE,
+    ]),
+    backrooms_anomaly_profiles: mergeById(pkg.backrooms_anomaly_profiles, [
+      LEVEL0_CMT_PHASE8_ANOMALY_PROFILE,
+    ]),
     // QA replacement swaps the entire map collection, so map-bound simulation
     // records from the replaced package cannot remain as dangling references.
     simulation_processes: [...wings.processes],

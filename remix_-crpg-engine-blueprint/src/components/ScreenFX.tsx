@@ -34,6 +34,7 @@ import {
   getScreenGlareSources,
   MAX_SCREEN_GLARE_SOURCES,
 } from "../utils/screenGlareSources";
+import { shouldEnablePlayScreenFx } from "../utils/playInput";
 
 // ── Custom warp + ripple effect ──────────────────────────────────────────────
 
@@ -322,6 +323,7 @@ function ChromaticAberrationFX({
 interface ScreenFXProps {
   inCombat: boolean;
   mapId?: string | null;
+  largeScene?: boolean;
 }
 
 // ── Frame driver — updates all uniforms each tick ────────────────────────────
@@ -461,7 +463,11 @@ class FXBoundary extends Component<{ children: ReactNode }, { failed: boolean }>
 
 // ── Main export ──────────────────────────────────────────────────────────────
 
-export function ScreenFX({ inCombat, mapId }: ScreenFXProps) {
+export function ScreenFX({
+  inCombat,
+  mapId,
+  largeScene = false,
+}: ScreenFXProps) {
   const warpRef = useRef<WarpEffect>(null);
   const caRef   = useRef<ChromaticAberrationEffect>(null);
   const visualPreset = useVisualSettingsStore((s) => s.preset);
@@ -477,7 +483,7 @@ export function ScreenFX({ inCombat, mapId }: ScreenFXProps) {
   // lighting responsive on ordinary hardware. The composer adds several
   // full-screen framebuffer passes even though none of them participates in
   // fog, illumination, or Senses. Reserve that cosmetic cost for High/Ultra.
-  if (visualPreset === "performance" || visualPreset === "balanced") return null;
+  if (!shouldEnablePlayScreenFx(visualPreset, largeScene)) return null;
 
   const underground =
     (mapId?.includes("network") || mapId?.includes("cave") || mapId?.includes("depth")) ?? false;

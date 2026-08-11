@@ -44,6 +44,199 @@ export const BACKROOMS_LEVEL_ZERO_WALL_OBJECT_ID =
   "obj_backrooms_level_zero_wall";
 export const BACKROOMS_LEVEL_ZERO_LIGHT_OBJECT_ID =
   "obj_backrooms_level_zero_ceiling_light";
+export const BACKROOMS_LEVEL_ZERO_DEAD_LIGHT_OBJECT_ID =
+  "obj_backrooms_level_zero_dead_ceiling_light";
+export const BACKROOMS_LEVEL_ZERO_CARPET_STAIN_OBJECT_ID =
+  "obj_backrooms_level_zero_carpet_stain";
+
+// Generated Level 0 maps keep solid macro cells as the authoritative
+// navigation/LOS contract, but render only the faces exposed to walkable
+// space. The four low bits identify those faces in N/E/S/W order.
+export const BACKROOMS_LEVEL_ZERO_THIN_WALL_OBJECT_ID_PREFIX =
+  "obj_backrooms_level_zero_thin_wall_";
+export const BACKROOMS_LEVEL_ZERO_DAMASK_THIN_WALL_OBJECT_ID_PREFIX =
+  "obj_backrooms_level_zero_thin_wall_damask_";
+export const BACKROOMS_LEVEL_ZERO_THIN_WALL_FACE_BITS = {
+  north: 1,
+  east: 2,
+  south: 4,
+  west: 8,
+} as const;
+export const BACKROOMS_LEVEL_ZERO_THIN_WALL_THICKNESS = 0.12;
+
+export const backroomsLevelZeroThinWallObjectId = (faceMask: number) => {
+  if (!Number.isInteger(faceMask) || faceMask < 0 || faceMask > 0xf) {
+    throw new Error(`Invalid Level 0 thin-wall face mask: ${faceMask}`);
+  }
+  return `${BACKROOMS_LEVEL_ZERO_THIN_WALL_OBJECT_ID_PREFIX}${faceMask.toString(16)}`;
+};
+
+export const BACKROOMS_LEVEL_ZERO_THIN_WALL_OBJECT_IDS = Array.from(
+  { length: 16 },
+  (_, faceMask) => backroomsLevelZeroThinWallObjectId(faceMask),
+);
+
+export const backroomsLevelZeroDamaskThinWallObjectId = (faceMask: number) => {
+  if (!Number.isInteger(faceMask) || faceMask < 0 || faceMask > 0xf) {
+    throw new Error(`Invalid Level 0 damask thin-wall face mask: ${faceMask}`);
+  }
+  return `${BACKROOMS_LEVEL_ZERO_DAMASK_THIN_WALL_OBJECT_ID_PREFIX}${faceMask.toString(16)}`;
+};
+
+export const BACKROOMS_LEVEL_ZERO_DAMASK_THIN_WALL_OBJECT_IDS = Array.from(
+  { length: 16 },
+  (_, faceMask) => backroomsLevelZeroDamaskThinWallObjectId(faceMask),
+);
+
+export const readBackroomsLevelZeroThinWallFaceMask = (
+  objectId: string | null | undefined,
+): number | undefined => {
+  const damask = objectId?.startsWith(
+    BACKROOMS_LEVEL_ZERO_DAMASK_THIN_WALL_OBJECT_ID_PREFIX,
+  );
+  const prefix = damask
+    ? BACKROOMS_LEVEL_ZERO_DAMASK_THIN_WALL_OBJECT_ID_PREFIX
+    : objectId?.startsWith(BACKROOMS_LEVEL_ZERO_THIN_WALL_OBJECT_ID_PREFIX)
+      ? BACKROOMS_LEVEL_ZERO_THIN_WALL_OBJECT_ID_PREFIX
+      : undefined;
+  if (!objectId || !prefix) {
+    return undefined;
+  }
+  const suffix = objectId.slice(prefix.length);
+  const faceMask = Number.parseInt(suffix, 16);
+  return Number.isInteger(faceMask) &&
+    faceMask >= 0 &&
+    faceMask <= 0xf &&
+    (damask
+      ? backroomsLevelZeroDamaskThinWallObjectId(faceMask)
+      : backroomsLevelZeroThinWallObjectId(faceMask)) === objectId
+    ? faceMask
+    : undefined;
+};
+
+export const isBackroomsLevelZeroThinWallObjectId = (
+  objectId: string | null | undefined,
+) => readBackroomsLevelZeroThinWallFaceMask(objectId) !== undefined;
+
+export const isBackroomsLevelZeroDamaskThinWallObjectId = (
+  objectId: string | null | undefined,
+) =>
+  Boolean(
+    objectId?.startsWith(
+      BACKROOMS_LEVEL_ZERO_DAMASK_THIN_WALL_OBJECT_ID_PREFIX,
+    ) && readBackroomsLevelZeroThinWallFaceMask(objectId) !== undefined,
+  );
+
+// Interior partitions are authored on the runtime's 3x3 fine grid. Their
+// length fills one fine cell while the cross-axis size leaves the end cap and
+// wall depth plainly visible. Keeping orientation in the object ID avoids the
+// legacy connected-wall auto-rotation heuristic and makes authored collision
+// agree with presentation at every turn and free end.
+export const BACKROOMS_LEVEL_ZERO_PARTITION_WALL_OBJECT_ID_PREFIX =
+  "obj_backrooms_level_zero_partition_wall_";
+export const BACKROOMS_LEVEL_ZERO_DAMASK_PARTITION_WALL_OBJECT_ID_PREFIX =
+  "obj_backrooms_level_zero_partition_wall_damask_";
+export const BACKROOMS_LEVEL_ZERO_PARTITION_WALL_STYLES = [
+  "slim",
+  "standard",
+  "heavy",
+] as const;
+export const BACKROOMS_LEVEL_ZERO_PARTITION_WALL_ORIENTATIONS = [
+  "horizontal",
+  "vertical",
+] as const;
+export type BackroomsLevelZeroPartitionWallStyle =
+  (typeof BACKROOMS_LEVEL_ZERO_PARTITION_WALL_STYLES)[number];
+export type BackroomsLevelZeroPartitionWallOrientation =
+  (typeof BACKROOMS_LEVEL_ZERO_PARTITION_WALL_ORIENTATIONS)[number];
+export type BackroomsLevelZeroWallFinish = "aged" | "damask";
+
+// These are final rendered metres/macrotile units. Object parts are authored
+// in fine-cell-local space and are scaled by one third at runtime.
+export const BACKROOMS_LEVEL_ZERO_PARTITION_WALL_THICKNESS = {
+  slim: 0.1,
+  standard: 0.18,
+  heavy: 0.28,
+} as const satisfies Record<BackroomsLevelZeroPartitionWallStyle, number>;
+
+export const backroomsLevelZeroPartitionWallObjectId = (
+  style: BackroomsLevelZeroPartitionWallStyle,
+  orientation: BackroomsLevelZeroPartitionWallOrientation,
+  finish: BackroomsLevelZeroWallFinish = "aged",
+) =>
+  `${
+    finish === "damask"
+      ? BACKROOMS_LEVEL_ZERO_DAMASK_PARTITION_WALL_OBJECT_ID_PREFIX
+      : BACKROOMS_LEVEL_ZERO_PARTITION_WALL_OBJECT_ID_PREFIX
+  }${style}_${orientation}`;
+
+export const BACKROOMS_LEVEL_ZERO_PARTITION_WALL_OBJECT_IDS =
+  BACKROOMS_LEVEL_ZERO_PARTITION_WALL_STYLES.flatMap((style) =>
+    BACKROOMS_LEVEL_ZERO_PARTITION_WALL_ORIENTATIONS.map((orientation) =>
+      backroomsLevelZeroPartitionWallObjectId(style, orientation),
+    ),
+  );
+
+export const BACKROOMS_LEVEL_ZERO_DAMASK_PARTITION_WALL_OBJECT_IDS =
+  BACKROOMS_LEVEL_ZERO_PARTITION_WALL_STYLES.flatMap((style) =>
+    BACKROOMS_LEVEL_ZERO_PARTITION_WALL_ORIENTATIONS.map((orientation) =>
+      backroomsLevelZeroPartitionWallObjectId(style, orientation, "damask"),
+    ),
+  );
+
+export const readBackroomsLevelZeroPartitionWall = (
+  objectId: string | null | undefined,
+): {
+  style: BackroomsLevelZeroPartitionWallStyle;
+  orientation: BackroomsLevelZeroPartitionWallOrientation;
+  thickness: number;
+  finish: BackroomsLevelZeroWallFinish;
+} | undefined => {
+  const damask = objectId?.startsWith(
+    BACKROOMS_LEVEL_ZERO_DAMASK_PARTITION_WALL_OBJECT_ID_PREFIX,
+  );
+  const prefix = damask
+    ? BACKROOMS_LEVEL_ZERO_DAMASK_PARTITION_WALL_OBJECT_ID_PREFIX
+    : objectId?.startsWith(
+          BACKROOMS_LEVEL_ZERO_PARTITION_WALL_OBJECT_ID_PREFIX,
+        )
+      ? BACKROOMS_LEVEL_ZERO_PARTITION_WALL_OBJECT_ID_PREFIX
+      : undefined;
+  if (!objectId || !prefix) {
+    return undefined;
+  }
+  for (const style of BACKROOMS_LEVEL_ZERO_PARTITION_WALL_STYLES) {
+    for (const orientation of BACKROOMS_LEVEL_ZERO_PARTITION_WALL_ORIENTATIONS) {
+      if (
+        objectId ===
+        backroomsLevelZeroPartitionWallObjectId(
+          style,
+          orientation,
+          damask ? "damask" : "aged",
+        )
+      ) {
+        return {
+          style,
+          orientation,
+          thickness: BACKROOMS_LEVEL_ZERO_PARTITION_WALL_THICKNESS[style],
+          finish: damask ? "damask" : "aged",
+        };
+      }
+    }
+  }
+  return undefined;
+};
+
+export const isBackroomsLevelZeroPartitionWallObjectId = (
+  objectId: string | null | undefined,
+) => readBackroomsLevelZeroPartitionWall(objectId) !== undefined;
+
+export const isBackroomsLevelZeroWallObjectId = (
+  objectId: string | null | undefined,
+) =>
+  objectId === BACKROOMS_LEVEL_ZERO_WALL_OBJECT_ID ||
+  isBackroomsLevelZeroThinWallObjectId(objectId) ||
+  isBackroomsLevelZeroPartitionWallObjectId(objectId);
 
 export const LONELY_STREET_ASPHALT_OBJECT_ID = "obj_lonely_street_asphalt";
 export const LONELY_STREET_SIDEWALK_OBJECT_ID = "obj_lonely_street_sidewalk";
@@ -56,12 +249,14 @@ export const LONELY_STREET_HOUSE_OBJECT_ID = "obj_lonely_street_house";
 export const BACKROOMS_LEVEL_ZERO_TEXTURES = {
   carpet: "/textures/backrooms/level-zero-carpet.jpg",
   wallpaper: "/textures/backrooms/level-zero-wallpaper.jpg",
+  damaskWallpaper: "/textures/backrooms/level-zero-damask-wallpaper.jpg",
   ceiling: "/textures/backrooms/level-zero-ceiling-tile.jpg",
 } as const;
 
 const BACKROOMS_LEVEL_ZERO_MATERIALS = {
   carpet: "mat_backrooms_level_zero_carpet",
   wallpaper: "mat_backrooms_level_zero_wallpaper",
+  damaskWallpaper: "mat_backrooms_level_zero_damask_wallpaper",
   trim: "mat_backrooms_level_zero_trim",
   ceilingTile: "mat_backrooms_level_zero_ceiling_tile",
   fixtureMetal: "mat_backrooms_level_zero_fixture_metal",
@@ -1025,7 +1220,7 @@ const baseObjectLibraryPresets: ObjectData[] = [
         name: "Aged fluorescent diffuser",
         color: "#f7f4ca",
         emissive: "#ece395",
-        emissive_intensity: 0.4,
+        emissive_intensity: 0.68,
         opacity: 1,
         transparent: false,
         roughness: 0.48,
@@ -1039,7 +1234,7 @@ const baseObjectLibraryPresets: ObjectData[] = [
         name: "Aged warm-white fluorescent tubes",
         color: "#faffe2",
         emissive: "#f2f0b9",
-        emissive_intensity: 0.95,
+        emissive_intensity: 1.35,
         opacity: 1,
         transparent: false,
         roughness: 0.2,
@@ -1050,6 +1245,52 @@ const baseObjectLibraryPresets: ObjectData[] = [
       },
     ],
   },
+  object(
+    BACKROOMS_LEVEL_ZERO_DEAD_LIGHT_OBJECT_ID,
+    "Dead Level Zero Fluorescent Fixture",
+    "fixture",
+    [
+      "prop",
+      "light_ceiling",
+      "institutional",
+      "backrooms",
+      "level_zero",
+      "dead_fixture",
+      "recurrence_motif",
+    ],
+    [1, 2.84, 1],
+    [
+      part("box", "ceiling_tile_backer", [0, 2.81, 0], [1, 0.06, 1], "#817b59"),
+      part("box", "ballast_housing", [0, 2.73, 0], [0.9, 0.1, 0.4], "#55554d"),
+      part("box", "dead_diffuser", [0, 2.64, 0], [0.72, 0.022, 0.27], "#77735f"),
+      part("box", "spent_tube_a", [0, 2.625, -0.065], [0.62, 0.018, 0.032], "#403f37"),
+      part("box", "spent_tube_b", [0, 2.625, 0.065], [0.62, 0.018, 0.032], "#403f37"),
+    ],
+    { profile: "none", footprint: [[0, 0]] },
+    ["#817b59", "#55554d", "#77735f", "#403f37"],
+  ),
+  object(
+    BACKROOMS_LEVEL_ZERO_CARPET_STAIN_OBJECT_ID,
+    "Level Zero Carpet Stain",
+    "surface",
+    [
+      "prop",
+      "surface_detail",
+      "backrooms",
+      "level_zero",
+      "carpet_stain",
+      "recurrence_motif",
+    ],
+    [0.82, 0.028, 0.66],
+    [
+      // A real shallow volume sits above the carpet instead of a coplanar
+      // decal, avoiding z-fighting while remaining non-blocking.
+      part("cylinder", "irregular_stain", [0, 0.013, 0], [0.78, 0.026, 0.61], "#5a4528"),
+      part("cylinder", "dark_center", [0.11, 0.015, -0.07], [0.36, 0.028, 0.29], "#43351f"),
+    ],
+    { profile: "none", footprint: [[0, 0]] },
+    ["#5a4528", "#43351f"],
+  ),
   {
     ...object(
       LONELY_STREET_ASPHALT_OBJECT_ID,
@@ -3106,6 +3347,299 @@ const baseObjectLibraryPresets: ObjectData[] = [
   ),
 ];
 
+const BACKROOMS_LEVEL_ZERO_THIN_WALL_FACE_OFFSET =
+  0.5 - BACKROOMS_LEVEL_ZERO_THIN_WALL_THICKNESS / 2;
+
+const backroomsLevelZeroThinWallFaceParts = (
+  faceMask: number,
+  wallpaperMaterial: string = BACKROOMS_LEVEL_ZERO_MATERIALS.wallpaper,
+): ObjectData["parts"] => {
+  const parts: ObjectData["parts"] = [];
+  const addFace = (
+    name: string,
+    position: [number, number, number],
+    horizontal: boolean,
+  ) => {
+    const bodySize: [number, number, number] = horizontal
+      ? [1.04, 1.68, BACKROOMS_LEVEL_ZERO_THIN_WALL_THICKNESS]
+      : [BACKROOMS_LEVEL_ZERO_THIN_WALL_THICKNESS, 1.68, 1.04];
+    const trimSize: [number, number, number] = horizontal
+      ? [1.06, 0.16, BACKROOMS_LEVEL_ZERO_THIN_WALL_THICKNESS + 0.02]
+      : [BACKROOMS_LEVEL_ZERO_THIN_WALL_THICKNESS + 0.02, 0.16, 1.06];
+    const topTrimSize: [number, number, number] = [
+      trimSize[0],
+      0.12,
+      trimSize[2],
+    ];
+
+    parts.push(
+      part(
+        "box",
+        `${name}_wallpaper_body`,
+        [position[0], 0.92, position[2]],
+        bodySize,
+        wallpaperMaterial,
+      ),
+      part(
+        "box",
+        `${name}_base_trim`,
+        [position[0], 0.08, position[2]],
+        trimSize,
+        BACKROOMS_LEVEL_ZERO_MATERIALS.trim,
+      ),
+      part(
+        "box",
+        `${name}_top_trim`,
+        [position[0], 1.78, position[2]],
+        topTrimSize,
+        BACKROOMS_LEVEL_ZERO_MATERIALS.trim,
+      ),
+    );
+  };
+
+  if (faceMask & BACKROOMS_LEVEL_ZERO_THIN_WALL_FACE_BITS.north) {
+    addFace(
+      "north",
+      [0, 0, -BACKROOMS_LEVEL_ZERO_THIN_WALL_FACE_OFFSET],
+      true,
+    );
+  }
+  if (faceMask & BACKROOMS_LEVEL_ZERO_THIN_WALL_FACE_BITS.east) {
+    addFace(
+      "east",
+      [BACKROOMS_LEVEL_ZERO_THIN_WALL_FACE_OFFSET, 0, 0],
+      false,
+    );
+  }
+  if (faceMask & BACKROOMS_LEVEL_ZERO_THIN_WALL_FACE_BITS.south) {
+    addFace(
+      "south",
+      [0, 0, BACKROOMS_LEVEL_ZERO_THIN_WALL_FACE_OFFSET],
+      true,
+    );
+  }
+  if (faceMask & BACKROOMS_LEVEL_ZERO_THIN_WALL_FACE_BITS.west) {
+    addFace(
+      "west",
+      [-BACKROOMS_LEVEL_ZERO_THIN_WALL_FACE_OFFSET, 0, 0],
+      false,
+    );
+  }
+
+  return parts;
+};
+
+const backroomsLevelZeroBaseWall = baseObjectLibraryPresets.find(
+  (candidate) => candidate.id === BACKROOMS_LEVEL_ZERO_WALL_OBJECT_ID,
+)!;
+
+const backroomsLevelZeroWallMaterialSettings = (
+  finish: BackroomsLevelZeroWallFinish,
+): ObjectData["material_settings"] =>
+  backroomsLevelZeroBaseWall.material_settings.map((setting) =>
+    setting.id === BACKROOMS_LEVEL_ZERO_MATERIALS.wallpaper &&
+    finish === "damask"
+      ? {
+          ...setting,
+          id: BACKROOMS_LEVEL_ZERO_MATERIALS.damaskWallpaper,
+          name: "Faded yellow damask wallpaper",
+          // The supplied artwork already carries the intended yellow cast.
+          // A neutral tint preserves its contrast under the creamy room rig.
+          color: "#ffffff",
+          roughness: 0.92,
+          // The square source contains roughly four motifs across. Sampling a
+          // quarter repeat gives each one-metre wall panel one legible motif
+          // instead of shrinking the pattern into an indistinct flat wash.
+          texture_scale: 0.25,
+          texture_strength: 1,
+          texture_image_url:
+            BACKROOMS_LEVEL_ZERO_TEXTURES.damaskWallpaper,
+        }
+      : { ...setting },
+  );
+
+export const BACKROOMS_LEVEL_ZERO_THIN_WALL_OBJECTS: ObjectData[] =
+  BACKROOMS_LEVEL_ZERO_THIN_WALL_OBJECT_IDS.map((id, faceMask) => ({
+    ...object(
+      id,
+      `Level Zero Thin Wallpaper Wall (${faceMask.toString(16).toUpperCase()})`,
+      "structure",
+      [
+        "tile",
+        "wallpaper",
+        "thin_wall",
+        "backrooms",
+        "level_zero",
+        "institutional",
+      ],
+      [1.04, 1.84, 1.04],
+      backroomsLevelZeroThinWallFaceParts(faceMask),
+      // The owning CellData remains the authoritative solid macro footprint.
+      // Keeping this non-none also routes the authored parts through the
+      // structure renderer rather than its generic fast-tile proxy.
+      { profile: "single", footprint: [[0, 0]] },
+      [
+        BACKROOMS_LEVEL_ZERO_MATERIALS.wallpaper,
+        BACKROOMS_LEVEL_ZERO_MATERIALS.trim,
+      ],
+      {
+        material_id: "sim_mat_stone",
+        mass_kg: 780,
+        bulk: 8,
+        awkwardness: 1,
+        push_difficulty: 20,
+        carry_size: "immovable",
+        requires_cooperation: true,
+      },
+    ),
+    material_settings: backroomsLevelZeroBaseWall.material_settings.map(
+      (setting) => ({ ...setting }),
+    ),
+  }));
+
+export const BACKROOMS_LEVEL_ZERO_DAMASK_THIN_WALL_OBJECTS: ObjectData[] =
+  BACKROOMS_LEVEL_ZERO_DAMASK_THIN_WALL_OBJECT_IDS.map((id, faceMask) => ({
+    ...object(
+      id,
+      `Level Zero Damask Thin Wall (${faceMask.toString(16).toUpperCase()})`,
+      "structure",
+      [
+        "tile",
+        "wallpaper",
+        "thin_wall",
+        "damask_finish",
+        "backrooms",
+        "level_zero",
+        "institutional",
+      ],
+      [1.04, 1.84, 1.04],
+      backroomsLevelZeroThinWallFaceParts(
+        faceMask,
+        BACKROOMS_LEVEL_ZERO_MATERIALS.damaskWallpaper,
+      ),
+      { profile: "single", footprint: [[0, 0]] },
+      [
+        BACKROOMS_LEVEL_ZERO_MATERIALS.damaskWallpaper,
+        BACKROOMS_LEVEL_ZERO_MATERIALS.trim,
+      ],
+      {
+        material_id: "sim_mat_stone",
+        mass_kg: 780,
+        bulk: 8,
+        awkwardness: 1,
+        push_difficulty: 20,
+        carry_size: "immovable",
+        requires_cooperation: true,
+      },
+    ),
+    material_settings: backroomsLevelZeroWallMaterialSettings("damask"),
+  }));
+
+const backroomsLevelZeroPartitionWallParts = (
+  style: BackroomsLevelZeroPartitionWallStyle,
+  orientation: BackroomsLevelZeroPartitionWallOrientation,
+  wallpaperMaterial: string = BACKROOMS_LEVEL_ZERO_MATERIALS.wallpaper,
+): ObjectData["parts"] => {
+  const horizontal = orientation === "horizontal";
+  const localThickness =
+    BACKROOMS_LEVEL_ZERO_PARTITION_WALL_THICKNESS[style] * 3;
+  const bodySize: [number, number, number] = horizontal
+    ? [1.04, 1.68, localThickness]
+    : [localThickness, 1.68, 1.04];
+  const trimSize: [number, number, number] = horizontal
+    ? [1.06, 0.16, localThickness + 0.04]
+    : [localThickness + 0.04, 0.16, 1.06];
+
+  return [
+    part(
+      "box",
+      "partition_wallpaper_body",
+      [0, 0.92, 0],
+      bodySize,
+      wallpaperMaterial,
+    ),
+    part(
+      "box",
+      "partition_base_trim",
+      [0, 0.08, 0],
+      trimSize,
+      BACKROOMS_LEVEL_ZERO_MATERIALS.trim,
+    ),
+    part(
+      "box",
+      "partition_top_trim",
+      [0, 1.78, 0],
+      [trimSize[0], 0.12, trimSize[2]],
+      BACKROOMS_LEVEL_ZERO_MATERIALS.trim,
+    ),
+  ];
+};
+
+const backroomsLevelZeroPartitionWallObjects = (
+  finish: BackroomsLevelZeroWallFinish,
+): ObjectData[] =>
+  BACKROOMS_LEVEL_ZERO_PARTITION_WALL_STYLES.flatMap((style) =>
+    BACKROOMS_LEVEL_ZERO_PARTITION_WALL_ORIENTATIONS.map((orientation) => {
+      const wallpaperMaterial =
+        finish === "damask"
+          ? BACKROOMS_LEVEL_ZERO_MATERIALS.damaskWallpaper
+          : BACKROOMS_LEVEL_ZERO_MATERIALS.wallpaper;
+      return {
+      ...object(
+        backroomsLevelZeroPartitionWallObjectId(
+          style,
+          orientation,
+          finish,
+        ),
+        `Level Zero ${finish === "damask" ? "damask " : ""}${style} ${orientation} partition`,
+        "structure",
+        [
+          "tile",
+          "wallpaper",
+          "partition_wall",
+          `partition_${style}`,
+          `partition_${orientation}`,
+          ...(finish === "damask" ? ["damask_finish"] : []),
+          "backrooms",
+          "level_zero",
+          "institutional",
+        ],
+        orientation === "horizontal"
+          ? [1.04, 1.84, BACKROOMS_LEVEL_ZERO_PARTITION_WALL_THICKNESS[style] * 3]
+          : [BACKROOMS_LEVEL_ZERO_PARTITION_WALL_THICKNESS[style] * 3, 1.84, 1.04],
+        backroomsLevelZeroPartitionWallParts(
+          style,
+          orientation,
+          wallpaperMaterial,
+        ),
+        // CellData owns the actual one-fine-cell collision footprint. This
+        // profile keeps the visible authored parts on the structure path.
+        { profile: "single", footprint: [[0, 0]] },
+        [
+          wallpaperMaterial,
+          BACKROOMS_LEVEL_ZERO_MATERIALS.trim,
+        ],
+        {
+          material_id: "sim_mat_stone",
+          mass_kg: 780,
+          bulk: 8,
+          awkwardness: 1,
+          push_difficulty: 20,
+          carry_size: "immovable",
+          requires_cooperation: true,
+        },
+      ),
+        material_settings: backroomsLevelZeroWallMaterialSettings(finish),
+      };
+    }),
+  );
+
+export const BACKROOMS_LEVEL_ZERO_PARTITION_WALL_OBJECTS =
+  backroomsLevelZeroPartitionWallObjects("aged");
+
+export const BACKROOMS_LEVEL_ZERO_DAMASK_PARTITION_WALL_OBJECTS =
+  backroomsLevelZeroPartitionWallObjects("damask");
+
 // Bind each preset object to its generated default top-down tile sprite, so the
 // bundled game renders as a complete tile map in the 2D renderer.
 export const objectLibraryPresets: ObjectData[] = [
@@ -3113,6 +3647,10 @@ export const objectLibraryPresets: ObjectData[] = [
     ...o,
     tile_sprite_id: o.tile_sprite_id ?? defaultObjectTileMap[o.id],
   })),
+  ...BACKROOMS_LEVEL_ZERO_THIN_WALL_OBJECTS,
+  ...BACKROOMS_LEVEL_ZERO_DAMASK_THIN_WALL_OBJECTS,
+  ...BACKROOMS_LEVEL_ZERO_PARTITION_WALL_OBJECTS,
+  ...BACKROOMS_LEVEL_ZERO_DAMASK_PARTITION_WALL_OBJECTS,
   ...(baseObjectLibraryPresets.some(
     (object) => object.id === PLAYER_IDLE_FBX_MODEL_ID,
   )

@@ -532,16 +532,16 @@ export function BlackStarLightRig({
           // ceiling and fixture normals otherwise sample near-black here and
           // turn the housing into a void despite the lit room beneath it.
           groundColor="#676044"
-          intensity={0.045 + ambient * 0.45}
+          intensity={0.12 + ambient * 0.76}
         />
         <ambientLight
           color="#E4E2CC"
-          intensity={0.03 + ambient * 0.35}
+          intensity={0.08 + ambient * 0.55}
         />
         <directionalLight
           position={[-9, 20, -7]}
           color="#F5F2D1"
-          intensity={0.14 + ambient * 0.65}
+          intensity={0.22 + ambient * 1.05}
           castShadow={shadowsEnabled}
         />
       </>

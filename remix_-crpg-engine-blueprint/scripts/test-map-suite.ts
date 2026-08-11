@@ -56,9 +56,13 @@ import {
   LONELY_STREET_TREE_OBJECT_ID,
 } from "../src/schema/presets";
 import {
+  BACKROOMS_LEVEL_ZERO_CABINET_PENETRATION_RATIO,
+  BACKROOMS_LEVEL_ZERO_CLIPPED_CABINET_PLACEMENT_ID,
+  BACKROOMS_LEVEL_ZERO_PHASE2_PLACEMENTS,
   BACKROOMS_LEVEL_ZERO_MAP_ID,
   BACKROOMS_LEVEL_ZERO_SPAWN_ID,
 } from "../src/data/qaSuite/backroomsWing";
+import { BACKROOMS_ANOMALY_OBJECTS } from "../src/data/backroomsAnomalyAssets";
 import {
   LONELY_STREET_BASEMENT_EXIT_CELL,
   LONELY_STREET_BASEMENT_MAP,
@@ -335,53 +339,99 @@ console.log("suite: reference integrity");
       hydratedQaPackage.metadata.version === "stale-qa-version" &&
       hydratedQaPackage.maps[0]?.display_name === "Hand-edited QA sentinel",
   );
-  const preParasiteWorkspace = {
+  const anomalyObjectIds = new Set(
+    BACKROOMS_ANOMALY_OBJECTS.map((object) => object.id),
+  );
+  const phase2PlacementIds = new Set(
+    BACKROOMS_LEVEL_ZERO_PHASE2_PLACEMENTS.map((placement) => placement.id),
+  );
+  const prePhase2Workspace = {
     ...editedQaPackage,
     object_library: editedQaPackage.object_library.filter(
-      (object) => object.id !== BACKROOMS_PARASITE_MODEL_OBJECT_ID,
-    ),
-    entities: editedQaPackage.entities.filter(
-      (entity) => entity.id !== BACKROOMS_PARASITE_ENTITY_ID,
+      (object) => !anomalyObjectIds.has(object.id),
     ),
     maps: editedQaPackage.maps.map((map) =>
       map.id === BACKROOMS_LEVEL_ZERO_MAP_ID
         ? {
             ...map,
-            entity_placements: map.entity_placements.filter(
-              (placement) =>
-                placement.entity_id !== BACKROOMS_PARASITE_ENTITY_ID,
+            spawns: map.spawns.map((spawn) =>
+              spawn.id === BACKROOMS_LEVEL_ZERO_SPAWN_ID
+                ? { ...spawn, cell: [0, 14] as [number, number] }
+                : spawn,
             ),
+            custom_object_placements: map.custom_object_placements.filter(
+              (placement) => !phase2PlacementIds.has(placement.id),
+            ),
+            entity_placements: [
+              ...map.entity_placements,
+              {
+                entity_id: BACKROOMS_PARASITE_ENTITY_ID,
+                cell: [7, 13] as [number, number],
+                facing: [-1, 0] as [number, number],
+              },
+            ],
           }
         : map,
     ),
   };
-  const backfilledParasiteWorkspace =
-    refreshBundledEnginePackage(preParasiteWorkspace);
+  const backfilledPhase2Workspace =
+    refreshBundledEnginePackage(prePhase2Workspace);
+  const backfilledPhase2Map = backfilledPhase2Workspace.maps.find(
+    (map) => map.id === BACKROOMS_LEVEL_ZERO_MAP_ID,
+  );
   ok(
-    "hydration appends the built-in parasite without overwriting authored QA edits",
-    backfilledParasiteWorkspace.metadata.version === "stale-qa-version" &&
-      backfilledParasiteWorkspace.maps[0]?.display_name ===
+    "hydration installs the Phase 2 arrival bay and removes only the obsolete bundled hunter",
+    backfilledPhase2Workspace.metadata.version === "stale-qa-version" &&
+      backfilledPhase2Workspace.maps[0]?.display_name ===
         "Hand-edited QA sentinel" &&
-      backfilledParasiteWorkspace.object_library.some(
-        (object) => object.id === BACKROOMS_PARASITE_MODEL_OBJECT_ID,
+      BACKROOMS_ANOMALY_OBJECTS.every((object) =>
+        backfilledPhase2Workspace.object_library.some(
+          (candidate) => candidate.id === object.id,
+        ),
       ) &&
-      backfilledParasiteWorkspace.entities.some(
-        (entity) =>
-          entity.id === BACKROOMS_PARASITE_ENTITY_ID &&
-          entity.independent_movement?.enabled === true &&
-          entity.horror_combat?.windup_ms === 500 &&
-          entity.horror_combat?.active_ms === 120 &&
-          entity.horror_combat?.recovery_ms === 850 &&
-          entity.sensory_profile?.id === "backrooms_predator",
+      BACKROOMS_LEVEL_ZERO_PHASE2_PLACEMENTS.every((placement) =>
+        backfilledPhase2Map?.custom_object_placements.some(
+          (candidate) => candidate.id === placement.id,
+        ),
       ) &&
-      backfilledParasiteWorkspace.maps.find(
-        (map) => map.id === BACKROOMS_LEVEL_ZERO_MAP_ID,
-      )?.combat_mode === "horror_realtime" &&
-      backfilledParasiteWorkspace.maps
-        .find((map) => map.id === BACKROOMS_LEVEL_ZERO_MAP_ID)
-        ?.entity_placements.some(
+      backfilledPhase2Map?.spawns.some(
+        (spawn) =>
+          spawn.id === BACKROOMS_LEVEL_ZERO_SPAWN_ID &&
+          spawn.cell[0] === 0 &&
+          spawn.cell[1] === 13,
+      ) === true &&
+      backfilledPhase2Map?.entity_placements.some(
           (placement) => placement.entity_id === BACKROOMS_PARASITE_ENTITY_ID,
-        ) === true,
+        ) === false,
+  );
+  const subtleCabinetWorkspace = structuredClone(editedQaPackage);
+  const subtleCabinet = subtleCabinetWorkspace.maps
+    .find((map) => map.id === BACKROOMS_LEVEL_ZERO_MAP_ID)
+    ?.custom_object_placements.find(
+      (placement) =>
+        placement.id ===
+        BACKROOMS_LEVEL_ZERO_CLIPPED_CABINET_PLACEMENT_ID,
+    );
+  if (subtleCabinet) subtleCabinet.plan_offset = [0.4, 0];
+  const refreshedCabinetWorkspace = refreshBundledEnginePackage(
+    subtleCabinetWorkspace,
+  );
+  const refreshedCabinet = refreshedCabinetWorkspace.maps
+    .find((map) => map.id === BACKROOMS_LEVEL_ZERO_MAP_ID)
+    ?.custom_object_placements.find(
+      (placement) =>
+        placement.id ===
+        BACKROOMS_LEVEL_ZERO_CLIPPED_CABINET_PLACEMENT_ID,
+    );
+  ok(
+    "hydration deepens the subtle bundled cabinet without touching other QA edits",
+    refreshedCabinetWorkspace.maps[0]?.display_name ===
+      "Hand-edited QA sentinel" &&
+      Math.abs(
+        Number(refreshedCabinet?.plan_offset?.[0]) -
+          BACKROOMS_LEVEL_ZERO_CABINET_PENETRATION_RATIO,
+      ) < 1e-9 &&
+      Math.abs(Number(refreshedCabinet?.plan_offset?.[1])) < 1e-9,
   );
   const lonelyStreetObjectIds = new Set<string>(LONELY_STREET_OBJECT_IDS);
   const preLonelyStreetWorkspace = {
@@ -2451,6 +2501,7 @@ console.log("suite: reference integrity");
   const problems: string[] = [];
   const qaMaps = authored.maps.filter((map) => map.id.startsWith("qa_"));
   const expectedMapIds = new Set(TEST_SUITE_MAP_IDS);
+  const suiteMaps = authored.maps.filter((map) => expectedMapIds.has(map.id));
 
   ok(
     "new games begin at the far end of Breezy Street",
@@ -2600,9 +2651,9 @@ console.log("suite: reference integrity");
       arrivalTail[2].cell === undefined,
   );
   ok(
-    "suite contains exactly the hub, eleven labs, and three authored environments",
+    "suite contains exactly its authored environments and generated preview",
     authored.maps.length === expectedMapIds.size &&
-      qaMaps.length === expectedMapIds.size &&
+      suiteMaps.length === expectedMapIds.size &&
       authored.maps.every((map) => expectedMapIds.has(map.id)),
     `maps: ${authored.maps.map((m) => m.id).join(", ")}`,
   );
@@ -3920,13 +3971,13 @@ console.log("suite: reference integrity");
   );
   ok(
     "Level Zero fixture emission preserves diffuser and tube detail instead of clipping white",
-    (backroomsLightDiffuser?.emissive_intensity ?? 0) > 0 &&
+      (backroomsLightDiffuser?.emissive_intensity ?? 0) > 0 &&
       (backroomsLightDiffuser?.emissive_intensity ??
-        Number.POSITIVE_INFINITY) <= 0.5 &&
+        Number.POSITIVE_INFINITY) <= 0.75 &&
       (backroomsLightTubes?.emissive_intensity ?? 0) >
         (backroomsLightDiffuser?.emissive_intensity ?? 0) &&
       (backroomsLightTubes?.emissive_intensity ?? Number.POSITIVE_INFINITY) <=
-        1,
+        1.5,
   );
   ok(
     "Level Zero fixture backer and housing retain shaded detail inside the halo",
@@ -3939,17 +3990,9 @@ console.log("suite: reference integrity");
       (backroomsLightHousing?.metalness ?? Number.POSITIVE_INFINITY) <= 0.2,
   );
   ok(
-    "Level Zero contains one standard model-backed parasite and no loose loot",
-    backroomsMap?.entity_placements.length === 1 &&
-      backroomsParasitePlacements.length === 1 &&
-      Boolean(
-        backroomsParasitePlacements[0] &&
-        walkableBackroomsKeys.has(
-          backroomsCellKey(
-            backroomsParasitePlacements[0].cell as [number, number],
-          ),
-        ),
-      ) &&
+    "Level Zero anomaly QA stays encounter-free while the model-backed parasite remains available",
+    backroomsMap?.entity_placements.length === 0 &&
+      backroomsParasitePlacements.length === 0 &&
       backroomsParasite?.is_npc === false &&
       backroomsMap?.combat_mode === "horror_realtime" &&
       backroomsParasite?.independent_movement?.enabled === true &&

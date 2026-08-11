@@ -72,6 +72,7 @@ import {
   dispatchV1UnlockContainer,
   getV1NearbyHostiles,
   getRuntimeMapGrid,
+  RUNTIME_SECTOR_SIZE,
   getV1SkillRangeCells,
   getV1SkillTargetCells,
   dispatchV1Wait,
@@ -167,6 +168,9 @@ import {
   resolvePlayPointLightBudget,
   resolvePlayRenderRadiusMacro,
   shouldDispatchHeldInputRepeat,
+  shouldEnablePlayScreenFx,
+  shouldEnableThirdPersonShadowMaps,
+  shouldUseThirdPersonDirectionalStreaming,
   shouldPreserveHeldInputOnCombatStart,
   shouldDriveDemandFrames,
 } from "../src/utils/playInput";
@@ -400,8 +404,9 @@ console.log("engine-core: Play input cadence + demand frames");
       neighboringFineCell.blocks_los === false,
     "large-map streaming applies authored fine-cell geometry without widening it",
   );
-  const beforeTrueBoundaryCell = fineCenterOfMacro([-14, -7]);
-  const afterTrueBoundaryCell = fineCenterOfMacro([-13, -7]);
+  const beforeBoundaryMacroX = negativeGrid.bounds.minX + RUNTIME_SECTOR_SIZE - 1;
+  const beforeTrueBoundaryCell = fineCenterOfMacro([beforeBoundaryMacroX, -7]);
+  const afterTrueBoundaryCell = fineCenterOfMacro([beforeBoundaryMacroX + 1, -7]);
   const beforeTrueBoundary = negativeGrid.sectorOfFine(
     beforeTrueBoundaryCell[0],
     beforeTrueBoundaryCell[1],
@@ -475,6 +480,12 @@ console.log("engine-core: Play input cadence + demand frames");
     "the bounded demand-frame clock runs for every visible play scene",
   );
   ok(
+    shouldUseThirdPersonDirectionalStreaming(true, false) &&
+      !shouldUseThirdPersonDirectionalStreaming(true, true) &&
+      !shouldUseThirdPersonDirectionalStreaming(false, false),
+    "persistent actor-centered chunks do not publish camera-yaw streaming state",
+  );
+  ok(
     !isLargePlayMap(LARGE_PLAY_MAP_CELL_THRESHOLD - 1) &&
       isLargePlayMap(LARGE_PLAY_MAP_CELL_THRESHOLD) &&
       resolvePlayRenderRadiusMacro(
@@ -532,12 +543,22 @@ console.log("engine-core: Play input cadence + demand frames");
         "ultra",
         8,
         LARGE_PLAY_MAP_CELL_THRESHOLD,
-      ) === 6 &&
+      ) === 4 &&
       resolvePlayPointLightBudget(
         "high",
         7,
         LARGE_PLAY_MAP_CELL_THRESHOLD,
-      ) === 5,
+      ) === 3 &&
+      resolvePlayPointLightBudget(
+        "balanced",
+        7,
+        LARGE_PLAY_MAP_CELL_THRESHOLD,
+      ) === 3 &&
+      resolvePlayPointLightBudget(
+        "performance",
+        7,
+        LARGE_PLAY_MAP_CELL_THRESHOLD,
+      ) === 2,
     "large maps cap pixel density and nearby physical-light cost",
   );
   ok(
@@ -563,9 +584,67 @@ console.log("engine-core: Play input cadence + demand frames");
           LARGE_PLAY_MAP_CELL_THRESHOLD,
         ) -
           1000 / 30,
+    ) <
+        0.000001 &&
+      Math.abs(
+        resolvePlayFrameIntervalMs(
+          "high",
+          LARGE_PLAY_MAP_CELL_THRESHOLD,
+        ) -
+          1000 / 45,
+      ) <
+        0.000001 &&
+      Math.abs(
+        resolvePlayFrameIntervalMs(
+          "balanced",
+          LARGE_PLAY_MAP_CELL_THRESHOLD,
+          true,
+        ) -
+          1000 / 45,
+      ) <
+        0.000001 &&
+      Math.abs(
+        resolvePlayFrameIntervalMs(
+          "high",
+          LARGE_PLAY_MAP_CELL_THRESHOLD,
+          true,
+        ) -
+          1000 / 60,
       ) <
         0.000001,
-    "compact maps submit smooth camera frames while large maps retain conservative pacing",
+    "chunk-rendered large maps regain smooth camera cadence while legacy large maps keep their conservative cap",
+  );
+  ok(
+    shouldEnableThirdPersonShadowMaps(
+      "balanced",
+      LARGE_PLAY_MAP_CELL_THRESHOLD - 1,
+      false,
+    ) &&
+      !shouldEnableThirdPersonShadowMaps(
+        "performance",
+        LARGE_PLAY_MAP_CELL_THRESHOLD - 1,
+        false,
+      ) &&
+      !shouldEnableThirdPersonShadowMaps(
+        "ultra",
+        LARGE_PLAY_MAP_CELL_THRESHOLD,
+        false,
+      ) &&
+      !shouldEnableThirdPersonShadowMaps(
+        "ultra",
+        LARGE_PLAY_MAP_CELL_THRESHOLD - 1,
+        true,
+      ),
+    "third-person shadow maps stay available on compact scenes but never allocate for large scenes",
+  );
+  ok(
+    shouldEnablePlayScreenFx("high", false) &&
+      shouldEnablePlayScreenFx("ultra", false) &&
+      !shouldEnablePlayScreenFx("performance", false) &&
+      !shouldEnablePlayScreenFx("balanced", false) &&
+      !shouldEnablePlayScreenFx("high", true) &&
+      shouldEnablePlayScreenFx("ultra", true),
+    "large scenes reserve the full-screen post-processing composer for Ultra",
   );
 }
 
@@ -4329,13 +4408,13 @@ console.log("engine-core: v1 package/save grid adapter");
       resolvePresentationRoomLightContribution([6, 2], [[2, 2]]) > 0 &&
       PRESENTATION_ROOM_LIGHT_RADIUS >= 7 &&
       PRESENTATION_ROOM_POINT_LIGHT_INTENSITY >= 4 &&
-      PRESENTATION_ROOM_POINT_LIGHT_INTENSITY <= 8 &&
+      PRESENTATION_ROOM_POINT_LIGHT_INTENSITY <= 12 &&
       resolvePresentationRoomLightContribution([20, 20], [[2, 2]]) === 0 &&
       resolvePresentationRoomLightContribution(
         [2, 2],
         [[20, 20], [2, 2]],
       ) === PRESENTATION_ROOM_LIGHT_FILL_STRENGTH,
-    "permanent room fixtures keep a restrained local actor fill while physical inverse-square lights shape the room",
+    "permanent room fixtures keep a readable local actor fill while physical inverse-square lights shape the room",
   );
   const fluorescentColor = PRESENTATION_ROOM_FLUORESCENT_COLOR.match(
     /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i,
@@ -4350,9 +4429,9 @@ console.log("engine-core: v1 package/save grid adapter");
     "Backrooms room lights use a creamy fluorescent color between amber and green-white",
   );
   ok(
-    BACKROOMS_LEVEL_ZERO_PLAY_AMBIENT_LIGHT > 0.05 &&
-      BACKROOMS_LEVEL_ZERO_PLAY_AMBIENT_LIGHT <= 0.1,
-    "Level Zero uses a restrained visual ambient floor without changing mechanical ambient",
+    BACKROOMS_LEVEL_ZERO_PLAY_AMBIENT_LIGHT >= 0.15 &&
+      BACKROOMS_LEVEL_ZERO_PLAY_AMBIENT_LIGHT <= 0.25,
+    "Level Zero uses a brighter visual ambient floor without changing mechanical ambient",
   );
   const exteriorLights = resolveExteriorEnvironmentLightLevels(0.28);
   const darkExteriorLights = resolveExteriorEnvironmentLightLevels(0);

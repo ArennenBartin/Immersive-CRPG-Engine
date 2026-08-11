@@ -150,6 +150,10 @@ export const auditGamePackageReferences = (
     processes: new Set(pkg.simulation_processes.map((entry) => entry.id)),
     workstations: new Set(pkg.simulation_workstations.map((entry) => entry.id)),
     dungeonRecipes: new Set(pkg.dungeon_recipes.map((entry) => entry.id)),
+    backroomsRecipes: new Set(pkg.backrooms_recipes.map((entry) => entry.id)),
+    transitionPresentations: new Set(
+      pkg.transition_presentation_profiles.map((entry) => entry.id),
+    ),
     dungeonThemes: new Set(pkg.dungeon_themes.map((entry) => entry.id)),
     dungeonArchetypes: new Set(pkg.dungeon_room_archetypes.map((entry) => entry.id)),
     dungeonTemplates: new Set(pkg.dungeon_room_templates.map((entry) => entry.id)),
@@ -217,6 +221,7 @@ export const auditGamePackageReferences = (
     ["simulation_processes", pkg.simulation_processes.map((entry, index) => ({ id: entry.id, path: `$.simulation_processes[${index}].id` }))],
     ["simulation_workstations", pkg.simulation_workstations.map((entry, index) => ({ id: entry.id, path: `$.simulation_workstations[${index}].id` }))],
     ["dungeon_recipes", pkg.dungeon_recipes.map((entry, index) => ({ id: entry.id, path: `$.dungeon_recipes[${index}].id` }))],
+    ["backrooms_recipes", pkg.backrooms_recipes.map((entry, index) => ({ id: entry.id, path: `$.backrooms_recipes[${index}].id` }))],
     ["dungeon_themes", pkg.dungeon_themes.map((entry, index) => ({ id: entry.id, path: `$.dungeon_themes[${index}].id` }))],
     ["dungeon_room_archetypes", pkg.dungeon_room_archetypes.map((entry, index) => ({ id: entry.id, path: `$.dungeon_room_archetypes[${index}].id` }))],
     ["dungeon_room_templates", pkg.dungeon_room_templates.map((entry, index) => ({ id: entry.id, path: `$.dungeon_room_templates[${index}].id` }))],
@@ -523,7 +528,10 @@ export const auditGamePackageReferences = (
     }
   };
 
-  const recipeIds = new Set(indexes.dungeonRecipes);
+  const recipeIds = new Set([
+    ...indexes.dungeonRecipes,
+    ...indexes.backroomsRecipes,
+  ]);
   for (const id of recipeIdsFromSettings(settings)) recipeIds.add(id);
   for (const id of options.knownGenerationRecipeIds ?? []) recipeIds.add(id);
   const mapTokens = new Map(pkg.maps.map((map) => [normalizeGeneratedIdToken(map.id), map]));
@@ -626,6 +634,20 @@ export const auditGamePackageReferences = (
         add({ severity: "error", code: "REF_REGION_MISSING", path: `${path}.cells[${index}].region_id`, message: `Missing map-local region ${cell.region_id}`, reference: cell.region_id, mapId: map.id, cell: [cell.x, cell.z] });
       }
     });
+    map.fine_cell_overrides?.forEach((override, index) => {
+      reference(
+        indexes.objects,
+        override.overrides.object_id,
+        `${path}.fine_cell_overrides[${index}].overrides.object_id`,
+        "REF_OBJECT_MISSING",
+        "object",
+        "error",
+        {
+          mapId: map.id,
+          cell: normalizeCell(override.macro_cell),
+        },
+      );
+    });
     map.custom_object_placements.forEach((placement, index) => {
       const owner = `${path}.custom_object_placements[${index}]`;
       local(placement.id, `${owner}.id`);
@@ -683,6 +705,19 @@ export const auditGamePackageReferences = (
       local(trigger.id, `${owner}.id`);
       if (trigger.cell) cellReference(trigger.cell, `${owner}.cell`);
       reference(indexes.cutscenes, trigger.cutscene_id, `${owner}.cutscene_id`, "REF_CUTSCENE_MISSING", "cutscene");
+      if (
+        trigger.region_id &&
+        !map.regions?.some((region) => region.id === trigger.region_id)
+      ) {
+        add({
+          severity: "error",
+          code: "REF_TRIGGER_REGION_MISSING",
+          path: `${owner}.region_id`,
+          message: `Missing map-local region ${trigger.region_id}`,
+          reference: trigger.region_id,
+          mapId: map.id,
+        });
+      }
       trigger.conditions.forEach((condition, conditionIndex) => reference(indexes.switches, condition.switch_id, `${owner}.conditions[${conditionIndex}].switch_id`, "REF_SWITCH_UNDECLARED", "switch", "warning"));
       auditCondition(trigger.condition, `${owner}.condition`);
     });
@@ -692,6 +727,13 @@ export const auditGamePackageReferences = (
       cellReference(exit.cell, `${owner}.cell`);
       reference(indexes.maps, exit.target_map_id, `${owner}.target_map_id`, "REF_EXIT_MAP_MISSING", "target map");
       reference(indexes.exits, exit.paired_exit_id, `${owner}.paired_exit_id`, "REF_PAIRED_EXIT_MISSING", "paired exit");
+      reference(
+        indexes.transitionPresentations,
+        exit.presentation_profile_id,
+        `${owner}.presentation_profile_id`,
+        "REF_TRANSITION_PRESENTATION_MISSING",
+        "transition presentation profile",
+      );
       const targetMap = pkg.maps.find((candidate) => candidate.id === exit.target_map_id);
       if (exit.target_spawn_id && targetMap && !targetMap.spawns.some((spawn) => spawn.id === exit.target_spawn_id)) {
         add({ severity: "error", code: "REF_EXIT_SPAWN_MISSING", path: `${owner}.target_spawn_id`, message: `Target spawn ${exit.target_spawn_id} is absent from ${targetMap.id}`, reference: exit.target_spawn_id, mapId: map.id, cell: normalizeCell(exit.cell) });

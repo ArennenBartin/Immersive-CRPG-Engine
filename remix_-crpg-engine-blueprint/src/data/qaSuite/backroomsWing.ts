@@ -1,7 +1,8 @@
 // ── Backrooms Level Zero environment ────────────────────────────────────────
 // A deterministic traversal map for authored third-person play. Its repeated
 // rooms, three-cell doorways, loops, and alternating turns exercise corridor
-// navigation, with one standard hostile proving model-backed encounters.
+// navigation. The Phase 2 anomaly arrival bay deliberately has no hostile or
+// event cue, so its transform, clipping, and clear-lane checks stay inspectable.
 
 import {
   BACKROOMS_LEVEL_ZERO_FLOOR_OBJECT_ID,
@@ -10,15 +11,20 @@ import {
 } from "../../schema/presets";
 import {
   BACKROOMS_PARASITE_ENTITY,
-  BACKROOMS_PARASITE_ENTITY_ID,
 } from "../backroomsEntityAssets";
+import {
+  BACKROOMS_ANOMALY_OBJECTS,
+  BACKROOMS_DESK_OBJECT_ID,
+  BACKROOMS_FILING_CABINET_OBJECT_ID,
+  buildRecursiveChainPlacements,
+  buildWallClippedPlacement,
+} from "../backroomsAnomalyAssets";
 import {
   type CellOverrides,
   type MapData,
   type ObjectPlacementData,
   type QaWing,
   cell,
-  entityPlacement,
   key,
   oneMicrotileWallOverrides,
   stampCells,
@@ -27,6 +33,9 @@ import {
 
 export const BACKROOMS_LEVEL_ZERO_MAP_ID = "qa_backrooms_level_zero";
 export const BACKROOMS_LEVEL_ZERO_SPAWN_ID = "spawn_backrooms_entry";
+export const BACKROOMS_LEVEL_ZERO_CLIPPED_CABINET_PLACEMENT_ID =
+  "qa_backrooms_clipped_cabinet";
+export const BACKROOMS_LEVEL_ZERO_CABINET_PENETRATION_RATIO = 0.55;
 
 const MAP_MIN = -16;
 const MAP_MAX = 16;
@@ -215,7 +224,60 @@ const ceilingLights: ObjectPlacementData[] = ZONE_CENTERS.flatMap(
     })),
 );
 
-const backroomsMap: MapData = {
+// The clipped cabinet sits near the edge of the ordinary five-cell light
+// lattice. A dedicated, non-blocking fixture makes its wall intersection a QA
+// surface instead of a black silhouette; it carries no event or gameplay cue.
+const PHASE2_CABINET_QA_LIGHT: ObjectPlacementData = {
+  id: "qa_backrooms_clipped_cabinet_light",
+  object_id: BACKROOMS_LEVEL_ZERO_LIGHT_OBJECT_ID,
+  cell: [3, 14],
+  facing: [0, 1],
+  collision_mode: "none",
+};
+
+// ── Anomalies in the arrival bay ────────────────────────────────────────────
+// Both sit in the spawn bay (x -2..3, z 12..15) so the transform contract can
+// be seen immediately rather than hunted for.
+//
+// The chain runs the full width of the bay along its north row. Six desks,
+// each 84% the size of the last, yawed 7° farther, tilted 4° farther, and sunk
+// another 2.8cm into the carpet, imply a corridor collapsing into itself. Only
+// the first desk collides.
+const RECURSIVE_DESK_CHAIN: ObjectPlacementData[] = buildRecursiveChainPlacements({
+  idPrefix: "qa_backrooms_desk_chain",
+  objectId: BACKROOMS_DESK_OBJECT_ID,
+  originCell: [-2, 12],
+  step: [1, 0],
+  facing: [0, 1],
+  count: 6,
+  scaleFalloff: 0.84,
+  rotationStepDegrees: 7,
+  tiltStepDegrees: 4,
+  sinkStep: 0.028,
+});
+
+// [4, 15] is solid divider wall — the three-cell opening in that divider sits
+// at z 12..14 — so the cabinet has real geometry to sink into rather than a
+// surface to z-fight against. It stands in walkable [3, 15] and never collides.
+const WALL_CLIPPED_CABINET: ObjectPlacementData = buildWallClippedPlacement({
+  id: BACKROOMS_LEVEL_ZERO_CLIPPED_CABINET_PLACEMENT_ID,
+  objectId: BACKROOMS_FILING_CABINET_OBJECT_ID,
+  cell: [3, 15],
+  towardWall: [1, 0],
+  // 55% of a cell makes the impossibility unmistakable while leaving the
+  // drawers and enough cabinet body visible to read at third-person distance.
+  penetrationRatio: BACKROOMS_LEVEL_ZERO_CABINET_PENETRATION_RATIO,
+});
+
+// Export the complete authored Phase 2 placement slice so persisted bundled
+// QA maps can receive the kit without replacing any unrelated map edits.
+export const BACKROOMS_LEVEL_ZERO_PHASE2_PLACEMENTS: ObjectPlacementData[] = [
+  PHASE2_CABINET_QA_LIGHT,
+  ...RECURSIVE_DESK_CHAIN,
+  WALL_CLIPPED_CABINET,
+];
+
+export const BACKROOMS_LEVEL_ZERO_MAP: MapData = {
   id: BACKROOMS_LEVEL_ZERO_MAP_ID,
   display_name: "Backrooms — Level Zero",
   width: MAP_MAX - MAP_MIN + 1,
@@ -225,17 +287,18 @@ const backroomsMap: MapData = {
   spawns: [
     {
       id: BACKROOMS_LEVEL_ZERO_SPAWN_ID,
-      cell: [0, 14],
+      cell: [0, 13],
       facing: [1, 0],
     },
   ],
   cells: backroomsCells,
   fine_cell_overrides: BACKROOMS_LEVEL_ZERO_MICRO_WALL_OVERRIDES,
   props: [],
-  custom_object_placements: ceilingLights,
-  entity_placements: [
-    entityPlacement(BACKROOMS_PARASITE_ENTITY_ID, [7, 13], [-1, 0]),
+  custom_object_placements: [
+    ...ceilingLights,
+    ...BACKROOMS_LEVEL_ZERO_PHASE2_PLACEMENTS,
   ],
+  entity_placements: [],
   item_placements: [],
   container_placements: [],
   regions: [],
@@ -245,6 +308,7 @@ const backroomsMap: MapData = {
 };
 
 export const backroomsWing: QaWing = {
-  maps: [backroomsMap],
+  maps: [BACKROOMS_LEVEL_ZERO_MAP],
   entities: [BACKROOMS_PARASITE_ENTITY],
+  objects: BACKROOMS_ANOMALY_OBJECTS,
 };

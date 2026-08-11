@@ -42,6 +42,7 @@ import {
   BACKROOMS_PARASITE_MODEL,
   BACKROOMS_PARASITE_MODEL_OBJECT_ID,
 } from "../data/backroomsEntityAssets";
+import { BACKROOMS_ANOMALY_OBJECTS } from "../data/backroomsAnomalyAssets";
 import {
   RILEY_ARRIVAL_DIALOGUE,
   RILEY_BUNDLED_ASSET_REVISION,
@@ -58,7 +59,15 @@ import {
   RILEY_SOFA_SEATED_LOCAL_FACING,
 } from "../data/rileyAssets";
 import { withBundledPlayerGuitarContent } from "../data/playerModelAssets";
-import { BACKROOMS_LEVEL_ZERO_MICRO_WALL_OVERRIDES } from "../data/qaSuite/backroomsWing";
+import {
+  BACKROOMS_LEVEL_ZERO_CABINET_PENETRATION_RATIO,
+  BACKROOMS_LEVEL_ZERO_CLIPPED_CABINET_PLACEMENT_ID,
+  BACKROOMS_LEVEL_ZERO_MAP,
+  BACKROOMS_LEVEL_ZERO_MICRO_WALL_OVERRIDES,
+  BACKROOMS_LEVEL_ZERO_PHASE2_PLACEMENTS,
+  BACKROOMS_LEVEL_ZERO_SPAWN_ID,
+} from "../data/qaSuite/backroomsWing";
+import { installGeneratedBackroomsPhase6Preview } from "../data/qaSuite/generatedBackroomsPhase6Wing";
 import { QA_START_MAP_ID, QA_START_SPAWN_ID } from "../data/qaSuite/shared";
 import {
   LONELY_STREET_DOORWAY_CELL,
@@ -436,6 +445,15 @@ export const createDefaultEnginePackage = (): GamePackage => {
 };
 
 const BACKROOMS_LEVEL_ZERO_MAP_ID = "qa_backrooms_level_zero";
+const BUNDLED_BACKROOMS_LEVEL_ZERO_SPAWN =
+  BACKROOMS_LEVEL_ZERO_MAP.spawns.find(
+    (spawn) => spawn.id === BACKROOMS_LEVEL_ZERO_SPAWN_ID,
+  );
+const BUNDLED_BACKROOMS_LEVEL_ZERO_CLIPPED_CABINET =
+  BACKROOMS_LEVEL_ZERO_PHASE2_PLACEMENTS.find(
+    (placement) =>
+      placement.id === BACKROOMS_LEVEL_ZERO_CLIPPED_CABINET_PLACEMENT_ID,
+  );
 const LONELY_STREET_OBJECT_ID_SET = new Set<string>(LONELY_STREET_OBJECT_IDS);
 const LONELY_STREET_BASEMENT_OBJECT_ID_SET = new Set<string>(
   LONELY_STREET_BASEMENT_OBJECT_IDS,
@@ -1600,6 +1618,59 @@ const isLegacyBundledBackroomsQaRoute = (map: MapData) =>
     map.cells.some(
       (cell) => cell.z === 16 && Math.abs(cell.x) <= 1 && cell.walkable,
     ));
+const isLegacyBundledBackroomsParasitePlacement = (
+  placement: MapData["entity_placements"][number],
+) =>
+  placement.entity_id === BACKROOMS_PARASITE_ENTITY_ID &&
+  placement.cell[0] === 7 &&
+  placement.cell[1] === 13 &&
+  placement.facing[0] === -1 &&
+  placement.facing[1] === 0;
+const isLegacyBundledBackroomsSpawn = (
+  spawn: MapData["spawns"][number],
+) =>
+  spawn.id === BACKROOMS_LEVEL_ZERO_SPAWN_ID &&
+  spawn.cell[0] === 0 &&
+  spawn.cell[1] === 14 &&
+  spawn.facing[0] === 1 &&
+  spawn.facing[1] === 0;
+const isSubtleBundledBackroomsCabinetPlacement = (
+  placement: MapData["custom_object_placements"][number],
+) =>
+  Boolean(
+    BUNDLED_BACKROOMS_LEVEL_ZERO_CLIPPED_CABINET &&
+      placement.id === BACKROOMS_LEVEL_ZERO_CLIPPED_CABINET_PLACEMENT_ID &&
+      placement.object_id ===
+        BUNDLED_BACKROOMS_LEVEL_ZERO_CLIPPED_CABINET.object_id &&
+      placement.cell[0] ===
+        BUNDLED_BACKROOMS_LEVEL_ZERO_CLIPPED_CABINET.cell[0] &&
+      placement.cell[1] ===
+        BUNDLED_BACKROOMS_LEVEL_ZERO_CLIPPED_CABINET.cell[1] &&
+      placement.facing[0] ===
+        BUNDLED_BACKROOMS_LEVEL_ZERO_CLIPPED_CABINET.facing[0] &&
+      placement.facing[1] ===
+        BUNDLED_BACKROOMS_LEVEL_ZERO_CLIPPED_CABINET.facing[1] &&
+      Math.abs(Number(placement.plan_offset?.[0]) - 0.4) < 1e-9 &&
+      Math.abs(Number(placement.plan_offset?.[1])) < 1e-9 &&
+      placement.collision_mode === "none" &&
+      BACKROOMS_LEVEL_ZERO_CABINET_PENETRATION_RATIO > 0.4,
+  );
+const upgradeBundledBackroomsSpawn = (
+  spawns: MapData["spawns"],
+): MapData["spawns"] => {
+  if (!BUNDLED_BACKROOMS_LEVEL_ZERO_SPAWN) return spawns;
+  const hasNamedSpawn = spawns.some(
+    (spawn) => spawn.id === BACKROOMS_LEVEL_ZERO_SPAWN_ID,
+  );
+  if (!hasNamedSpawn) {
+    return [...spawns, structuredClone(BUNDLED_BACKROOMS_LEVEL_ZERO_SPAWN)];
+  }
+  return spawns.map((spawn) =>
+    isLegacyBundledBackroomsSpawn(spawn)
+      ? structuredClone(BUNDLED_BACKROOMS_LEVEL_ZERO_SPAWN)
+      : spawn,
+  );
+};
 const isLegacyBundledLonelyStreetTreeFacing = (
   placement: MapData["custom_object_placements"][number],
 ) => {
@@ -1760,7 +1831,7 @@ export const refreshBundledEnginePackage = (pkg: GamePackage): GamePackage => {
     return packageWithPlayerContent;
   }
 
-  pkg = packageWithPlayerContent;
+  pkg = installGeneratedBackroomsPhase6Preview(packageWithPlayerContent);
 
   const hasModel = pkg.object_library.some(
     (object) => object.id === BACKROOMS_PARASITE_MODEL_OBJECT_ID,
@@ -1883,9 +1954,30 @@ export const refreshBundledEnginePackage = (pkg: GamePackage): GamePackage => {
       currentHearing?.barrier_response === expectedHearing?.barrier_response
     );
   });
-  const hasPlacement = pkg.maps[mapIndex].entity_placements.some(
-    (placement) => placement.entity_id === BACKROOMS_PARASITE_ENTITY_ID,
+  const bundledBackroomsMap = pkg.maps[mapIndex];
+  const existingBackroomsPlacementIds = new Set(
+    bundledBackroomsMap.custom_object_placements.map(
+      (placement) => placement.id,
+    ),
   );
+  const missingBackroomsPhase2Placements =
+    BACKROOMS_LEVEL_ZERO_PHASE2_PLACEMENTS.filter(
+      (placement) => !existingBackroomsPlacementIds.has(placement.id),
+    );
+  const hasLegacyBackroomsParasitePlacement =
+    bundledBackroomsMap.entity_placements.some(
+      isLegacyBundledBackroomsParasitePlacement,
+    );
+  const hasSubtleBackroomsCabinetPlacement =
+    bundledBackroomsMap.custom_object_placements.some(
+      isSubtleBundledBackroomsCabinetPlacement,
+    );
+  const hasNamedBackroomsSpawn = bundledBackroomsMap.spawns.some(
+    (spawn) => spawn.id === BACKROOMS_LEVEL_ZERO_SPAWN_ID,
+  );
+  const needsBackroomsSpawnUpgrade =
+    !hasNamedBackroomsSpawn ||
+    bundledBackroomsMap.spawns.some(isLegacyBundledBackroomsSpawn);
   const hasBackroomsRealtimeMode =
     pkg.maps[mapIndex].combat_mode === "horror_realtime";
   const hasBackroomsMicroWalls =
@@ -2030,6 +2122,9 @@ export const refreshBundledEnginePackage = (pkg: GamePackage): GamePackage => {
   const existingObjectIds = new Set(
     pkg.object_library.map((object) => object.id),
   );
+  const missingBackroomsAnomalyObjects = BACKROOMS_ANOMALY_OBJECTS.filter(
+    (object) => !existingObjectIds.has(object.id),
+  );
   const missingLonelyStreetObjects = BUNDLED_LONELY_STREET_OBJECTS.filter(
     (object) =>
       !existingObjectIds.has(object.id) &&
@@ -2049,7 +2144,11 @@ export const refreshBundledEnginePackage = (pkg: GamePackage): GamePackage => {
     !hasLegacyRileyPresentation &&
     !needsLonelyStreetStartMigration &&
     !needsBundledStoryMusic &&
-    hasPlacement &&
+    !hasLegacyBackroomsParasitePlacement &&
+    !hasSubtleBackroomsCabinetPlacement &&
+    !needsBackroomsSpawnUpgrade &&
+    missingBackroomsPhase2Placements.length === 0 &&
+    missingBackroomsAnomalyObjects.length === 0 &&
     parasiteHasCurrentHunterProfile &&
     hasBackroomsRealtimeMode &&
     hasBackroomsMicroWalls &&
@@ -2232,7 +2331,7 @@ export const refreshBundledEnginePackage = (pkg: GamePackage): GamePackage => {
           arrivalTriggerUpgradedMap,
         ),
       );
-    const parasiteUpgradedMap =
+    const backroomsUpgradedMap =
       index === mapIndex
         ? {
             ...interiorPresentationUpgradedMap,
@@ -2240,25 +2339,40 @@ export const refreshBundledEnginePackage = (pkg: GamePackage): GamePackage => {
             fine_cell_overrides: hasBackroomsMicroWalls
               ? interiorPresentationUpgradedMap.fine_cell_overrides
               : structuredClone(BACKROOMS_LEVEL_ZERO_MICRO_WALL_OVERRIDES),
-            entity_placements: hasPlacement
-              ? interiorPresentationUpgradedMap.entity_placements
-              : [
-                  ...interiorPresentationUpgradedMap.entity_placements,
-                  {
-                    entity_id: BACKROOMS_PARASITE_ENTITY_ID,
-                    cell: [7, 13] as [number, number],
-                    facing: [-1, 0] as [number, number],
-                  },
-                ],
+            spawns: upgradeBundledBackroomsSpawn(
+              interiorPresentationUpgradedMap.spawns,
+            ),
+            custom_object_placements: [
+              ...interiorPresentationUpgradedMap.custom_object_placements.map(
+                (placement) =>
+                  isSubtleBundledBackroomsCabinetPlacement(placement) &&
+                  BUNDLED_BACKROOMS_LEVEL_ZERO_CLIPPED_CABINET
+                    ? structuredClone(
+                        BUNDLED_BACKROOMS_LEVEL_ZERO_CLIPPED_CABINET,
+                      )
+                    : placement,
+              ),
+              ...missingBackroomsPhase2Placements.map((placement) =>
+                structuredClone(placement),
+              ),
+            ],
+            // Phase 2 is an encounter-free composition proof. Remove only the
+            // exact old bundled hunter anchor; any differently authored
+            // Parasite placement remains the user's content.
+            entity_placements:
+              interiorPresentationUpgradedMap.entity_placements.filter(
+                (placement) =>
+                  !isLegacyBundledBackroomsParasitePlacement(placement),
+              ),
           }
         : interiorPresentationUpgradedMap;
     const basementLightingUpgradedMap =
-      isLegacyBundledLonelyStreetBasementLighting(parasiteUpgradedMap)
+      isLegacyBundledLonelyStreetBasementLighting(backroomsUpgradedMap)
         ? {
-            ...parasiteUpgradedMap,
+            ...backroomsUpgradedMap,
             ambient_light: LONELY_STREET_BASEMENT_MAP.ambient_light,
           }
-        : parasiteUpgradedMap;
+        : backroomsUpgradedMap;
     const basementPresentationFillUpgradedMap =
       isLegacyBundledLonelyStreetBasementPresentationFill(
         basementLightingUpgradedMap,
@@ -2555,6 +2669,9 @@ export const refreshBundledEnginePackage = (pkg: GamePackage): GamePackage => {
     },
     object_library: [
       ...objectLibraryWithStreetFix,
+      ...missingBackroomsAnomalyObjects.map((object) =>
+        structuredClone(object),
+      ),
       ...missingLonelyStreetObjects.map((object) => structuredClone(object)),
     ],
     entities: entitiesWithMoonGod,

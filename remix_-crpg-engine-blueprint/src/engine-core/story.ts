@@ -275,6 +275,32 @@ export const findEligibleSwitchChangeTriggers = (
   });
 };
 
+/**
+ * Region transitions are movement edges, not a polling effect. The caller
+ * supplies the already-indexed source/destination region IDs, so ordinary
+ * movement with no region change performs no trigger scan.
+ */
+export const findEligibleRegionTransitionTriggers = (
+  triggers: TriggerData[] | undefined,
+  beforeRegionId: string | undefined,
+  afterRegionId: string | undefined,
+  ctx: ConditionContext,
+): TriggerData[] => {
+  if (beforeRegionId === afterRegionId) return [];
+  return (triggers || []).filter((trigger) => {
+    const matchesEdge =
+      (trigger.type === "region_exit" &&
+        Boolean(beforeRegionId) &&
+        trigger.region_id === beforeRegionId) ||
+      (trigger.type === "region_enter" &&
+        Boolean(afterRegionId) &&
+        trigger.region_id === afterRegionId);
+    return Boolean(matchesEdge) &&
+      !(trigger.once && ctx.flags[`trig_run_${trigger.id}`]) &&
+      isTriggerEligible(trigger, ctx);
+  });
+};
+
 export const isMapExitEligible = (
   exit: MapExitData,
   ctx: ConditionContext,

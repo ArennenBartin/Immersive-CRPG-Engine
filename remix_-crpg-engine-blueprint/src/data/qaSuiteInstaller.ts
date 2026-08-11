@@ -7,7 +7,10 @@ import {
   type MigrationWarning,
   type PackageMigrationResult,
 } from "../store/packageMigration";
-import { withTestingMapSuite } from "./testingMapSuite";
+import {
+  TEST_SUITE_MAP_IDS,
+  withTestingMapSuite,
+} from "./testingMapSuite";
 import { restoreStandardDialogueTrees } from "../engine-core/keywordDialogue";
 import { withQaRoomCeilingArchitecture } from "./qaSuite/shared";
 
@@ -110,6 +113,13 @@ export const mergeQaSuiteIntoPackage = (source: GamePackage): PackageMigrationRe
     { label: "simulation material", current: source.simulation_materials, qa: qa.simulation_materials },
     { label: "simulation process", current: source.simulation_processes, qa: qa.simulation_processes },
     { label: "simulation workstation", current: source.simulation_workstations, qa: qa.simulation_workstations },
+    { label: "Backrooms recipe", current: source.backrooms_recipes, qa: qa.backrooms_recipes },
+    { label: "Backrooms level profile", current: source.backrooms_level_profiles, qa: qa.backrooms_level_profiles },
+    { label: "Backrooms motif", current: source.backrooms_motifs, qa: qa.backrooms_motifs },
+    { label: "Backrooms event profile", current: source.backrooms_event_profiles, qa: qa.backrooms_event_profiles },
+    { label: "Backrooms anomaly profile", current: source.backrooms_anomaly_profiles, qa: qa.backrooms_anomaly_profiles },
+    { label: "Backrooms transition rule", current: source.backrooms_transition_rules, qa: qa.backrooms_transition_rules },
+    { label: "transition presentation profile", current: source.transition_presentation_profiles, qa: qa.transition_presentation_profiles },
   ];
   const warnings: MigrationWarning[] = collections.flatMap(({ label, current, qa: additions }) => {
     const collisions = differingCollisionIds(current, additions);
@@ -125,7 +135,7 @@ export const mergeQaSuiteIntoPackage = (source: GamePackage): PackageMigrationRe
     .filter((map) => !source.maps.some((existing) => existing.id === map.id))
     .map((map) => map.id);
   const sourceMapsWithQaArchitecture = source.maps.map((map) =>
-    map.id.startsWith("qa_")
+    TEST_SUITE_MAP_IDS.includes(map.id)
       ? withQaRoomCeilingArchitecture(map)
       : map,
   );
@@ -141,7 +151,24 @@ export const mergeQaSuiteIntoPackage = (source: GamePackage): PackageMigrationRe
   const candidate: GamePackage = {
     ...source,
     settings: {
+      ...qa.settings,
       ...source.settings,
+      music_tracks: {
+        ...((qa.settings.music_tracks ?? {}) as Record<string, string>),
+        ...((source.settings.music_tracks ?? {}) as Record<string, string>),
+      },
+      sound_effects: {
+        ...((qa.settings.sound_effects ?? {}) as Record<string, string>),
+        ...((source.settings.sound_effects ?? {}) as Record<string, string>),
+      },
+      map_music: {
+        ...((qa.settings.map_music ?? {}) as Record<string, string>),
+        ...((source.settings.map_music ?? {}) as Record<string, string>),
+      },
+      backrooms_ambience_profiles: {
+        ...((qa.settings.backrooms_ambience_profiles ?? {}) as Record<string, unknown>),
+        ...((source.settings.backrooms_ambience_profiles ?? {}) as Record<string, unknown>),
+      },
       initial_known_skills: initialSkills,
     },
     maps: appendMissingById(sourceMapsWithQaArchitecture, qa.maps),
@@ -172,6 +199,28 @@ export const mergeQaSuiteIntoPackage = (source: GamePackage): PackageMigrationRe
     simulation_materials: appendMissingById(source.simulation_materials, qa.simulation_materials),
     simulation_processes: appendMissingById(source.simulation_processes, qa.simulation_processes),
     simulation_workstations: appendMissingById(source.simulation_workstations, qa.simulation_workstations),
+    backrooms_recipes: appendMissingById(source.backrooms_recipes, qa.backrooms_recipes),
+    backrooms_level_profiles: appendMissingById(
+      source.backrooms_level_profiles,
+      qa.backrooms_level_profiles,
+    ),
+    backrooms_motifs: appendMissingById(source.backrooms_motifs, qa.backrooms_motifs),
+    backrooms_event_profiles: appendMissingById(
+      source.backrooms_event_profiles,
+      qa.backrooms_event_profiles,
+    ),
+    backrooms_anomaly_profiles: appendMissingById(
+      source.backrooms_anomaly_profiles,
+      qa.backrooms_anomaly_profiles,
+    ),
+    backrooms_transition_rules: appendMissingById(
+      source.backrooms_transition_rules,
+      qa.backrooms_transition_rules,
+    ),
+    transition_presentation_profiles: appendMissingById(
+      source.transition_presentation_profiles,
+      qa.transition_presentation_profiles,
+    ),
   };
 
   return finalizePackageMigration(source, candidate, {

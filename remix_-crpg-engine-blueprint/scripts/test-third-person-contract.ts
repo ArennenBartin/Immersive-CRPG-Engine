@@ -26,6 +26,7 @@ import {
   resolveLiveHeldThirdPersonIntent,
   resolveThirdPersonCameraBodyDistance,
   resolveThirdPersonCameraSubject,
+  resolveThirdPersonPlayerMaterialFadeUpdate,
   resolveThirdPersonPlayerCameraOpacity,
   rotateThirdPersonFacing45,
   thirdPersonStepVector,
@@ -81,14 +82,25 @@ import {
   IMMERSIVE_EXTERIOR_FORWARD_LATERAL_SCALE,
   IMMERSIVE_STREAM_SECTOR_SIZE,
   IMMERSIVE_WALL_HEIGHT_SCALE,
+  buildAuthoredArchitectureBoundaryFillers,
   isWithinImmersiveDirectionalWindow,
   isWithinDistantArchitectureBand,
   isImmersiveCeilingView,
   resolveImmersiveDirectionalWindowOuterRadius,
+  resolveDerivedCeilingOpeningSignature,
   resolveImmersiveStreamSector,
   resolveImmersiveWallHeight,
   resolveRuntimeObjectPlacementYOffset,
+  selectDistantArchitectureCells,
 } from "../src/utils/immersiveArchitecture";
+import {
+  BACKROOMS_LEVEL_ZERO_DISTANT_ARCHITECTURE_COLORS,
+  BACKROOMS_LEVEL_ZERO_DETAIL_WALL_EMISSION,
+  BACKROOMS_LEVEL_ZERO_DETAIL_SURFACE_EMISSION,
+  resolveBackroomsLevelZeroDetailWallEmission,
+  resolveBackroomsLevelZeroDetailSurfaceEmission,
+  resolveDistantArchitectureMaterialPolicy,
+} from "../src/utils/lightRendering";
 import {
   resolveImmersiveVisibilityPresentationPolicy,
 } from "../src/utils/fogOfWar";
@@ -96,8 +108,10 @@ import { renderedTerrainPlaneY } from "../src/utils/renderSpace";
 import {
   advanceFreeActorToward,
   BACKROOMS_FREE_COLLISION_RADIUS_FINE,
+  FREE_PLAYER_DURABLE_POSE_INTERVAL_MS,
   normalizeFreeFacing,
   quantizeFreePlayerPosition,
+  resolveEntityFreeExplorationSettlement,
   resolveFacedInteractionProbe,
   resolveFreeActorStart,
   resolveFreeInteractionPose,
@@ -106,7 +120,13 @@ import {
   resolveFreePlayerMovement,
   resolveFreePlayerStart,
   rotateFreeFacing,
+  shouldCommitFreePlayerDurablePose,
 } from "../src/utils/freePlayerMovement";
+import {
+  THIRD_PERSON_STREAM_DIRECTION_BUCKET_RADIANS,
+  resolveThirdPersonCameraCollisionFraction,
+  resolveThirdPersonCameraSweep,
+} from "../src/components/FixedThirdPersonCameraRig";
 
 const EPSILON = 0.000001;
 
@@ -398,6 +418,95 @@ assert.ok(
   "an ordinary A/D tap commits one deliberate 45-degree turn",
 );
 
+// Camera collision runs several blocker sweeps every rendered movement frame.
+// Pin the scalar hot path to the same hit fractions/normals as the original
+// slab implementation, including start-inside behavior.
+{
+  const blocker = {
+    minX: -0.5,
+    maxX: 0.5,
+    minY: 0,
+    maxY: 2,
+    minZ: -0.5,
+    maxZ: 0.5,
+  };
+  const xHit = resolveThirdPersonCameraSweep({
+    start: [-2, 1, 0],
+    desiredEye: [2, 1, 0],
+    blockers: [blocker],
+    padding: 0,
+  });
+  assert.equal(xHit.hit, true, "camera sweep detects an X-axis wall hit");
+  assertNear(xHit.fraction, 0.375, "X-axis wall hit fraction");
+  assertVecNear(xHit.normal, [-1, 0, 0], "X-axis wall hit normal");
+
+  const zHit = resolveThirdPersonCameraSweep({
+    start: [0, 1, -2],
+    desiredEye: [0, 1, 2],
+    blockers: [blocker],
+    padding: 0,
+  });
+  assertNear(zHit.fraction, 0.375, "Z-axis wall hit fraction");
+  assertVecNear(zHit.normal, [0, 0, -1], "Z-axis wall hit normal");
+
+  const yHit = resolveThirdPersonCameraSweep({
+    start: [0, -2, 0],
+    desiredEye: [0, 3, 0],
+    blockers: [blocker],
+    padding: 0,
+  });
+  assertNear(yHit.fraction, 0.4, "Y-axis wall hit fraction");
+  assertVecNear(yHit.normal, [0, -1, 0], "Y-axis wall hit normal");
+
+  assert.equal(
+    resolveThirdPersonCameraCollisionFraction(
+      [-2, 3, 0],
+      [2, 3, 0],
+      [blocker],
+      0,
+    ),
+    1,
+    "a sweep above the blocker remains unobstructed",
+  );
+
+  const outward = resolveThirdPersonCameraSweep({
+    start: [0.49, 1, 0],
+    desiredEye: [2, 1, 0],
+    blockers: [blocker],
+    padding: 0,
+  });
+  assert.equal(
+    outward.hit,
+    false,
+    "a camera already inside a blocker can escape along its nearest face",
+  );
+
+  const inward = resolveThirdPersonCameraSweep({
+    start: [0.49, 1, 0],
+    desiredEye: [-2, 1, 0],
+    blockers: [blocker],
+    padding: 0,
+  });
+  assert.equal(inward.hit, true, "inward motion from inside remains blocked");
+  assertNear(inward.fraction, 0, "inside collision starts at fraction zero");
+  assertVecNear(inward.normal, [1, 0, 0], "nearest exit normal is stable");
+
+  const nearestHit = resolveThirdPersonCameraSweep({
+    start: [-3, 1, 0],
+    desiredEye: [3, 1, 0],
+    blockers: [
+      blocker,
+      { ...blocker, minX: 1.5, maxX: 2.5 },
+    ],
+    padding: 0,
+  });
+  assertNear(
+    nearestHit.fraction,
+    2.5 / 6,
+    "multiple blockers select the earliest collision",
+  );
+}
+
 // ── Material fade, structural cells, and immersive architecture ───────────
 assert.equal(
   resolveThirdPersonPlayerCameraOpacity(
@@ -423,6 +532,26 @@ assertNear(
   "the emergency fade eases smoothly",
 );
 assert.equal(resolveThirdPersonPlayerCameraOpacity(Number.NaN), 1);
+assert.equal(
+  resolveThirdPersonPlayerMaterialFadeUpdate(1, 1, true),
+  "skip",
+  "a fully visible restored model avoids the per-frame material traversal",
+);
+assert.equal(
+  resolveThirdPersonPlayerMaterialFadeUpdate(0.999, 1, true),
+  "apply_fade",
+  "an active fade keeps visiting the model so asynchronously mounted meshes are caught",
+);
+assert.equal(
+  resolveThirdPersonPlayerMaterialFadeUpdate(1, 0.9, false),
+  "apply_fade",
+  "the return to full opacity keeps damping until it is visually settled",
+);
+assert.equal(
+  resolveThirdPersonPlayerMaterialFadeUpdate(1, 0.9995, false),
+  "restore_base",
+  "a settled fade restores authored material state exactly once",
+);
 assert.equal(
   resolveThirdPersonCameraBodyDistance([0, 1.2, 2], [0, 0, 0], 1.8),
   2,
@@ -453,7 +582,124 @@ assert.equal(
   false,
   "flat pits, liquids, void, and hazards never become invisible camera walls",
 );
+{
+  const openingObjects = new Map<string, any>([
+    [
+      "test_stairs",
+      {
+        id: "test_stairs",
+        tags: ["stairs", "structure"],
+        collision: {
+          profile: "block",
+          fine_footprint: [
+            [0, 0],
+            [1, 0],
+          ],
+        },
+      },
+    ],
+    ["test_crate", { id: "test_crate", tags: [], collision: { profile: "block" } }],
+  ]);
+  assert.equal(
+    resolveDerivedCeilingOpeningSignature(
+      [{ object_id: "test_crate", cell: [0, 0], facing: [0, 1] }],
+      openingObjects,
+    ),
+    resolveDerivedCeilingOpeningSignature(
+      [{ object_id: "test_crate", cell: [20, 20], facing: [1, 0] }],
+      openingObjects,
+    ),
+    "unrelated recreated placement arrays keep the ceiling topology key stable",
+  );
+  const stairsAtOrigin = resolveDerivedCeilingOpeningSignature(
+    [{ object_id: "test_stairs", cell: [3, 4], facing: [0, 1] }],
+    openingObjects,
+  );
+  assert.equal(
+    stairsAtOrigin,
+    "3:4|4:4",
+    "the ceiling topology key encodes the exact staircase footprint",
+  );
+  assert.notEqual(
+    stairsAtOrigin,
+    resolveDerivedCeilingOpeningSignature(
+      [{ object_id: "test_stairs", cell: [4, 4], facing: [0, 1] }],
+      openingObjects,
+    ),
+    "moving a staircase invalidates the ceiling topology key",
+  );
+}
 assert.equal(IMMERSIVE_WALL_HEIGHT_SCALE, 1.5);
+{
+  const darkFloor = resolveBackroomsLevelZeroDetailSurfaceEmission(
+    "floor",
+    "#000000",
+    0,
+  );
+  assert.deepEqual(
+    darkFloor,
+    BACKROOMS_LEVEL_ZERO_DETAIL_SURFACE_EMISSION.floor,
+    "Level Zero detailed carpet has a warm material floor between fixtures",
+  );
+  const darkCeiling = resolveBackroomsLevelZeroDetailSurfaceEmission(
+    "ceiling",
+    "#000000",
+    Number.NaN,
+  );
+  assert.deepEqual(
+    darkCeiling,
+    BACKROOMS_LEVEL_ZERO_DETAIL_SURFACE_EMISSION.ceiling,
+    "Level Zero detailed ceiling cannot grade to a pure-black overhead void",
+  );
+  assert.deepEqual(
+    resolveBackroomsLevelZeroDetailSurfaceEmission("floor", "#cc44ff", 0.8),
+    { emissive: "#cc44ff", emissiveIntensity: 0.8 },
+    "a stronger authored Level Zero surface glow remains authoritative",
+  );
+  assert.ok(
+    BACKROOMS_LEVEL_ZERO_DETAIL_SURFACE_EMISSION.floor.emissiveIntensity <
+      BACKROOMS_LEVEL_ZERO_DETAIL_WALL_EMISSION.wallpaper.emissiveIntensity &&
+      BACKROOMS_LEVEL_ZERO_DETAIL_SURFACE_EMISSION.ceiling.emissiveIntensity <
+        BACKROOMS_LEVEL_ZERO_DETAIL_SURFACE_EMISSION.floor.emissiveIntensity,
+    "the readability floor stays below the wall fill and keeps the ceiling subdued",
+  );
+  assert.deepEqual(
+    resolveBackroomsLevelZeroDetailWallEmission("wallpaper", "#000000", 0),
+    BACKROOMS_LEVEL_ZERO_DETAIL_WALL_EMISSION.wallpaper,
+    "detailed Level Zero wallpaper cannot render as a pure-black plane",
+  );
+  assert.deepEqual(
+    resolveBackroomsLevelZeroDetailWallEmission("trim", "#000000", 0.1),
+    BACKROOMS_LEVEL_ZERO_DETAIL_WALL_EMISSION.trim,
+    "detailed Level Zero trim receives a subdued warm readability floor",
+  );
+  assert.deepEqual(
+    resolveBackroomsLevelZeroDetailWallEmission("wallpaper", "#cc44ff", 1.2),
+    { emissive: "#cc44ff", emissiveIntensity: 1.2 },
+    "stronger authored wallpaper emission remains authoritative",
+  );
+  for (const surface of ["floor", "wall", "ceiling"] as const) {
+    assert.deepEqual(
+      resolveDistantArchitectureMaterialPolicy(surface, true),
+      {
+        color: BACKROOMS_LEVEL_ZERO_DISTANT_ARCHITECTURE_COLORS[surface],
+        vertexColors: false,
+        toneMapped: false,
+      },
+      `Level Zero ${surface} far proxies use a stable warm uniform material`,
+    );
+    assert.notEqual(
+      BACKROOMS_LEVEL_ZERO_DISTANT_ARCHITECTURE_COLORS[surface],
+      "#000000",
+      `Level Zero ${surface} far proxies cannot resolve to a black material`,
+    );
+  }
+  assert.equal(
+    resolveDistantArchitectureMaterialPolicy("wall", false).vertexColors,
+    true,
+    "non-Level-Zero far architecture preserves authored instance colors",
+  );
+}
 assertNear(resolveImmersiveWallHeight(1.9, true), 2.85, "immersive wall height");
 assertNear(
   resolveRuntimeObjectPlacementYOffset({
@@ -495,6 +741,101 @@ assert.ok(
     }),
   "immersive far architecture fills only the cheap field beyond full detail",
 );
+{
+  // A large runtime map keeps only nearby fine sectors. The far-field pass
+  // must select from the complete authored macro topology so camera-facing
+  // architecture beyond the current sector survives without expanding it for
+  // simulation.
+  const authoredMacroCells = Array.from({ length: 81 }, (_, index) => ({
+    x: index,
+    z: 0,
+  }));
+  const runtimeSectorCells = authoredMacroCells.filter((cell) => cell.x <= 31);
+  const selection = (
+    cells: typeof authoredMacroCells,
+    forward: [number, number],
+    detailedCellKeys?: ReadonlySet<string>,
+  ) =>
+    selectDistantArchitectureCells({
+      cells,
+      center: [24, 0],
+      detailRadius: 8,
+      architectureRadius: 16,
+      forward,
+      detailForwardBonus: 12,
+      architectureForwardBonus: 28,
+      detailedCellKeys,
+    });
+  const authoredFarField = selection(authoredMacroCells, [1, 0]);
+  const truncatedFarField = selection(runtimeSectorCells, [1, 0]);
+  assert.ok(
+    authoredFarField.some((cell) => cell.x > 31),
+    "authored macro far field retains cells beyond the fine runtime sector",
+  );
+  assert.equal(
+    truncatedFarField.some((cell) => cell.x > 31),
+    false,
+    "the local simulation window alone cannot cover that distant sightline",
+  );
+  assert.ok(
+    authoredFarField.length > truncatedFarField.length,
+    "complete authored topology materially extends the camera-facing shell",
+  );
+  const actuallyDetailedKeys = new Set(
+    runtimeSectorCells.map((cell) => `${cell.x}:${cell.z}`),
+  );
+  const coverageAwareFarField = selection(
+    authoredMacroCells,
+    [1, 0],
+    actuallyDetailedKeys,
+  );
+  assert.ok(
+    coverageAwareFarField.some((cell) => cell.x === 32),
+    "authored LOD fills a missing coordinate inside the requested detail wedge",
+  );
+  assert.equal(
+    coverageAwareFarField.some((cell) => cell.x === 31),
+    false,
+    "authored LOD does not overdraw a coordinate with real detailed geometry",
+  );
+
+  for (const sectorEdge of [-1, 1]) {
+    const yaw = sectorEdge * IMMERSIVE_STREAM_SECTOR_SIZE;
+    const edgeField = selection(authoredMacroCells, [
+      Math.cos(yaw),
+      Math.sin(yaw),
+    ]);
+    assert.ok(
+      edgeField.some((cell) => cell.x === 58),
+      `authored far architecture covers stream-sector edge ${sectorEdge}`,
+    );
+  }
+
+  const boundaryFillers = buildAuthoredArchitectureBoundaryFillers([
+    { x: 0, z: 0, y: 0 },
+    { x: 1, z: 0, y: 0 },
+    { x: 2, z: 0, y: 0, active: false },
+  ]);
+  assert.equal(
+    boundaryFillers.length,
+    6,
+    "two joined authored cells require six unique render-only boundary fillers",
+  );
+  assert.equal(
+    boundaryFillers.some(
+      (filler) => filler.position[0] === 0 && filler.position[1] === 0,
+    ),
+    false,
+    "boundary fillers never replace a real playable cell",
+  );
+  assert.ok(
+    boundaryFillers.some(
+      (filler) => filler.position[0] === 2 && filler.position[1] === 0,
+    ),
+    "an inactive or absent neighbor receives a solid visual seal",
+  );
+
+}
 assertNear(
   renderedTerrainPlaneY({ x: 0, y: 0, z: 0 } as any),
   0.001,
@@ -1553,6 +1894,69 @@ assert.equal(THIRD_PERSON_WALL_EXIT_MS, 500);
 }
 
 // ── Backrooms continuous player locomotion ────────────────────────────────
+{
+  assertNear(
+    FREE_PLAYER_DURABLE_POSE_INTERVAL_MS,
+    1000 / 5,
+    "continuous pose safety checkpoints are sampled at 5 Hz",
+  );
+  assert.equal(
+    shouldCommitFreePlayerDurablePose({
+      dirty: true,
+      nowMs: FREE_PLAYER_DURABLE_POSE_INTERVAL_MS - 0.01,
+      lastCommitAtMs: 0,
+    }),
+    false,
+    "an in-between RAF pose does not churn the durable save",
+  );
+  assert.equal(
+    shouldCommitFreePlayerDurablePose({
+      dirty: true,
+      nowMs: 1,
+      lastCommitAtMs: 0,
+      force: true,
+    }),
+    true,
+    "input release flushes a dirty live pose immediately",
+  );
+  let sampledCommits = 0;
+  let lastCommitAtMs = 0;
+  for (let frame = 1; frame <= 60; frame += 1) {
+    const nowMs = (frame * 1000) / 60;
+    if (
+      shouldCommitFreePlayerDurablePose({
+        dirty: true,
+        nowMs,
+        lastCommitAtMs,
+      })
+    ) {
+      sampledCommits += 1;
+      lastCommitAtMs = nowMs;
+    }
+  }
+  assert.ok(
+    sampledCommits >= 4 && sampledCommits <= 5,
+    `one second of dirty RAF poses stays bounded to five safety checkpoints (received ${sampledCommits})`,
+  );
+  assert.deepEqual(
+    resolveEntityFreeExplorationSettlement({
+      energy: 1000 - Math.round(1000 / 3),
+      speed: 10,
+    }),
+    { energy: 1007, elapsedTicks: 34 },
+    "an entity-free fine step settles to the same energy and clock tick as the full scheduler",
+  );
+  assert.deepEqual(
+    resolveEntityFreeExplorationSettlement({ energy: 1000, speed: 10 }),
+    { energy: 1000, elapsedTicks: 0 },
+    "an already-ready player does not advance the entity-free clock",
+  );
+  assertNear(
+    THIRD_PERSON_STREAM_DIRECTION_BUCKET_RADIANS,
+    (12 * Math.PI) / 180,
+    "stream direction publishes in twelve-degree buckets",
+  );
+}
 {
   const arbitraryFacing = rotateFreeFacing([0, -1], 1, 1 / 3);
   assertNear(
